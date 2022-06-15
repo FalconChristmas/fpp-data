@@ -1,0 +1,52 @@
+[
+    {
+        "cape": "DPIPixels-24",
+        "eeproms": [
+            {
+                "version": "latest",
+                "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/DPIPixels-24-eeprom.bin",
+                "creator": "FPP"
+            }
+        ]
+    },
+    {
+        "cape": "PiHat",
+        "eeproms": [
+            {
+                "version": "latest",
+                "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/PiHat-eeprom.bin",
+                "creator": "FPP"
+            }
+        ]
+    },
+    {
+        "cape": "rPi-28D",
+        "eeproms": [
+            {
+                "version": "latest",
+                "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/rPi-28D-eeprom.bin",
+                "creator": "FPP"
+            }
+        ]
+    },
+    {
+        "cape": "rPi-MFC",
+        "eeproms": [
+            {
+                "version": "latest",
+                "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/rPi-MFC-eeprom.bin",
+                "creator": "FPP"
+            }
+        ]
+    },
+    {
+        "cape": "spixels",
+        "eeproms": [
+            {
+                "version": "latest",
+                "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/spixels-eeprom.bin",
+                "creator": "FPP"
+            }
+        ]
+    }
+]
