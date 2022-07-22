@@ -11,6 +11,39 @@
         ]
     },
     {
+        "cape": "M4-PI",
+        "eeproms": [
+            {
+                "description": "Latest EEPROM for the M4-Pi from microcyb.com",
+                "version": "latest",
+                "url": "https://microcyb.com/M4-cape-eeprom.bin",
+                "creator": "Microcyb.com"
+            }
+        ]
+    },
+    {
+        "cape": "M8-PI",
+        "eeproms": [
+            {
+                "description": "Latest EEPROM for the M8-Pi from microcyb.com",
+                "version": "latest",
+                "url": "https://microcyb.com/M8-cape-eeprom.bin",
+                "creator": "Microcyb.com"
+            }
+        ]
+    },
+    {
+        "cape": "M16-PI",
+        "eeproms": [
+            {
+                "description": "Latest EEPROM for the M16-Pi/M16-Diff from microcyb.com",
+                "version": "latest",
+                "url": "https://microcyb.com/M16-cape-eeprom.bin",
+                "creator": "Microcyb.com"
+            }
+        ]
+    },
+    {
         "cape": "PiHat",
         "eeproms": [
             {
