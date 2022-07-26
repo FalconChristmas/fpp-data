@@ -1,5 +1,49 @@
 [
     {
+        "cape": "BBB16v2",
+        "eeproms": [
+            {
+                "description": "EEPROM for the BBB16v2 or BBB16v2 SMD from Scott Hanson(scottnation.com)",
+                "version": "v2",
+                "url": "https://github.com/computergeek1507/PB_16/raw/master/BBB_16/BBB16v2-220513130004-eeprom.bin",
+                "creator": "scottnation.com"
+            }
+        ]
+    },
+    {
+        "cape": "BBB16",
+        "eeproms": [
+            {
+                "description": "EEPROM for the BBB16v1 from Scott Hanson(scottnation.com)",
+                "version": "v1",
+                "url": "https://github.com/computergeek1507/PB_16/raw/master/BBB_16/BBB16-220513130003-eeprom.bin",
+                "creator": "scottnation.com"
+            }
+        ]
+    },
+    {
+        "cape": "BBB16-Exp",
+        "eeproms": [
+            {
+                "description": "EEPROM for the BBB16-Expansion from Scott Hanson(scottnation.com)",
+                "version": "latest",
+                "url": "https://github.com/computergeek1507/PB_16/raw/master/BBB_16_Expansion/BBB16-Exp-220513130004-eeprom.bin",
+                "creator": "scottnation.com"
+            }
+        ]
+    },
+    {
+        "cape": "BBB16-Flex",
+        "eeproms": [
+            {
+                "description": "EEPROM for the BBB16-Flex from Scott Hanson(scottnation.com)",
+                "version": "latest",
+                "url": "https://github.com/computergeek1507/PB_16/raw/master/BBB_16_Flex/BBB16-Flex-220513130003-eeprom.bin",
+                "creator": "scottnation.com"
+            }
+        ]
+    },
+    {
         "cape": "DPIPixels-24",
         "eeproms": [
             {
@@ -40,6 +84,28 @@
                 "version": "latest",
                 "url": "https://microcyb.com/M16-cape-eeprom.bin",
                 "creator": "Microcyb.com"
+            }
+        ]
+    },
+    {
+        "cape": "PB16v2",
+        "eeproms": [
+            {
+                "description": "EEPROM for the PB16v2 SMD from Scott Hanson(scottnation.com)",
+                "version": "v2",
+                "url": "https://github.com/computergeek1507/PB_16/raw/master/PB_16v2_SMD/PB16v2-220513130003-eeprom.bin",
+                "creator": "scottnation.com"
+            }
+        ]
+    },
+    {
+        "cape": "PB16",
+        "eeproms": [
+            {
+                "description": "EEPROM for the PB16v1, PB16 Expansion, PB16 Mini, or PB16 Flex from Scott Hanson(scottnation.com)",
+                "version": "v1",
+                "url": "https://github.com/computergeek1507/PB_16/raw/master/PB_16v1/PB16-220513130003-eeprom.bin",
+                "creator": "scottnation.com"
             }
         ]
     },
