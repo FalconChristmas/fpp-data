@@ -1,0 +1,103 @@
+{
+    "name": "FPP Built-Ins",
+    "capes": {
+        "PiHat": {
+            "description": "Standard PiHat",
+            "versions": {
+                "Latest": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/PiHat-eeprom.bin"
+                }
+            },
+            "location": "virtual",
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        },
+        "DPIPixels-24": {
+            "description": "DPI Pixels output for 24 strings",
+            "versions": {
+                "Latest": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/DPIPixels-24-eeprom.bin"
+                }
+            },
+            "location": "virtual",
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        },
+        "spixels": {
+            "description": "spixels output",
+            "versions": {
+                "Latest": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/spixels-eeprom.bin"
+                }
+            },
+            "location": "virtual",
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        },
+        "F4-B": {
+            "description": "4 Output String Cape",
+            "versions": {
+                "1.x": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/bbb/F4-B-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "BeagleBone Black"
+            ]
+        },
+        "F8-B": {
+            "description": "8 Output String Cape",
+            "versions": {
+                "1.x": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/bbb/F8-B-eeprom.bin"
+                },
+                "2.x": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/bbb/F8-Bv2-eeprom.bin"
+                }
+            },
+            "location": "virtual",
+            "platforms": [
+                "BeagleBone Black"
+            ]
+        },
+        "F16-B": {
+            "description": "16 Output String Cape",
+            "versions": {
+                "1.0": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/bbb/F16-B-eeprom.bin"
+                }
+            },
+            "location": "virtual",
+            "platforms": [
+                "BeagleBone Black"
+            ]
+        },
+        "F32-B": {
+            "description": "32 Output String Cape",
+            "versions": {
+                "1.0": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/bbb/F32-B-eeprom.bin"
+                }
+            },
+            "location": "virtual",
+            "platforms": [
+                "BeagleBone Black"
+            ]
+        },
+        "RGB-123": {
+            "description": "32 Output String Cape",
+            "versions": {
+                "All": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/bbb/RGB-123-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "BeagleBone Black"
+            ]
+        }
+
+    }
+}
