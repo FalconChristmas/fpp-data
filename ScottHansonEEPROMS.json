@@ -1,0 +1,61 @@
+{
+    "name": "Scott Hanson",
+    "url": "scottnation.com",
+    "capes": {
+        "BBB16": {
+            "description": "16 Output String Cape",
+            "versions": {
+                "v1": {
+                    "url": 
+"https://github.com/computergeek1507/PB_16/raw/master/BBB_16/BBB16-220513130003-eeprom.bin"
+                },
+                "v2": {
+                    "url": 
+"https://github.com/computergeek1507/PB_16/raw/master/BBB_16/BBB16v2-221118135219-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "BeagleBone Black"
+            ]
+        },
+        "BBB16-EXP": {
+            "description": "16 Output String Cape",
+            "versions": {
+                "Latest": {
+                    "url": 
+"https://github.com/computergeek1507/PB_16/raw/master/BBB_16_Expansion/BBB16-Exp-220513130004-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "BeagleBone Black"
+            ]
+        },
+        "BBB16-Flex": {
+            "description": "16 Output String Cape",
+            "versions": {
+                "Latest": {
+                    "url": 
+"hhttps://github.com/computergeek1507/PB_16/raw/master/BBB_16_Flex/BBB16-Flex-220513130003-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "BeagleBone Black"
+            ]
+        },
+        "PB16": {
+            "description": "16 Output String Cape",
+            "versions": {
+                "v1": {
+                    "url": 
+"https://github.com/computergeek1507/PB_16/raw/master/PB_16v1/PB16-220513130003-eeprom.bin"
+                },
+                "v2": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/PiHat-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "PocketBeagle"
+            ]
+        }
+    }
+}

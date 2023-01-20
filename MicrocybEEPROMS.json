@@ -1,0 +1,39 @@
+{
+    "name": "Microcyb.com",
+    "url": "https://Microcyb.com",
+    "capes": {
+        "M4-PI": {
+            "description": "M4-PI",
+            "versions": {
+                "Latest": {
+                    "url": "https://microcyb.com/M4-cape-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        },
+        "M8-PI": {
+            "description": "M8-PI",
+            "versions": {
+                "Latest": {
+                    "url": "https://microcyb.com/M8-cape-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        },
+        "M16-PI": {
+            "description": "M16-PI",
+            "versions": {
+                "Latest": {
+                    "url": "https://microcyb.com/M16-cape-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        }
+    }
+}

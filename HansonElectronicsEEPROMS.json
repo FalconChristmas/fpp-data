@@ -1,0 +1,28 @@
+{
+    "name": "Hanson Electronics",
+    "url": "https://www.hansonelectronics.com.au/",
+    "capes": {
+        "rPi-28D": {
+            "description": "rPi-28D",
+            "versions": {
+                "Latest": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/rPi-28D-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        },
+        "rPi-MFC": {
+            "description": "rPi-MFC",
+            "versions": {
+                "Latest": {
+                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/rPi-MFC-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        }
+    }
+}
