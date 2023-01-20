@@ -50,7 +50,7 @@
 "https://github.com/computergeek1507/PB_16/raw/master/PB_16v1/PB16-220513130003-eeprom.bin"
                 },
                 "v2": {
-                    "url": "https://github.com/FalconChristmas/fpp/raw/master/capes/pi/PiHat-eeprom.bin"
+                    "url": "https://github.com/computergeek1507/PB_16/raw/master/PB_16v2_SMD/PB16v2-220513130003-eeprom.bin"
                 }
             },
             "platforms": [
