@@ -1,18 +1,19 @@
 {
     "vendors": {
-        "FPP Internal": {
+        "FPP Built-In": {
+            "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/FPPVirtualEEPROMS.json"
         },
         "KulpLights": {
-            
+            "url": "https://kulplights.com/firmwares/KulpLightsEEPROMS.json"
         },
         "Scott Hanson": {
-            
+            "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/ScottHansonEEPROMS.json"
         },
         "Microcyb.com": {
-            
+            "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/MicrocybEEPROMS.json"
         },
         "Hanson Electronics": {
-            
+            "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/HansonElectronicsEEPROMS.json"
         }
     }
 }
