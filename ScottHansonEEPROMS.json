@@ -3,15 +3,13 @@
     "url": "scottnation.com",
     "capes": {
         "BBB16": {
-            "description": "16 Output String Cape",
+            "description": "Beaglebone Cape with 16 pixel ports, 1 remote differential port, 2 serial ports and an expansion header for additional 16 pixel outputs. Uses Falcon v4 Expansion Pinout(24 pins)",
             "versions": {
                 "v1": {
-                    "url": 
-"https://github.com/computergeek1507/PB_16/raw/master/BBB_16/BBB16-220513130003-eeprom.bin"
+                    "url": "https://github.com/computergeek1507/PB_16/raw/master/BBB_16/BBB16-220513130003-eeprom.bin"
                 },
                 "v2": {
-                    "url": 
-"https://github.com/computergeek1507/PB_16/raw/master/BBB_16/BBB16v2-221118135219-eeprom.bin"
+                    "url": "https://github.com/computergeek1507/PB_16/raw/master/BBB_16/BBB16v2-221118135219-eeprom.bin"
                 }
             },
             "platforms": [
@@ -19,11 +17,10 @@
             ]
         },
         "BBB16-EXP": {
-            "description": "16 Output String Cape",
+            "description": "BeagleBone Cape with Three Expansion Board Ports for 48 outputs. Uses Falcon v4 Expansion Pinout",
             "versions": {
                 "Latest": {
-                    "url": 
-"https://github.com/computergeek1507/PB_16/raw/master/BBB_16_Expansion/BBB16-Exp-220513130004-eeprom.bin"
+                    "url": "https://github.com/computergeek1507/PB_16/raw/master/BBB_16_Expansion/BBB16-Exp-220513130004-eeprom.bin"
                 }
             },
             "platforms": [
@@ -31,11 +28,10 @@
             ]
         },
         "BBB16-Flex": {
-            "description": "16 Output String Cape",
+            "description": "BeagleBone Cape to use with the HolidayCoro Flex System",
             "versions": {
                 "Latest": {
-                    "url": 
-"hhttps://github.com/computergeek1507/PB_16/raw/master/BBB_16_Flex/BBB16-Flex-220513130003-eeprom.bin"
+                    "url": "hhttps://github.com/computergeek1507/PB_16/raw/master/BBB_16_Flex/BBB16-Flex-220513130003-eeprom.bin"
                 }
             },
             "platforms": [
@@ -43,11 +39,10 @@
             ]
         },
         "PB16": {
-            "description": "16 Output String Cape",
+            "description": "Pocketbeagle Pixel Controllers with 16 pixel ports, 2 serial ports and an expansion header for additional 16 pixel outputs.",
             "versions": {
                 "v1": {
-                    "url": 
-"https://github.com/computergeek1507/PB_16/raw/master/PB_16v1/PB16-220513130003-eeprom.bin"
+                    "url": "https://github.com/computergeek1507/PB_16/raw/master/PB_16v1/PB16-220513130003-eeprom.bin"
                 },
                 "v2": {
                     "url": "https://github.com/computergeek1507/PB_16/raw/master/PB_16v2_SMD/PB16v2-220513130003-eeprom.bin"
@@ -55,6 +50,50 @@
             },
             "platforms": [
                 "PocketBeagle"
+            ]
+        },
+        "Pi_Zero_24_Diff": {
+            "description": "Cape For PI Zero W or PI Zero 2 with six remote receiver port(24 remote ports), 5 Volt Only.",
+            "versions": {
+                "Latest": {
+                    "url": "https://github.com/computergeek1507/PB_16/raw/master/Pi_Zero_24_Diff_SMD/Pi_Zero_24_Diff-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        },
+        "Pi_Zero_W_16": {
+            "description": "Cape For PI Zero W or PI Zero 2 with 16 local pixel ports and two remote receiver port(8 remote ports)",
+            "versions": {
+                "Latest": {
+                    "url": "https://github.com/computergeek1507/PB_16/raw/master/Pi_Zero_W_16_SMD/Pi_Zero_W_16-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        },
+        "Pi_Zero_Expansion": {
+            "description": "Cape For PI Zero W or PI Zero 2 with a single Falcon v3/v4 Expansion port for 16 pixel outputs.",
+            "versions": {
+                "Latest": {
+                    "url": "https://github.com/computergeek1507/PB_16/raw/master/Pi_Zero_Expansion_SMD/Pi_Zero_Expansion-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "Raspberry Pi"
+            ]
+        },
+        "Pi_Expansion": {
+            "description": "Cape For Raspberry PI with a single Falcon v3/v4 Expansion port for 16 pixel outputs, 5 Volt Only.",
+            "versions": {
+                "Latest": {
+                    "url": "https://github.com/computergeek1507/PB_16/raw/master/Pi_Adapter/Pi_Expansion-eeprom.bin"
+                }
+            },
+            "platforms": [
+                "Raspberry Pi"
             ]
         }
     }
