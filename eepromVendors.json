@@ -14,6 +14,9 @@
         },
         "Hanson Electronics": {
             "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/HansonElectronicsEEPROMS.json"
+        },
+        "Wired Watts": {
+            "url": "https://www.wiredwatts.com/firmwares/WiredWattsEEPROMS.json"
         }
     }
 }
