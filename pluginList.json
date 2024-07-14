@@ -23,6 +23,7 @@
         [ "FPP-Plugin-MessageQueue", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-MessageQueue/master/pluginInfo.json" ],
         [ "FPP-Plugin-EventDate", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-EventDate/master/pluginInfo.json" ],
         [ "FPP-Plugin-Matrix-Message", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-Matrix-Message/master/pluginInfo.json" ],
+		[ "FPP-Plugin-Weather", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-Weather/master/pluginInfo.json" ],
 		[ "FPP-Plugin-Projector-Control", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-Projector-Control/master/pluginInfo.json" ],
 		[ "FPP-Plugin-BetaBrite", "https://raw.githubusercontent.com/FalconChristmas/fpp-pluginList/master/oldplugins/pluginInfo-FPP-Plugin-BetaBrite.json" ],
 		[ "FPP-Plugin-Cron-Editor", "https://raw.githubusercontent.com/FalconChristmas/fpp-pluginList/master/oldplugins/pluginInfo-FPP-Plugin-Cron-Editor.json" ],
