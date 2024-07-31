@@ -13,7 +13,7 @@
             "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/MicrocybEEPROMS.json"
         },
         "Hanson Electronics": {
-            "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/HansonElectronicsEEPROMS.json"
+            "url": "https://www.hansonelectronics.com.au/wp-content/uploads/HansonElectronicsEEPROMS1.json"
         },
         "Wired Watts": {
             "url": "https://www.wiredwatts.com/firmwares/WiredWattsEEPROMS.json"
