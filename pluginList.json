@@ -50,6 +50,7 @@
         [ "fpp-PictureFrame", "https://raw.githubusercontent.com/FalconChristmas/fpp-PictureFrame/main/pluginInfo.json" ],
         [ "fpp-Capture", "https://raw.githubusercontent.com/FalconChristmas/fpp-Capture/main/pluginInfo.json" ],
         [ "fpp-FPPMon", "https://raw.githubusercontent.com/KulpLights/fpp-FPPMon/master/pluginInfo.json" ], 
-		[ "fpp-jukebox", "https://raw.githubusercontent.com/PiSignage/fpp-jukebox/main/pluginInfo.json" ] 
+		[ "fpp-jukebox", "https://raw.githubusercontent.com/PiSignage/fpp-jukebox/main/pluginInfo.json" ],
+		[ "fpp-node-red", "https://raw.githubusercontent.com/darylc/fpp-node-red/master/pluginInfo.json"]
 	]
 }
