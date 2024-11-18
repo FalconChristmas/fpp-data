@@ -53,6 +53,7 @@
 		[ "fpp-jukebox", "https://raw.githubusercontent.com/PiSignage/fpp-jukebox/main/pluginInfo.json" ],
 		[ "fpp-node-red", "https://raw.githubusercontent.com/darylc/fpp-node-red/master/pluginInfo.json"],
 		[ "fpp-WLED-Control", "https://raw.githubusercontent.com/CaffeinatedFunctionality/fpp-WLED-Control/master/pluginInfo.json"],
-		[ "fpp-PulseMesh", "https://raw.githubusercontent.com/PulseMeshLabs/fpp-pulsemesh/refs/heads/main/pluginInfo.json"]
+		[ "fpp-PulseMesh", "https://raw.githubusercontent.com/PulseMeshLabs/fpp-pulsemesh/refs/heads/main/pluginInfo.json"],
+		[ "fpp-sumup", "https://raw.githubusercontent.com/PiSignage/fpp-sumup/refs/heads/master/pluginInfo.json" ]
 	]
 }
