@@ -35,16 +35,18 @@
             "all": {
                 "panelWidth": 32,
                 "panelHeight": 16,
-                "panelAddressing": 0,
                 "panelScan": 4,
-                "panelType": 0,
-                "panelOutputOrder": false,
-                "panelOutputBlankRow": false
+                "panelAddressing": 0,
+                "panelType": 0
             },
-            "BBShiftString": {
+            "BBShiftPanel": {
+                "panelOutputOrder": true,
+                "panelOutputBlankRow": false,
                 "panelInterleave": "32"
             },
             "LEDscapeMatrix": {
+                "panelOutputOrder": true,
+                "panelOutputBlankRow": false,
                 "panelInterleave": "32"
             },
             "RGBMatrix": {
@@ -60,15 +62,17 @@
                 "panelHeight": 32,
                 "panelAddressing": 0,
                 "panelScan": 8,
-                "panelType": 0,
-                "panelOutputOrder": false,
+                "panelType": 0
+            },
+            "BBShiftPanel": {
+                "panelInterleave": "64",
+                "panelOutputOrder": true,
                 "panelOutputBlankRow": false
             },
-            "BBShiftString": {
-                "panelInterleave": "64"
-            },
             "LEDscapeMatrix": {
-                "panelInterleave": "64"
+                "panelInterleave": "64",
+                "panelOutputOrder": true,
+                "panelOutputBlankRow": false
             },
             "RGBMatrix": {
                 "panelInterleave": "1"
