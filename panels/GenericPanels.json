@@ -1,0 +1,32 @@
+[
+    {
+        "name": "Generic Indoor P10 Panel",
+        "settings": {
+            "all": {
+                "panelInterleave": "0",
+                "panelWidth": 32,
+                "panelHeight": 16,
+                "panelAddressing": 0,
+                "panelScan": 8,
+                "panelType": 0,
+                "panelOutputOrder": false,
+                "panelOutputBlankRow": false
+            }
+        }
+    },
+    {
+        "name": "Generic Indoor P5 Panel",
+        "settings": {
+            "all": {
+                "panelInterleave": "0",
+                "panelWidth": 64,
+                "panelHeight": 32,
+                "panelAddressing": 0,
+                "panelScan": 16,
+                "panelOutputOrder": false,
+                "panelOutputBlankRow": false
+            }
+        }
+    }
+]
+

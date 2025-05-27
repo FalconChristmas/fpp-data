@@ -1,0 +1,86 @@
+[
+    {
+        "name": "Outdoor P10 Panel",
+        "settings": {
+            "all": {
+                "panelWidth": 32,
+                "panelHeight": 16,
+                "panelAddressing": 0,
+                "panelScan": 4,
+                "panelType": 0,
+                "panelOutputOrder": false,
+                "panelOutputBlankRow": false
+            },
+            "BBShiftString": {
+                "panelInterleave": "32"
+            },
+            "LEDscapeMatrix": {
+                "panelInterleave": "32"
+            },
+            "RGBMatrix": {
+                "panelInterleave": "1"
+            }
+        }
+    },
+    {
+        "name": "Outdoor P5 Panel",
+        "settings": {
+            "all": {
+                "panelWidth": 64,
+                "panelHeight": 32,
+                "panelAddressing": 0,
+                "panelScan": 8,
+                "panelType": 0,
+                "panelOutputOrder": false,
+                "panelOutputBlankRow": false
+            },
+            "BBShiftString": {
+                "panelInterleave": "64"
+            },
+            "LEDscapeMatrix": {
+                "panelInterleave": "64"
+            },
+            "RGBMatrix": {
+                "panelInterleave": "1"
+            }
+        }
+    },
+    {
+        "name": "Outdoor P4 Panel",
+        "settings": {
+            "all": {
+                "panelWidth": 80,
+                "panelHeight": 40,
+                "panelAddressing": 0,
+                "panelScan": 10,
+                "panelType": 0,
+                "panelOutputOrder": false,
+                "panelOutputBlankRow": false
+            },
+            "BBShiftString": {
+                "panelInterleave": "80"
+            },
+            "LEDscapeMatrix": {
+                "panelInterleave": "80"
+            },
+            "RGBMatrix": {
+                "panelInterleave": "1"
+            }
+        }
+    },
+    {
+        "name": "Flexible Outdoor P4 Panel",
+        "settings": {
+            "BBShiftString": {
+                "panelWidth": 80,
+                "panelHeight": 40,
+                "panelAddressing": 51,
+                "panelScan": 10,
+                "panelType": 0,
+                "panelOutputOrder": false,
+                "panelOutputBlankRow": false,
+                "panelInterleave": "4z"
+            }
+        }
+    }
+]

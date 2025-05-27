@@ -1,0 +1,14 @@
+{
+    "comment": "Submit a pull request to be added to the vendor list",
+    "vendors" : {
+        "Generic Indoor Panels": {
+            "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/panels/GenericPanels.json"
+        },
+        "Wired Watts": {
+            "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/panels/WiredWatts.json"
+        },
+        "Your Pixel Store": {
+            "url": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/panels/YourPixelStore.json"
+        }
+    }
+}
