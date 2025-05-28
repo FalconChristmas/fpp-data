@@ -1,6 +1,7 @@
 [
     {
         "name": "Outdoor P10 Panel",
+        "url": "https://yourpixelstore.com/product/outdoor-p10-panels-pairs/",
         "settings": {
             "all": {
                 "panelWidth": 32,
@@ -24,6 +25,7 @@
     },
     {
         "name": "Outdoor P5 Panel",
+        "url": "https://yourpixelstore.com/product/p5-matrix-panel-outdoor-rated/",
         "settings": {
             "all": {
                 "panelWidth": 64,
@@ -47,6 +49,7 @@
     },
     {
         "name": "Outdoor P4 Panel",
+        "url": "https://yourpixelstore.com/product/pre-sale-outdoor-p4-panel-pairs/",
         "settings": {
             "all": {
                 "panelWidth": 80,
@@ -70,6 +73,7 @@
     },
     {
         "name": "Flexible Outdoor P4 Panel",
+        "url": "https://yourpixelstore.com/product/new-p4-flexible-outdoor-rated-panels/",
         "settings": {
             "BBShiftPanel": {
                 "panelWidth": 80,

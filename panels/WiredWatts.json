@@ -1,6 +1,7 @@
 [
     {
         "name": "Indoor P10 Panel",
+        "url": "https://www.wiredwatts.com/products/pnp10i2pk",
         "settings": {
             "all": {
                 "panelInterleave": "0",
@@ -16,6 +17,7 @@
     },
     {
         "name": "Indoor P5 Panel",
+        "url": "https://www.wiredwatts.com/products/pnp5i2pk",
         "settings": {
             "all": {
                 "panelInterleave": "0",
@@ -30,32 +32,8 @@
         }
     },
     {
-        "name": "Outdoor P10 Panel",
-        "settings": {
-            "all": {
-                "panelWidth": 32,
-                "panelHeight": 16,
-                "panelScan": 4,
-                "panelAddressing": 0,
-                "panelType": 0
-            },
-            "BBShiftPanel": {
-                "panelOutputOrder": true,
-                "panelOutputBlankRow": false,
-                "panelInterleave": "32"
-            },
-            "LEDscapeMatrix": {
-                "panelOutputOrder": true,
-                "panelOutputBlankRow": false,
-                "panelInterleave": "32"
-            },
-            "RGBMatrix": {
-                "panelInterleave": "1"
-            }
-        }
-    },
-    {
         "name": "Outdoor P5 Panel",
+        "url": "https://www.wiredwatts.com/products/pnp5o2pk",
         "settings": {
             "all": {
                 "panelWidth": 64,
