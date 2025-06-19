@@ -37,13 +37,10 @@
                 "panelOutputBlankRow": false
             },
             "BBShiftPanel": {
-                "panelInterleave": "64"
+                "panelInterleave": "16z"
             },
             "LEDscapeMatrix": {
-                "panelInterleave": "64"
-            },
-            "RGBMatrix": {
-                "panelInterleave": "1"
+                "panelInterleave": "16z"
             }
         }
     },
