@@ -33,14 +33,15 @@
                 "panelAddressing": 0,
                 "panelScan": 8,
                 "panelType": 0,
-                "panelOutputOrder": false,
                 "panelOutputBlankRow": false
             },
             "BBShiftPanel": {
-                "panelInterleave": "16z"
+                "panelInterleave": "16z",
+                "panelOutputOrder": false
             },
             "LEDscapeMatrix": {
-                "panelInterleave": "16z"
+                "panelInterleave": "16z",
+                "panelOutputOrder": true
             }
         }
     },
