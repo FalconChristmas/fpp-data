@@ -56,6 +56,7 @@
 		[ "fpp-PulseMesh", "https://raw.githubusercontent.com/PulseMeshLabs/fpp-pulsemesh/refs/heads/main/pluginInfo.json"],
 		[ "fpp-sumup", "https://raw.githubusercontent.com/PiSignage/fpp-sumup/refs/heads/master/pluginInfo.json" ],
 		[ "fpp-plugin-BackgroundMusic", "https://raw.githubusercontent.com/OnlineDynamic/BackgroundMusicFPP-Plugin/refs/heads/master/pluginInfo.json" ],
-		[ "FPP-Simple-Weather", "https://raw.githubusercontent.com/toddejohnson/FPP-Simple-Weather/refs/heads/main/pluginInfo.json" ]
+		[ "FPP-Simple-Weather", "https://raw.githubusercontent.com/toddejohnson/FPP-Simple-Weather/refs/heads/main/pluginInfo.json" ],
+		[ "FPP-ZeroTier-Connector", "https://raw.githubusercontent.com/Evankemp07/ZeroTier-FppPlugin/refs/heads/master/pluginInfo.json" ]
 	]
 }
