@@ -59,7 +59,9 @@
 		[ "fpp-plugin-BackgroundMusic", "https://raw.githubusercontent.com/OnlineDynamic/BackgroundMusicFPP-Plugin/refs/heads/master/pluginInfo.json" ],
 		[ "FPP-Simple-Weather", "https://raw.githubusercontent.com/toddejohnson/FPP-Simple-Weather/refs/heads/main/pluginInfo.json" ],
 		[ "FPP-ZeroTier-Connector", "https://raw.githubusercontent.com/Evankemp07/ZeroTier-FppPlugin/refs/heads/master/pluginInfo.json" ],
-		[ "Statistics-Fpp-Plugin", "https://raw.githubusercontent.com/OnlineDynamic/Statistics-Fpp-Plugin/refs/heads/master/pluginInfo.json" ]
-		[ "fpp-servo-calibrator", "https://raw.githubusercontent.com/pgianotto/fpp-servo-calibrator/master/pluginInfo.json" ]
+		[ "Statistics-Fpp-Plugin", "https://raw.githubusercontent.com/OnlineDynamic/Statistics-Fpp-Plugin/refs/heads/master/pluginInfo.json" ],
+		[ "fpp-servo-calibrator", "https://raw.githubusercontent.com/pgianotto/fpp-servo-calibrator/master/pluginInfo.json" ],
+		[ "fpp-live-follow", "https://raw.githubusercontent.com/pgianotto/fpp-live-follow/master/pluginInfo.json" ],
+		[ "fpp-performance-capture", "https://raw.githubusercontent.com/pgianotto/animatronic-motion-system/master/pluginInfo.json" ]
 	]
 }
