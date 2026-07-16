@@ -48,7 +48,7 @@
             [ "fpp-WledEffects","https://raw.githubusercontent.com/adamcoulombe/fpp-WledEffects/main/pluginInfo.json", "Home Automation"],
             [ "fpp-PixelRadio","https://raw.githubusercontent.com/FalconChristmas/fpp-PixelRadio/master/pluginInfo.json", "Audio"],
             [ "fpp-NFL","https://raw.githubusercontent.com/koolsb/fpp-nfl/main/pluginInfo.json", "Data Feeds" ],
-            [ "fpp-ifttt-webhooks-plugin", "https://raw.githubusercontent.com/joeharrison714/fpp-ifttt-webhooks-plugin/master/pluginInfo.json", " Home Automation" ],
+            [ "fpp-ifttt-webhooks-plugin", "https://raw.githubusercontent.com/joeharrison714/fpp-ifttt-webhooks-plugin/master/pluginInfo.json", "Home Automation" ],
             [ "fpp-PictureFrame", "https://raw.githubusercontent.com/FalconChristmas/fpp-PictureFrame/main/pluginInfo.json", "Display & Video" ],
             [ "fpp-Capture", "https://raw.githubusercontent.com/FalconChristmas/fpp-Capture/main/pluginInfo.json", "Display & Video" ],
             [ "fpp-FPPMon", "https://raw.githubusercontent.com/KulpLights/fpp-FPPMon/master/pluginInfo.json", "Monitoring" ],
