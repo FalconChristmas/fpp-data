@@ -1,0 +1,64 @@
+{
+        "categories": [
+                {
+                        "name": "Audio",
+                        "longName": "Audio, Music & FM/RDS",
+                        "slug": "audio",
+                        "icon": "fas fa-music"
+                },
+                {
+                        "name": "Interaction",
+                        "longName": "Viewer Interaction & Show Requests",
+                        "slug": "interaction",
+                        "icon": "fas fa-hand-pointer"
+                },
+                {
+                        "name": "Payments",
+                        "longName": "Payments & Donations",
+                        "slug": "payments",
+                        "icon": "fas fa-dollar-sign"
+                },
+                {
+                        "name": "Messaging",
+                        "longName": "Messaging, Signage & Countdown",
+                        "slug": "messaging",
+                        "icon": "fas fa-comment-dots"
+                },
+                {
+                        "name": "Data Feeds",
+                        "longName": "Data Feeds & Information",
+                        "slug": "data",
+                        "icon": "fas fa-rss"
+                },
+                {
+                        "name": "Home Automation",
+                        "longName": "Home Automation & Integrations",
+                        "slug": "integrations",
+                        "icon": "fas fa-plug"
+                },
+                {
+                        "name": "Notifications",
+                        "longName": "Notifications & Communication",
+                        "slug": "notifications",
+                        "icon": "fas fa-bell"
+                },
+                {
+                        "name": "Hardware",
+                        "longName": "Hardware, Controls & Animatronics",
+                        "slug": "hardware",
+                        "icon": "fas fa-gamepad"
+                },
+                {
+                        "name": "Display & Video",
+                        "longName": "Display, Video & Capture",
+                        "slug": "display",
+                        "icon": "fas fa-video"
+                },
+                {
+                        "name": "Monitoring",
+                        "longName": "Monitoring & System Tools",
+                        "slug": "system",
+                        "icon": "fas fa-gauge-high"
+                }
+        ]
+}
