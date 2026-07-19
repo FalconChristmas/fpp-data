@@ -59,6 +59,12 @@
                         "longName": "Monitoring & System Tools",
                         "slug": "system",
                         "icon": "fas fa-gauge-high"
+                },
+                {
+                        "name": "Other",
+                        "longName": "Other",
+                        "slug": "other",
+                        "icon": "fas fa-ellipsis"
                 }
         ]
 }
