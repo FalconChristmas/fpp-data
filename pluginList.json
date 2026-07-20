@@ -13,7 +13,7 @@
             [ "fpp-LoRa", "https://raw.githubusercontent.com/FalconChristmas/fpp-LoRa/master/pluginInfo.json", "Automation" ],
             [ "fpp-brightness", "https://raw.githubusercontent.com/FalconChristmas/fpp-brightness/master/pluginInfo.json", "Display & Video" ],
             [ "fpp-arcade", "https://raw.githubusercontent.com/FalconChristmas/fpp-arcade/master/pluginInfo.json", "Interaction" ],
-            [ "fpp-midi", "https://raw.githubusercontent.com/FalconChristmas/fpp-midi/master/pluginInfo.json", "Atomation" ],
+            [ "fpp-midi", "https://raw.githubusercontent.com/FalconChristmas/fpp-midi/master/pluginInfo.json", "Automation" ],
             [ "fpp-osc", "https://raw.githubusercontent.com/FalconChristmas/fpp-osc/master/pluginInfo.json", "Automation" ],
             [ "fpp-HomeAssistant", "https://raw.githubusercontent.com/FalconChristmas/fpp-HomeAssistant/master/pluginInfo.json", "Automation" ],
             [ "fpp-VideoCapture", "https://raw.githubusercontent.com/FalconChristmas/fpp-VideoCapture/master/pluginInfo.json", "Display & Video" ],
