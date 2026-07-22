@@ -1,0 +1,216 @@
+# Allows `/recheck` directly on a plugin's listing PR (opened by scan-new-submission.yml
+# once a submission is ready), re-running the plugin check against the submitter's
+# repo's CURRENT state and posting fresh findings as a PR comment.
+#
+# WHY: scan-new-submission.yml closes the original issue once the PR opens, saying
+# "further discussion happens on the PR now" -- but until this workflow, /recheck only
+# ever worked on that (now closed) issue. Nothing listened for it on the PR itself, so
+# that framing was misleading. This fixes the gap; see the PR body's own footer line
+# (scan-new-submission.yml) for the user-facing pointer to this.
+#
+# ALREADY-LISTED CHECK: the PR's own branch already has this plugin's pluginList.json
+# entry (add_plugin_entry.py added it there) -- checking already-listed against THAT
+# would always say yes, wrongly. So that check runs against MASTER's pluginList.json
+# instead (fetched separately via `git show origin/master:...`), which correctly does
+# NOT have the entry until the PR merges.
+#
+# NOT included here: duplicate-open-submission-issue detection (find_duplicate_submission_
+# issues in scan_submission.py) -- the original issue is closed by the time a PR exists,
+# so there's nothing left open to duplicate.
+#
+# AUTHZ: same rule as scan-new-submission.yml -- the original submission's reporter
+# (parsed from the PR body's "Submitted by:" line, since PRs don't have an "issue
+# author" the way issues do -- this PR was opened by github-actions[bot]) or a
+# fpp-data-ci maintainer (push/maintain/admin), nobody else.
+
+name: ZZ - Automation - Recheck listing PR
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  recheck:
+    # github.event.issue.pull_request is only present when the comment is on a PR (PRs
+    # are "issues" under the hood for this event). contains() below is a coarse
+    # pre-filter, same caveat as the other workflows' job-level `if:` -- the real,
+    # word-boundary command parse happens in the extract step.
+    #
+    # `state == 'open'` blocks /recheck once the PR is closed OR merged (a merged PR
+    # still has state 'closed' in this event's payload) -- nothing left to recheck
+    # against once the PR itself is done.
+    if: >-
+      github.event.issue.state == 'open' &&
+      github.event.issue.pull_request != null &&
+      contains(github.event.issue.body, '<!-- listing-pr ') &&
+      contains(github.event.comment.body, '/recheck')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract repoName + issue number from the PR body marker
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || '';
+            const m = body.match(/<!--\s*listing-pr\s+repo:(\S+)\s+issue:(\d+)\s*-->/);
+            core.setOutput('repo_name', m ? m[1] : '');
+            core.setOutput('issue_number', m ? m[2] : '');
+
+            // Word-boundary match, not substring -- the job-level `if:` above is only a
+            // coarse pre-filter (see scan-new-submission.yml / remove-plugin-verify.yml,
+            // which had the exact substring-match bug this avoids).
+            const isRecheck = /(?:^|\s)\/recheck(?:\s|$)/.test(context.payload.comment.body);
+            core.setOutput('is_recheck', String(isRecheck));
+
+            const submittedBy = body.match(/\*\*Submitted by:\*\*\s*@(\S+)/);
+            core.setOutput('reporter', submittedBy ? submittedBy[1] : '');
+
+      - name: Restrict /recheck to the original reporter or a maintainer
+        id: authz
+        if: steps.extract.outputs.repo_name != '' && steps.extract.outputs.is_recheck == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commenter = context.payload.comment.user.login;
+            const reporter = '${{ steps.extract.outputs.reporter }}';
+            const { owner, repo } = context.repo;
+            if (reporter && commenter.toLowerCase() === reporter.toLowerCase()) {
+              core.setOutput('ok', 'true');
+              return;
+            }
+            // Repo maintainers (push/maintain/admin on fpp-data-ci) can also trigger
+            // this, same as the issue-side workflows.
+            try {
+              const perm = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: commenter });
+              if (['admin', 'write', 'maintain'].includes(perm.data.permission)) {
+                core.setOutput('ok', 'true');
+                return;
+              }
+            } catch (e) { /* not a collaborator, or lookup failed -- fall through to reject */ }
+            core.setOutput('ok', 'false');
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: `⚠️ @${commenter} only the original reporter` +
+                    (reporter ? ` (**@${reporter}**)` : '') +
+                    ` or a fpp-data-ci maintainer can use \`/recheck\` on this PR.`,
+            });
+
+      - uses: actions/checkout@v4
+        if: steps.authz.outputs.ok == 'true'
+        with:
+          ref: add-plugin/${{ steps.extract.outputs.repo_name }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        if: steps.authz.outputs.ok == 'true'
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        if: steps.authz.outputs.ok == 'true'
+        run: pip install jsonschema
+
+      - name: Look up this plugin's pluginInfo.json URL, and master's pluginList.json
+        id: lookup
+        if: steps.authz.outputs.ok == 'true'
+        env:
+          # REPO_NAME is attacker-influenceable free text (see recheck-listing-pr.yml's
+          # header comment / lib_plugin_schema.resolve_repo_name()'s fallback). ${{ }}
+          # substitution happens BEFORE this heredoc is even parsed, so splicing it
+          # directly into the `name = "..."` line would be Python code injection, not
+          # just shell -- reading it via os.environ instead means it's always just
+          # string data, regardless of content.
+          REPO_NAME: ${{ steps.extract.outputs.repo_name }}
+        run: |
+          git show origin/master:pluginList.json > base-pluginList.json
+          python - <<'EOF' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+          data = json.load(open('pluginList.json'))
+          name = os.environ["REPO_NAME"]
+          entry = next((e for e in data['pluginList'] if isinstance(e, list) and e and e[0] == name), None)
+          url = entry[1] if entry and len(entry) > 1 else ''
+          print(f"plugininfo_url={url}")
+          EOF
+
+      - name: Run plugin check
+        if: steps.authz.outputs.ok == 'true' && steps.lookup.outputs.plugininfo_url != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/scan_submission.py \
+            --plugininfo-url "${{ steps.lookup.outputs.plugininfo_url }}" \
+            --schema .github/schema/pluginInfo.schema.json \
+            --plugin-list base-pluginList.json \
+            --reporter "${{ steps.extract.outputs.reporter }}" \
+            --issue-number "${{ steps.extract.outputs.issue_number }}" \
+            --out scan-result.json
+
+      - name: Comment fresh results on the PR
+        if: steps.authz.outputs.ok == 'true' && steps.lookup.outputs.plugininfo_url != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const result = JSON.parse(fs.readFileSync('scan-result.json', 'utf8'));
+            const badge = { blocker: '🛑', 'best-practice': '⚠️', optional: '💡' };
+            const label = { blocker: 'Blocker', 'best-practice': 'Best practice', optional: 'Optional' };
+            const order = { blocker: 0, 'best-practice': 1, optional: 2 };
+            const findings = [...result.findings].sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
+            const commenter = context.payload.comment.user.login;
+
+            const fields = [];
+            if (result.repo_name) fields.push(`**Plugin:** ${result.repo_name}`);
+            if (result.repo_url) fields.push(`**Repo:** ${result.repo_url}`);
+            if (result.owner) fields.push(`**Owner:** \`${result.owner}\``);
+
+            // Same reasoning as scan-new-submission.yml: a failed clone means the lint
+            // never ran, so there's nothing submitter-actionable to list - just prompt
+            // to try again rather than presenting a possibly-incomplete findings list.
+            const cloneFailed = findings.some(f => f.code === 'clone-failed');
+
+            const lines = ['### 🔄 Recheck', ''];
+            if (fields.length) lines.push(...fields, '');
+            if (cloneFailed) {
+              lines.push(`⚠️ Could not clone the repo to run the plugin checks (requested by @${commenter}) - ` +
+                         'this is often transient. Comment `/recheck` to try again.');
+            } else if (result.pass) {
+              lines.push(`✅ Requested by @${commenter} - no blocking issues found.`);
+            } else {
+              lines.push(`Requested by @${commenter} - ${result.num_blocking} issue(s) currently outstanding:`, '');
+              for (const f of findings) {
+                if (f.severity === 'optional') continue;
+                lines.push(`- ${badge[f.severity] || ''} **${label[f.severity] || f.severity} - ${f.code}** - ${f.message}`);
+              }
+            }
+            lines.push('', '_This comment reflects the repo\'s current state; it does not change the PR itself - merging is still a maintainer\'s call._');
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({ owner, repo, issue_number, body: lines.join('\n') });
+
+      - name: Report unresolvable pluginInfo.json URL
+        if: steps.authz.outputs.ok == 'true' && steps.lookup.outputs.plugininfo_url == ''
+        uses: actions/github-script@v7
+        env:
+          # See the "Look up..." step's comment -- REPO_NAME is attacker-influenceable
+          # free text; env/process.env instead of ${{ }}-interpolating it directly
+          # into a JS template literal, since a backtick or `${` in it could otherwise
+          # break out of the intended string.
+          REPO_NAME: ${{ steps.extract.outputs.repo_name }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: `⚠️ Could not find \`${process.env.REPO_NAME}\` in this branch's ` +
+                    `\`pluginList.json\` - the branch may have been hand-edited. A maintainer will need ` +
+                    `to look at this manually.`,
+            });

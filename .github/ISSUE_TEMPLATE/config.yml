@@ -1,0 +1,22 @@
+# Controls the "New issue" chooser screen for the fpp-data repo.
+# - blank_issues_enabled: false  -> people must pick a template (keeps the queue structured).
+# - contact_links               -> extra buttons shown on the chooser that link out instead
+#                                  of opening an issue.
+blank_issues_enabled: false
+contact_links:
+  # The guided path. It encrypts the author's email in-browser and hands back a
+  # PRE-FILLED link to the "Submit a plugin" form below, so nothing is copy-pasted.
+  # Issue Forms are static YAML and cannot run JS, which is why this is a separate
+  # page rather than a step inside the form itself.
+  # Contribution Guidelines / FPP Facebook Group / FPP Plugin Template links were
+  # dropped from this chooser (2026-07-18) - they clutter the "New issue" screen and
+  # are already linked from within the plugin-submission.yml form body.
+  - name: ⚡ Submit a plugin - start here (guided)
+    url: https://falconchristmas.github.io/fpp-data/submit_new_plugin/
+    about: Recommended. Fills in the submission form for you and encrypts your contact email.
+  - name: 🗑️ Request Plugin Removal - start here (guided)
+    url: https://falconchristmas.github.io/fpp-data/submit_remove_plugin/
+    about: Fills in the repoName for you. No email involved, so it's a single step - no encryption needed.
+  - name: 🏷️ Request Category Change - start here (guided)
+    url: https://falconchristmas.github.io/fpp-data/change_plugin_category/
+    about: Fills in the repoName for you. No email involved, so it's a single step - no encryption needed.

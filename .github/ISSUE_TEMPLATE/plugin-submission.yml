@@ -1,0 +1,125 @@
+# GitHub Issue Form - "Submit a plugin".
+#
+# WHAT THIS IS: a structured intake form. When someone clicks "New issue" in the
+# fpp-data repo, GitHub renders these fields instead of a blank text box. The result
+# is a normal issue whose body is filled from the answers, so maintainers get a clean,
+# consistent triage queue (mirrors Bitfocus Companion's module-request tracker).
+#
+# WHERE IT LIVES: FalconChristmas/fpp-data/.github/ISSUE_TEMPLATE/plugin-submission.yml
+# DOCS: https://docs.github.com/issues/tracking-your-work-with-issues/using-templates/syntax-for-githubs-form-schema
+#
+# NOTE ON THE CATEGORY DROPDOWN: Issue Forms are static - they can't read
+# pluginCategories.json at render time. The 10 options below are a hand-kept COPY of
+# the short names in pluginCategories.json (which stays the single source of truth).
+# A CI check (validate-pluginlist) asserts these two lists still match so they can't drift.
+
+name: "Plugin submission form, access via https://falconchristmas.github.io/fpp-data/submit_new_plugin/"
+description: Do not open this directly - use Submit a plugin instead (link at the bottom of the New Issue chooser).
+title: "[New Plugin Submission - do not edit this title]"
+labels: ["plugin", "submission"]
+body:
+  # No "GitHub repo" field: a prior version of this form had one, purely so a
+  # maintainer skimming the issue would see a clickable repo link immediately. But an
+  # editable field a submitter can freely change and that scan_submission.py never
+  # reads is misleading - it invites editing that has zero effect (nothing here can be
+  # "fixed" or "corrected" by typing into it). The repo link is instead surfaced in the
+  # bot's own scan-result comment (a Field:/Data block, posted within a minute or two),
+  # which IS derived authoritatively from pluginInfo.json - same reasoning as
+  # repoName/description below, just realized one field later.
+  - type: input
+    id: plugininfo_url
+    attributes:
+      label: pluginInfo.json raw URL
+      description: >
+        The raw.githubusercontent.com URL to your `pluginInfo.json`. This is the pointer
+        that goes into pluginList.json.
+      placeholder: https://raw.githubusercontent.com/<you>/<repo>/refs/heads/main/pluginInfo.json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: >
+        Which category best fits your plugin? (Copied from pluginCategories.json - the
+        canonical list. If none fit well, pick the closest and mention it below.)
+      options:
+        - Audio, Music & FM/RDS
+        - Viewer Interaction & Show Requests
+        - Payments & Donations
+        - Messaging, Signage & Countdown
+        - Data Feeds & Information
+        - Home Automation & Integrations
+        - Notifications & Communication
+        - Hardware, Controls & Animatronics
+        - Display, Video & Capture
+        - Monitoring & System Tools
+        - Other
+    validations:
+      required: true
+
+  # No "One-line description" field: like repoName/GitHub repo above, it's fully
+  # derivable from pluginInfo.json's own `description`, and scan_submission.py never
+  # reads it from the issue body anyway - a submitter-typed copy here could never be
+  # anything but cosmetic, and would silently drift from the real value the moment
+  # pluginInfo.json changes.
+
+  # No "GitHub handle" field: whoever opens this issue is logged into GitHub to do it,
+  # so GitHub already records them as the reporter and auto-subscribes them to replies -
+  # no @-mention needed for a maintainer to reach them.
+
+  # CONTACT TOKEN - the ONLY way an email reaches FPP. Never ask for a plain address
+  # here: this issue is PUBLIC the instant it's submitted (notifications, API, edit
+  # history), so a plaintext address would leak immediately and redaction is too late.
+  # The token is encrypted in the submitter's browser; only FPP's private contacts repo
+  # holds the key. See docs/submit_new_plugin/index.html.
+  - type: textarea
+    id: contact_token
+    attributes:
+      label: Contact token
+      description: >
+        Filled in by
+        **[Submit a plugin](https://falconchristmas.github.io/fpp-data/submit_new_plugin/)** - leave it alone.
+
+
+        ⚠️ **Never type your email address here.** This issue is public the instant you submit
+        it, so a plain address would be exposed immediately and cannot be un-published. The
+        token is your email encrypted in your browser - only FPP maintainers can read it.
+      placeholder: |
+        Empty? You arrived here directly. See the link above - go to Submit a plugin first.
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Acknowledgements
+      description: >
+        These mirror the Contribution Guidelines. All are required - please confirm each.
+      options:
+        - label: This plugin is production release quality and I have tested it on both the latest released version of FPP **and** the current nightly build.
+          required: true
+        - label: My plugin does not interfere with core FPP functionality, stability, or real-time sequence playback, and installs cleanly (or refuses with an explanation) on hardware it can't support.
+          required: true
+        - label: My plugin is not malicious and does not and will not in future exfiltrate data or run unexpected remote code.
+          required: true
+        - label: I understand inclusion is at the FPP developers' discretion and is not guaranteed.
+          required: true
+
+  - type: checkboxes
+    id: announced
+    attributes:
+      label: Community announcement
+      options:
+        - label: I have announced this plugin to the FPP community (e.g. the FPP Facebook group) and considered feedback.
+          required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else? (optional)
+      description: Dependencies, platform limitations, or notes for the reviewer.
+    validations:
+      required: false

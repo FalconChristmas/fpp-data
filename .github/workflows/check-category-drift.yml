@@ -1,0 +1,45 @@
+# pluginCategories.json is the single source of truth for categories. The Issue Form
+# dropdown (.github/ISSUE_TEMPLATE/plugin-submission.yml) keeps a hand copy, since
+# static YAML Issue Forms can't fetch anything at render time - nothing keeps that copy
+# honest. Add a category upstream and the form silently offers a stale list forever,
+# with no error anywhere. This check is what stops that.
+#
+# The guided page (docs/submit_new_plugin/) used to keep its own copy too, but no
+# longer touches categories at all: GitHub Issue Forms cannot prefill a dropdown field
+# via query parameters under any circumstances, so there was nothing useful for that
+# page to carry - the submitter now picks Category directly on the real GitHub form.
+
+name: ZZ - Automation - Check category drift
+
+on:
+  pull_request:
+    paths:
+      - "pluginCategories.json"
+      - ".github/ISSUE_TEMPLATE/plugin-submission.yml"
+      - ".github/ISSUE_TEMPLATE/change_plugin_category.yml"
+      - ".github/scripts/check_category_drift.py"
+      - ".github/workflows/check-category-drift.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install --quiet pyyaml
+
+      - name: Compare category copies against pluginCategories.json
+        run: |
+          python .github/scripts/check_category_drift.py \
+            --categories pluginCategories.json \
+            --form .github/ISSUE_TEMPLATE/plugin-submission.yml \
+            --form .github/ISSUE_TEMPLATE/change_plugin_category.yml

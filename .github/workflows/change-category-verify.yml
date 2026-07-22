@@ -1,0 +1,360 @@
+# Verify a plugin category-change request, then open a PR that applies it - in EVERY
+# case, verified ownership or not. The ownership check still runs and its result is
+# never silently dropped: it's what the PR body tells the maintainer ("owner
+# confirmed" vs "NOT verified, decide accordingly"), so the maintainer merging or
+# closing the PR is an informed human decision either way, not an automated one.
+#
+# When a `category-change-request` issue is opened/edited, GitHub has already
+# authenticated the submitter, so we know their real login. This checks it against the
+# plugin's registered repo owner and posts a sticky comment + a verdict label:
+#   category-verified    submitter owns the repo - PR notes ownership confirmed
+#   category-unconfirmed  org repo / mismatch - PR notes ownership NOT verified
+#   category-not-listed   repoName isn't in pluginList.json at all - no PR, auto-closed
+#   category-same          requested category already matches what's on file - no PR, auto-closed
+#   category-unknown       "New category" isn't a real pluginCategories.json entry - no PR
+#   category-change-error error other than the above (usually transient - fetch failed) - no PR
+#
+# Only `verified`/`unconfirmed` have an actual change to apply, so only those two open
+# a PR. The other four verdicts mean there's nothing (yet) to build a diff from - a
+# nonexistent listing, a no-op change, or bad/incomplete input - so they're handled by
+# closing (not_found/same_category) or flagging for manual review (unknown_category/
+# error) instead of a PR with nothing in it.
+#
+# UNLIKE remove-plugin-verify.yml: even a `verified` request never commits directly -
+# it opens a PR for a maintainer to merge, same as `unconfirmed`. Category change never
+# had removal's "already proved you own this, nothing left to gate" urgency, so there's
+# no reason to fast-path a direct commit for one ownership outcome but not the other.
+#
+# The issue title (including repoName) is set client-side by the guided page
+# (docs/change_plugin_category/) via the `title` prefill query param, same as
+# submit_remove_plugin/.
+#
+# RECHECKING: a comment containing `/recheck` re-runs verification against the
+# (unchanged) issue body - e.g. useful after editing a typo'd repoName, or after the
+# category dropdown is fixed for an `unknown_category` verdict.
+#
+# OVERRIDING: `/submit` only matters for `error`/`unknown_category` now (nothing to
+# apply yet) - it flags the issue `needs-manual-review` for a maintainer to decide by
+# hand, same idea as remove-plugin-verify.yml's override. `verified`/`unconfirmed`
+# don't need it: a PR already opens automatically either way.
+#
+# AUTHZ: /recheck and /submit only take effect from the issue's original reporter (or
+# a fpp-data-ci maintainer) - see the "Restrict..." step below.
+
+name: ZZ - Automation - Verify plugin category change
+
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  verify:
+    if: >-
+      github.event.issue.state == 'open' &&
+      contains(github.event.issue.labels.*.name, 'category-change-request') &&
+      (github.event_name != 'issue_comment' ||
+       contains(github.event.comment.body, '/recheck') ||
+       contains(github.event.comment.body, '/submit'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restrict /recheck and /submit to the original reporter
+        id: authz
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'issue_comment') {
+              core.setOutput('ok', 'true');
+              core.setOutput('command', '');
+              return;
+            }
+            const body = context.payload.comment.body;
+            const isSubmit = /(?:^|\s)\/submit(?:\s|$)/.test(body);
+            const isRecheck = /(?:^|\s)\/recheck(?:\s|$)/.test(body);
+            if (!isSubmit && !isRecheck) {
+              core.setOutput('ok', 'false');
+              core.setOutput('command', '');
+              return;
+            }
+            const commandUsed = isSubmit ? 'submit' : 'recheck';
+            core.setOutput('command', commandUsed);
+
+            const commenter = context.payload.comment.user.login;
+            const author = context.payload.issue.user.login;
+            const { owner, repo } = context.repo;
+            if (commenter.toLowerCase() === author.toLowerCase()) {
+              core.setOutput('ok', 'true');
+              return;
+            }
+            try {
+              const perm = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: commenter });
+              if (['admin', 'write', 'maintain'].includes(perm.data.permission)) {
+                core.setOutput('ok', 'true');
+                return;
+              }
+            } catch (e) { /* not a collaborator, or lookup failed -- fall through to reject */ }
+            core.setOutput('ok', 'false');
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: `⚠️ @${commenter} only the original reporter (**@${author}**) or a fpp-data-ci ` +
+                    `maintainer can use \`/${commandUsed}\` on this issue. If you'd like to request ` +
+                    `a category change for your own plugin, please open a new request at ` +
+                    `https://falconchristmas.github.io/fpp-data/change_plugin_category/.`,
+            });
+
+      - name: Check out fpp-data
+        if: steps.authz.outputs.ok == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        if: steps.authz.outputs.ok == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        if: steps.authz.outputs.ok == 'true'
+        run: pip install jsonschema
+
+      - name: Verify ownership + category
+        id: verify
+        if: steps.authz.outputs.ok == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          python .github/scripts/verify_change_category.py \
+            --plugin-list pluginList.json --categories pluginCategories.json \
+            --output category-verify.md \
+            --gh-repo "${{ github.repository }}" --current-issue "${{ github.event.issue.number }}"
+
+      - name: Comment verdict + label
+        if: steps.authz.outputs.ok == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- category-change-check -->';
+            const body = marker + '\n' + fs.readFileSync('category-verify.md', 'utf8');
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.rest.issues.listComments({owner, repo, issue_number});
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({owner, repo, comment_id: existing.id, body});
+            } else {
+              await github.rest.issues.createComment({owner, repo, issue_number, body});
+            }
+
+            const verdict = '${{ steps.verify.outputs.verdict }}';
+            const map = {
+              verified: 'category-verified', unconfirmed: 'category-unconfirmed',
+              not_found: 'category-not-listed', same_category: 'category-same',
+              unknown_category: 'category-unknown', error: 'category-change-error',
+            };
+            const want = map[verdict];
+            for (const l of Object.values(map)) {
+              if (l !== want) {
+                try { await github.rest.issues.removeLabel({owner, repo, issue_number, name: l}); } catch (e) {}
+              }
+            }
+            if (want) await github.rest.issues.addLabels({owner, repo, issue_number, labels: [want]});
+
+      - name: Notify existing open request(s) for the same plugin
+        if: steps.authz.outputs.ok == 'true' && github.event.action == 'opened' && steps.verify.outputs.duplicate_issues != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number;
+            const dupes = '${{ steps.verify.outputs.duplicate_issues }}'.split(',').filter(Boolean);
+            for (const numStr of dupes) {
+              const other = parseInt(numStr, 10);
+              await github.rest.issues.createComment({owner, repo, issue_number: other,
+                body: `👀 A new category-change request for the same plugin was just opened: #${issue_number}.`});
+            }
+
+      - name: /submit override
+        if: >-
+          steps.authz.outputs.ok == 'true' && steps.authz.outputs.command == 'submit' &&
+          (steps.verify.outputs.verdict == 'error' || steps.verify.outputs.verdict == 'unknown_category')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number;
+            await github.rest.issues.addLabels({owner, repo, issue_number, labels: ['needs-manual-review']});
+            await github.rest.issues.createComment({owner, repo, issue_number,
+              body: 'Flagged for manual review - the reporter used `/submit` to ask a maintainer to ' +
+                    'decide despite automated verification not confirming this directly. There is no ' +
+                    'automated PR for this case; a maintainer applies (or rejects) it by hand.'});
+
+      - name: "Auto-close: not listed"
+        if: >-
+          steps.authz.outputs.ok == 'true' && steps.verify.outputs.verdict == 'not_found' &&
+          steps.authz.outputs.command != 'submit'
+        uses: actions/github-script@v7
+        env:
+          REPO_NAME: ${{ steps.verify.outputs.repo_name }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number;
+            const author = context.payload.issue.user.login;
+            const repoName = process.env.REPO_NAME;
+            await github.rest.issues.createComment({owner, repo, issue_number,
+              body: `@${author} Thanks for the report. \`${repoName}\` isn't currently in our ` +
+                    `plugin listing (\`pluginList.json\`), so there's no entry to recategorize.\n\n` +
+                    `If you believe this plugin *should* be listed (or you meant a different/renamed ` +
+                    `repo), please submit a new listing request via the guided form: ` +
+                    `https://falconchristmas.github.io/fpp-data/submit_new_plugin/\n\n` +
+                    `Closing this one out. If this is wrong, comment \`/submit\` and we'll flag it ` +
+                    `for a maintainer instead.`});
+            await github.rest.issues.update({owner, repo, issue_number, state: 'closed'});
+
+      - name: "Auto-close: already that category"
+        if: >-
+          steps.authz.outputs.ok == 'true' && steps.verify.outputs.verdict == 'same_category' &&
+          steps.authz.outputs.command != 'submit'
+        uses: actions/github-script@v7
+        env:
+          REPO_NAME: ${{ steps.verify.outputs.repo_name }}
+          NEW_CATEGORY_LONG: ${{ steps.verify.outputs.new_category_long }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number;
+            const author = context.payload.issue.user.login;
+            const repoName = process.env.REPO_NAME;
+            const newCategoryLong = process.env.NEW_CATEGORY_LONG;
+            await github.rest.issues.createComment({owner, repo, issue_number,
+              body: `@${author} \`${repoName}\` is already filed under **${newCategoryLong}** - ` +
+                    `nothing to change. Closing this out. If that's wrong, comment \`/submit\` and ` +
+                    `we'll flag it for a maintainer instead.`});
+            await github.rest.issues.update({owner, repo, issue_number, state: 'closed'});
+
+      # --- from here on: verified OR unconfirmed - both get a PR ---------------
+      # REPO_NAME/NEW_CATEGORY trace back to attacker-influenceable free text (the
+      # issue form's repoName input and category dropdown) - passed via env and
+      # referenced as $VAR/process.env.VAR rather than ${{ }}-interpolated directly
+      # into run:/script: text, so a value containing shell/JS metacharacters can't
+      # break out of the intended commands (same pattern used throughout this repo's
+      # other verify/apply workflows - see cerebrum.md's injection-fix notes).
+
+      - name: Apply category change on a branch
+        id: apply
+        if: >-
+          steps.authz.outputs.ok == 'true' &&
+          (steps.verify.outputs.verdict == 'verified' || steps.verify.outputs.verdict == 'unconfirmed')
+        env:
+          REPO_NAME: ${{ steps.verify.outputs.repo_name }}
+          NEW_CATEGORY_LONG: ${{ steps.verify.outputs.new_category_long }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="change-category/$REPO_NAME"
+          git checkout -B "$BRANCH"
+
+          OUT=$(python .github/scripts/change_plugin_category.py \
+            --plugin-list pluginList.json --categories pluginCategories.json \
+            --repo-name "$REPO_NAME" --new-category "$NEW_CATEGORY_LONG") || true
+          echo "$OUT"
+          {
+            echo "status<<EOF"
+            echo "$OUT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          if [[ "$OUT" == changed:* ]]; then
+            git add pluginList.json
+            git commit -m "Change $REPO_NAME category to $NEW_CATEGORY_LONG (request #$ISSUE_NUMBER)"
+            git push -f origin "$BRANCH"
+          fi
+
+      - name: Open or update PR
+        if: >-
+          steps.authz.outputs.ok == 'true' &&
+          (steps.verify.outputs.verdict == 'verified' || steps.verify.outputs.verdict == 'unconfirmed') &&
+          startsWith(steps.apply.outputs.status, 'changed')
+        uses: actions/github-script@v7
+        env:
+          REPO_NAME: ${{ steps.verify.outputs.repo_name }}
+          NEW_CATEGORY_LONG: ${{ steps.verify.outputs.new_category_long }}
+          OLD_CATEGORY: ${{ steps.apply.outputs.old_category }}
+          BRANCH: ${{ steps.apply.outputs.branch }}
+          PLUGIN_OWNER: ${{ steps.verify.outputs.owner }}
+          PLUGIN_REPO: ${{ steps.verify.outputs.repo }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            const repoName = process.env.REPO_NAME;
+            const newCategoryLong = process.env.NEW_CATEGORY_LONG;
+            const oldCategory = process.env.OLD_CATEGORY;
+            const branch = process.env.BRANCH;
+            const verdict = '${{ steps.verify.outputs.verdict }}';
+            const registeredOwner = process.env.PLUGIN_OWNER;
+            const pluginRepo = process.env.PLUGIN_REPO;
+            const pluginRepoUrl = registeredOwner && pluginRepo ? `https://github.com/${registeredOwner}/${pluginRepo}` : null;
+            const reporter = context.payload.issue.user.login;
+
+            // Always open the PR - the ownership check still ran, it just now decides
+            // what this line says instead of whether a PR happens at all. That's the
+            // one thing a maintainer needs to make an informed merge/close call.
+            const ownershipLine = verdict === 'verified'
+              ? `**Owner:** \`${registeredOwner}\` - ✅ confirmed (matches requester)`
+              : `**Owner:** ${registeredOwner ? `\`${registeredOwner}\`` : '(could not be determined)'} - ` +
+                `⚠️ **NOT verified** (org-owned repo, or requester doesn't match the registered owner)`;
+
+            const lines = [
+              `Changes \`${repoName}\`'s category from **${oldCategory}** to **${newCategoryLong}** in ` +
+              `\`pluginList.json\`, per category-change request #${issue_number}.`,
+              '',
+              ...(pluginRepoUrl ? [`**Plugin repo:** ${pluginRepoUrl}`] : []),
+              ownershipLine,
+              `**Requested by:** @${reporter}`,
+              '',
+              '**Merging applies the change. Closing rejects it.** Neither happens automatically - ' +
+              (verdict === 'verified'
+                ? 'ownership was confirmed, but this still isn\'t a direct commit (see the workflow header for why).'
+                : 'review the ownership note above before deciding.'),
+            ];
+            const body = lines.join('\n');
+
+            const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${branch}`, state: 'open' });
+            let pr = existing.data[0];
+            if (!pr) {
+              const titleSuffix = verdict === 'verified' ? '' : ' (unverified owner)';
+              const created = await github.rest.pulls.create({
+                owner, repo, title: `[Plugin] Change ${repoName} category to ${newCategoryLong}${titleSuffix}`,
+                body, head: branch, base: 'master',
+              });
+              pr = created.data;
+            } else {
+              await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body });
+            }
+
+            const MARKER = '<!-- category-change-pr -->';
+            const comments = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existingComment = comments.data.find(c => c.body && c.body.includes(MARKER));
+            const commentBody = `${MARKER}\n📦 Pull request: ${pr.html_url}\n\nClosing this issue - ` +
+              'further discussion happens on the PR now. Merging (applies the change) or closing ' +
+              '(rejects the request) is a maintainer\'s call, not automatic.';
+            if (existingComment) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existingComment.id, body: commentBody });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: commentBody });
+            }
+            await github.rest.issues.update({ owner, repo, issue_number, state: 'closed' });

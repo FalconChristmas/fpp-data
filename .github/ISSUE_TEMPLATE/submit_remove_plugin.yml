@@ -1,0 +1,87 @@
+# GitHub Issue Form - "Request Plugin Removal".
+#
+# WHAT THIS IS: the opt-out counterpart to plugin-submission. An author who no longer
+# wants to maintain their plugin (e.g. rather than update it for a new FPP major) fills
+# this in to request removal from pluginList.json. A maintainer then merges the removal
+# (moving it to oldplugins/ where appropriate).
+#
+# WHERE IT LIVES: FalconChristmas/fpp-data/.github/ISSUE_TEMPLATE/submit_remove_plugin.yml
+
+name: Request Plugin Removal
+description: Request that your plugin be removed from FPP's Plugin Manager list.
+title: "[Remove plugin request]"
+labels: ["plugin", "removal-request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form to have your plugin **removed** from `pluginList.json` - for
+        example if you no longer wish to maintain it, or don't intend to update it for
+        the current FPP release. Existing installs keep working; the plugin simply
+        stops being listed for new installs.
+
+  - type: dropdown
+    id: reporterType
+    attributes:
+      label: Are you the plugin's author/maintainer?
+      description: >
+        Context for whoever reviews this issue - it doesn't change what happens next.
+        Ownership is verified the same way either way: your GitHub login is checked
+        against the plugin's registered owner, or you can prove control by setting
+        `"delist": true` in the plugin's pluginInfo.json. Can't prove it yourself
+        (e.g. reporting someone else's abandoned plugin)? Comment `/submit` after
+        opening the issue to flag it for a maintainer instead.
+      options:
+        - "Yes - I am the author/maintainer (or authorized on their behalf)"
+        - "No - I'm a third party reporting this plugin as abandoned/broken"
+    validations:
+      required: true
+
+  - type: input
+    id: repoName
+    attributes:
+      label: Plugin repoName
+      description: >
+        The `repoName` as it appears in pluginList.json - or just paste your
+        GitHub repo URL / pluginInfo.json URL, we'll figure out the repoName.
+      placeholder: fpp-my-plugin
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reason
+    attributes:
+      label: Reason
+      options:
+        - No longer maintained
+        - Not being updated for the current FPP major
+        - Superseded by another plugin
+        - Duplicate / submitted in error
+        - Other (explain below)
+    validations:
+      required: true
+
+  - type: input
+    id: successor
+    attributes:
+      label: Replacement / successor (optional)
+      description: If another plugin supersedes this one, its repoName or URL.
+      placeholder: fpp-my-plugin-ng
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: ack
+    attributes:
+      label: Confirmation
+      options:
+        - label: I understand existing installs are unaffected; only the listing is removed.
+          required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Optional context for the maintainers.
+    validations:
+      required: false

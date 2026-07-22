@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/.github/schema/pluginList.schema.json",
+  "title": "FPP pluginList.json",
+  "description": "The master index of community plugins shown in FPP's Plugin Manager.",
+  "type": "object",
+  "required": ["pluginList"],
+  "additionalProperties": false,
+  "properties": {
+    "pluginList": {
+      "type": "array",
+      "description": "One entry per plugin: [displayName, pluginInfoURL] or [displayName, pluginInfoURL, category].",
+      "items": {
+        "type": "array",
+        "description": "A positional tuple. Element 2 (category) is optional and backward-compatible.",
+        "minItems": 2,
+        "maxItems": 3,
+        "prefixItems": [
+          { "type": "string", "minLength": 1, "description": "Display/repo name (used as the entry key)." },
+          { "type": "string", "pattern": "^https://raw\\.githubusercontent\\.com/", "description": "Raw URL to the plugin's pluginInfo.json. Must be hosted on GitHub — that's the only source FPP plugins support." },
+          { "type": "string", "minLength": 1, "description": "Category short name (must exist in pluginCategories.json)." }
+        ],
+        "items": { "type": "string" }
+      }
+    }
+  }
+}

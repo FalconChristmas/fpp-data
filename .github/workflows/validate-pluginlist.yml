@@ -1,0 +1,84 @@
+# Validates pluginList.json on every PR that touches it.
+#
+# HOW TO READ THIS:
+#   on:        the event that triggers the workflow (a PR touching pluginList.json)
+#   jobs:      one job "validate" running on a fresh Ubuntu VM GitHub gives us
+#   steps:     the ordered commands; a red X on any failing step fails the PR check
+#
+# The validator only hard-checks NEW/CHANGED entries (it diffs against the base branch),
+# so a PR isn't blocked by a pre-existing issue elsewhere in the list.
+
+name: ZZ - Automation - Validate pluginList
+
+on:
+  pull_request:
+    paths:
+      - "pluginList.json"
+      - "pluginCategories.json"
+      - ".github/schema/**"
+      - ".github/scripts/**"
+      - ".github/workflows/validate-pluginlist.yml"
+
+# Least-privilege: read the repo, write PR comments. Nothing else.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 gives us the full history so we can read the base-branch file.
+      - name: Check out PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install --quiet jsonschema
+
+      # Grab the base-branch copy of pluginList.json so the validator can diff-scope.
+      # `|| true` so a first-time file (no base) doesn't fail the step.
+      - name: Fetch base pluginList.json
+        run: |
+          git show "origin/${{ github.base_ref }}:pluginList.json" > base_pluginList.json 2>/dev/null || echo "no base file (validating all entries)"
+
+      - name: Validate
+        id: validate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # lifts GitHub API rate limit to 5000/hr
+        run: |
+          python .github/scripts/validate_pluginlist.py \
+            --pluginlist pluginList.json \
+            --categories pluginCategories.json \
+            --schema-dir .github/schema \
+            --base base_pluginList.json \
+            --output validation-report.md
+
+      # Post/update a sticky PR comment with the report - runs even if validation failed.
+      # actions/github-script is first-party (maintained by GitHub).
+      - name: Comment report on PR
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- plugin-list-validation -->';
+            let body = marker + '\n';
+            try { body += fs.readFileSync('validation-report.md', 'utf8'); }
+            catch { body += '## Plugin list validation\n\n⚠️ The validator did not produce a report (it may have crashed - check the run log).'; }
+
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.rest.issues.listComments({owner, repo, issue_number});
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({owner, repo, comment_id: existing.id, body});
+            } else {
+              await github.rest.issues.createComment({owner, repo, issue_number, body});
+            }

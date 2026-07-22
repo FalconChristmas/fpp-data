@@ -1,0 +1,539 @@
+# Plugin check for brand-new plugin submissions.
+#
+# WHY: check-submission-token.yml only guards the contact token; nothing else was
+# checked automatically on a new "Submit a plugin" issue before a human reviewed it
+# by hand. This reuses the same linter (lint_plugin.py) and pluginInfo.json schema
+# the fpp<major> new-major-release scan already runs against LISTED plugins, but gates
+# harder - see scan_submission.py's docstring: a brand-new submission has no
+# grandfathering, so BEST_PRACTICE findings block here too, not just BLOCKER.
+#
+# Runs on the PUBLIC repo and only ever reads/clones the submitter's own public repo -
+# holds no secrets beyond the default GITHUB_TOKEN used to comment/label.
+#
+# RESCANNING: the fix for a failed scan almost always lives in the submitter's OWN
+# repo, not the issue body - so "edit the issue to re-trigger" (which does work, since
+# this also listens for `edited`) isn't the natural way anyone asks for a re-check.
+# Same problem, same solution as remove-plugin-verify.yml: a comment containing `/recheck`
+# re-runs the scan against the (unchanged) issue body, re-fetching pluginInfo.json and
+# re-cloning the repo fresh each time so it sees whatever was just pushed.
+#
+# OVERRIDING: `/submit` doesn't bypass the scan silently - it still runs and still
+# reports findings, it just makes the submission "ready" (pass || /submit) regardless
+# of the result, with a note that the submitter chose to proceed anyway. "Ready" does
+# NOT mean the ISSUE gets a `needs-manual-review` label, though - every ready outcome
+# either closes the issue (a listing PR opens, where the maintainer's actual merge
+# decision happens; or the plugin's already listed) or is self-service (unknown
+# category - edit and `/recheck`), so there's no outcome where flagging the issue
+# itself for manual review would be correct.
+#
+# LISTING PR: the moment a submission is ready (pass or /submit), this also opens a PR
+# adding it to pluginList.json - add_plugin_entry.py. No further validation runs against
+# that PR by design: schema and archived/issues-disabled all already
+# ran in scan_submission.py above to decide "ready", and category validity is checked by
+# add_plugin_entry.py itself before it'll insert anything. validate-pluginlist.yml would
+# only add value if a maintainer hand-edits the entry before merging - and a human push
+# to the PR branch triggers it completely normally, no special-casing needed.
+#
+# Idempotent by construction: the branch name is deterministic (add-plugin/<repoName>),
+# rebuilt from master every run, and force-pushed - a later /recheck or /submit just
+# updates the same PR rather than piling up duplicates, and once master actually has the
+# entry (PR merged), add_plugin_entry.py reports ALREADY_LISTED and this becomes a no-op.
+#
+# AUTHZ: /recheck and /submit only take effect from the issue's original reporter -
+# see the "Restrict..." step below. Anyone else gets told to open their own submission
+# instead of being able to act on someone else's.
+
+name: ZZ - Automation - Scan new plugin submission
+
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+  contents: write
+  pull-requests: write
+
+jobs:
+  scan:
+    # Identify submissions by BODY SHAPE, not by label - see check-submission-token.yml
+    # for why label-based triggers silently no-op on this repo. For a comment trigger,
+    # only run on the actual `/recheck` or `/submit` commands - otherwise every comment
+    # on a submission issue (including our own scan results) would re-run this.
+    #
+    # The `contains()` below is a coarse pre-filter (also matches a comment that merely
+    # mentions "/recheck" or "/submit" as a substring, e.g. inside a longer command like
+    # `/recheck_dont_actually_check` or a URL) - the "Restrict..." step's word-boundary
+    # regex is the real, precise command parse. See remove-plugin-verify.yml, which had
+    # the exact same bug (issue #41 misfiring on a URL containing "/submit").
+    #
+    # `state == 'open'` blocks /recheck and /submit once the issue closes (a listing
+    # PR opened, or a maintainer closed it by hand) - recheck-listing-pr.yml is the
+    # only supported path once that's happened, not the closed issue.
+    if: >-
+      github.event.issue.state == 'open' &&
+      contains(github.event.issue.body, '### pluginInfo.json raw URL') &&
+      (github.event_name != 'issue_comment' ||
+       contains(github.event.comment.body, '/recheck') ||
+       contains(github.event.comment.body, '/submit'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restrict /recheck and /submit to the original reporter
+        id: authz
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName !== 'issue_comment') {
+              core.setOutput('ok', 'true');
+              core.setOutput('command', '');
+              return;
+            }
+            const body = context.payload.comment.body;
+            // Word-boundary match, not substring - see the job-level `if:` comment above.
+            const isSubmit = /(?:^|\s)\/submit(?:\s|$)/.test(body);
+            const isRecheck = /(?:^|\s)\/recheck(?:\s|$)/.test(body);
+            if (!isSubmit && !isRecheck) {
+              core.setOutput('ok', 'false');
+              core.setOutput('command', '');
+              return;
+            }
+            const commandUsed = isSubmit ? 'submit' : 'recheck';
+            core.setOutput('command', commandUsed);
+
+            const commenter = context.payload.comment.user.login;
+            const author = context.payload.issue.user.login;
+            const { owner, repo } = context.repo;
+            if (commenter.toLowerCase() === author.toLowerCase()) {
+              core.setOutput('ok', 'true');
+              return;
+            }
+            // Repo maintainers (push/maintain/admin on fpp-data-ci) can also trigger
+            // this, not just the original reporter - e.g. to help someone stuck, or
+            // recheck after fixing something on the submitter's behalf.
+            try {
+              const perm = await github.rest.repos.getCollaboratorPermissionLevel({ owner, repo, username: commenter });
+              if (['admin', 'write', 'maintain'].includes(perm.data.permission)) {
+                core.setOutput('ok', 'true');
+                return;
+              }
+            } catch (e) { /* not a collaborator, or lookup failed -- fall through to reject */ }
+            core.setOutput('ok', 'false');
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: `⚠️ @${commenter} only the original reporter (**@${author}**) or a fpp-data-ci ` +
+                    `maintainer can use \`/${commandUsed}\` on this issue. If you'd like to submit your ` +
+                    `own plugin, please open a new request at ` +
+                    `https://falconchristmas.github.io/fpp-data/submit_new_plugin/.`,
+            });
+
+      - uses: actions/checkout@v4
+        if: steps.authz.outputs.ok == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.authz.outputs.ok == 'true'
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        if: steps.authz.outputs.ok == 'true'
+        run: pip install jsonschema
+
+      - name: Extract pluginInfo URL + category from the issue body
+        id: extract
+        if: steps.authz.outputs.ok == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || '';
+            function field(label) {
+              for (const section of body.split(/^###\s+/m)) {
+                if (new RegExp('^' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(section)) {
+                  return section.replace(/^[^\n]*\n/, '').trim();
+                }
+              }
+              return '';
+            }
+            const infoUrl = field('pluginInfo.json raw URL');
+            const category = field('Category');
+            core.setOutput('plugininfo_url', infoUrl === '_No response_' ? '' : infoUrl);
+            core.setOutput('category', category === '_No response_' ? '' : category);
+
+      - name: Run plugin check
+        if: steps.authz.outputs.ok == 'true' && steps.extract.outputs.plugininfo_url != ''
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # for the archived/issues-disabled/bugURL check
+          # PLUGININFO_URL is raw, unvalidated text straight off the issue form (this
+          # scan is what validates it -- nothing has checked it yet) -- passed via env
+          # and referenced as "$PLUGININFO_URL" rather than ${{ }}-interpolated
+          # directly into the script text, so shell metacharacters in it can't break
+          # out of the intended command. Same class of fix as the "Comment + close"
+          # step in remove-plugin-verify.yml.
+          PLUGININFO_URL: ${{ steps.extract.outputs.plugininfo_url }}
+        run: |
+          python .github/scripts/scan_submission.py \
+            --plugininfo-url "$PLUGININFO_URL" \
+            --schema .github/schema/pluginInfo.schema.json \
+            --plugin-list pluginList.json \
+            --reporter "${{ github.event.issue.user.login }}" \
+            --issue-number "${{ github.event.issue.number }}" \
+            --gh-repo "${{ github.repository }}" \
+            --out scan-result.json
+
+      - name: Comment results
+        id: comment
+        if: steps.authz.outputs.ok == 'true' && steps.extract.outputs.plugininfo_url != ''
+        uses: actions/github-script@v7
+        env:
+          # CATEGORY is raw text parsed off the (editable) issue body, not schema-
+          # constrained -- passed via env/process.env rather than ${{ }}-interpolated
+          # directly into the script text, so a value containing a `'` can't break out
+          # of the JS string literal it'd otherwise land in. Same class of fix as this
+          # workflow's PLUGININFO_URL above and remove-plugin-verify.yml's REMOVED/
+          # ERROR_MSG.
+          CATEGORY: ${{ steps.extract.outputs.category }}
+        with:
+          script: |
+            const fs = require('fs');
+            const MARKER = '<!-- submission-plugin-check -->';
+            const result = JSON.parse(fs.readFileSync('scan-result.json', 'utf8'));
+
+            const badge = { blocker: '🛑', 'best-practice': '⚠️', optional: '💡' };
+            const label = { blocker: 'Blocker', 'best-practice': 'Best practice', optional: 'Optional' };
+            const order = { blocker: 0, 'best-practice': 1, optional: 2 };
+            const findings = [...result.findings].sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
+
+            // Mention the reporter directly: unlike the bulk fpp<major> new-major-release scan
+            // (MENTION_OWNER = False in lib_plugin_schema.py - pinging every listed
+            // plugin's author unprompted would be spam), this is a direct reply to an
+            // issue the person just opened themselves asking for exactly this feedback.
+            const reporter = context.payload.issue.user.login;
+
+            // Which command triggered this run, if any (auto opened/edited => ''). Reuse
+            // the authz step's already-correct (word-boundary, not substring) parse
+            // rather than re-deriving it here - recomputing it independently is exactly
+            // how this drifted out of sync and reintroduced the substring-match bug.
+            const isSubmitOverride = '${{ steps.authz.outputs.command }}' === 'submit';
+
+            // repoName/repo/owner are derived server-side by scan_submission.py from
+            // pluginInfo.json (authoritative), not taken from the issue body - surfaced
+            // here as a Field: Data block so anyone reading the issue gets them at a
+            // glance, without opening pluginInfo.json or waiting to cross-reference the
+            // (informational-only, submitter-typed) "GitHub repo" issue field above.
+            // Owner is named but NOT @-mentioned (no leading @, plain text only) - unlike
+            // the reporter below, they didn't ask for this notification by opening the issue,
+            // so pinging them unprompted would be the same spam problem MENTION_OWNER=False
+            // avoids for the new-major-release scanner in lib_plugin_schema.py.
+            const category = process.env.CATEGORY || '';
+            const fields = [];
+            if (result.repo_name) fields.push(`**Plugin:** ${result.repo_name}`);
+            if (result.repo_url) fields.push(`**Repo:** ${result.repo_url}`);
+            if (result.owner) fields.push(`**Owner:** \`${result.owner}\``);
+            if (category) fields.push(`**Category:** ${category}`);
+            const fieldBlock = fields.length ? fields : null;
+
+            // Already listed short-circuits everything else: no bullet list of
+            // findings (there aren't any others - scan_submission.py skipped the
+            // ownership check, repo-metadata, and clone+lint entirely once it knew
+            // this), no /recheck or /submit guidance (there's nothing to fix or
+            // override), just the fact and a close. Mirrors verify_remove_plugin.py's
+            // not_found auto-close on the removal side.
+            if (result.already_listed) {
+              const { owner, repo } = context.repo;
+              const issue_number = context.payload.issue.number;
+              const lines = [`${MARKER}`, '### 📦 Already listed', ''];
+              if (fieldBlock) lines.push(...fieldBlock, '');
+              lines.push(`\`${result.repo_name}\` is already in \`pluginList.json\` - nothing to do here. Closing.`);
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: lines.join('\n') });
+              await github.rest.issues.update({ owner, repo, issue_number, state: 'closed' });
+              core.setOutput('ready', 'false');
+              core.setOutput('repo_name', result.repo_name || '');
+              core.setOutput('repo_url', result.repo_url || '');
+              core.setOutput('duplicate_issues', (result.duplicate_issues || []).join(','));
+              return;
+            }
+
+            // The lint itself failing to run (clone-failed) is not a submitter-actionable
+            // finding — it means we don't actually know whether the plugin complies,
+            // not that it doesn't. Listing it alongside real findings (schema, ownership,
+            // ...) would misleadingly imply "fix these and you're done" when the lint
+            // never ran at all, and often it's just transient (network blip, momentary
+            // clone failure). So this short-circuits to a single "try again" prompt
+            // instead of a findings list, same spirit as the already_listed short-circuit
+            // above.
+            const cloneFailed = findings.some(f => f.code === 'clone-failed');
+
+            let msg;
+            if (cloneFailed) {
+              msg = ['### ⚠️ Automated plugin check: could not run',
+                     ''];
+              if (fieldBlock) msg.push(...fieldBlock, '');
+              msg.push(`@${reporter} could not clone your repo to run the plugin checks — this is often ` +
+                       'transient. Comment `/recheck` to try again. If it keeps failing, check that the repo ' +
+                       'is public and reachable.');
+            } else if (result.pass) {
+              msg = ['### ✅ Automated plugin check: passed',
+                     ''];
+              if (fieldBlock) msg.push(...fieldBlock, '');
+              msg.push(`@${reporter} no blocking issues found. A maintainer will still review this by hand before it's added to \`pluginList.json\`.`);
+            } else {
+              msg = ['### 🛑 Automated plugin check: needs changes',
+                     ''];
+              if (fieldBlock) msg.push(...fieldBlock, '');
+              msg.push(`@${reporter} found ${result.num_blocking} issue(s) this must be fixed before the plugin can be listed:`,
+                     '');
+              for (const f of findings) {
+                if (f.severity === 'optional') continue;
+                msg.push(`- ${badge[f.severity] || ''} **${label[f.severity] || f.severity} - ${f.code}** - ${f.message}`);
+              }
+              if (isSubmitOverride) {
+                msg.push('',
+                         `@${reporter} used \`/submit\` to flag this for maintainer review despite the findings above. ` +
+                         'A human will take it from here.');
+              } else {
+                msg.push('',
+                         'Push a fix to your repo, then comment `/recheck` here (no need to edit this issue) to re-run the scan. ' +
+                         'If you believe these checks are wrong and want a maintainer to look anyway, comment `/submit` instead.');
+                // plugininfo-fetch/no-repo-url specifically mean we couldn't even resolve a
+                // repo from what was entered - that's not a "push a fix" situation (there's
+                // no real repo state to fix yet), it's much more often just a wrong/garbled
+                // pluginInfo.json URL. Editing this issue's description does NOT retrigger a
+                // scan (only /recheck does, and the fix here is a different URL, not a repo
+                // push), so closing and starting over via the guided page is genuinely the
+                // easier path, not just a brush-off.
+                if (findings.some(f => f.code === 'plugininfo-fetch' || f.code === 'no-repo-url')) {
+                  msg.push('',
+                           'If you entered the wrong pluginInfo.json URL, please close this issue and submit a new request at ' +
+                           'https://falconchristmas.github.io/fpp-data/submit_new_plugin/ instead of trying to fix it here.');
+                }
+              }
+            }
+            const optional = cloneFailed ? [] : findings.filter(f => f.severity === 'optional');
+            if (optional.length) {
+              msg.push('', '<details open><summary>💡 Optional polish (not blocking)</summary>', '');
+              for (const f of optional) msg.push(`- ${f.message}`);
+              msg.push('', '</details>');
+            }
+
+            // A fresh comment per run, not an edit-in-place: a /recheck after pushing a
+            // fix should visibly show up as a new result, not silently rewrite history
+            // in a way that's easy to miss or lose track of what changed.
+            const full = `${MARKER}\n${msg.join('\n')}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({ owner, repo, issue_number, body: full });
+
+            // needs-manual-review is NOT added here, even when ready: the maintainer's
+            // actual decision point is the listing PR opened below (ADDED), not this
+            // issue - which closes right along with it. The other two outcomes
+            // (ALREADY_LISTED) also close, and (UNKNOWN_CATEGORY) is self-service (edit
+            // the category, /recheck), not something needing a maintainer's judgement.
+            // So there's no outcome where labeling the ISSUE for manual review is
+            // actually correct - only ever clean up a stale label from a previous run.
+            //
+            // `&& !!result.repo_name` is load-bearing, not defensive: /submit alone used
+            // to be enough to set ready=true even when plugininfo-fetch/no-repo-url meant
+            // scan_submission.py never resolved a repo_name at all (e.g. a garbled
+            // pluginInfo.json URL like "foo/foo") - the "Add pluginList.json entry on a
+            // branch" step below still ran with an empty REPO_NAME, and
+            // `git checkout -B "add-plugin/"` (empty branch suffix) is an invalid ref,
+            // failing the whole job with exit 128 and emailing a failure notification for
+            // something that was never fixable by retrying. /submit can still override a
+            // real lint finding on a REAL, resolved repo - it just can't manufacture a
+            // repo_name that was never there to begin with.
+            const ready = (result.pass || isSubmitOverride) && !!result.repo_name;
+            try {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'needs-manual-review' });
+            } catch (e) {
+              if (e.status !== 404) throw e;   // 404 = label wasn't there; fine
+            }
+            core.setOutput('ready', String(ready));
+            // repoName/repoUrl are never taken from the issue body - both come from
+            // scan_submission.py, which derived them straight from pluginInfo.json.
+            core.setOutput('repo_name', result.repo_name || '');
+            core.setOutput('repo_url', result.repo_url || '');
+            core.setOutput('duplicate_issues', (result.duplicate_issues || []).join(','));
+
+      - name: Notify existing open request(s) for the same plugin
+        # Only on a genuinely NEW issue -- an edit or /recheck on an existing one
+        # would otherwise re-notify the same duplicates repeatedly.
+        if: steps.authz.outputs.ok == 'true' && github.event.action == 'opened' && steps.comment.outputs.duplicate_issues != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            const dupes = '${{ steps.comment.outputs.duplicate_issues }}'.split(',').filter(Boolean);
+            for (const numStr of dupes) {
+              const other = parseInt(numStr, 10);
+              await github.rest.issues.createComment({ owner, repo, issue_number: other,
+                body: `👀 A new submission for the same plugin was just opened: #${issue_number}.` });
+            }
+
+      - name: Add pluginList.json entry on a branch
+        id: edit
+        if: steps.authz.outputs.ok == 'true' && steps.comment.outputs.ready == 'true'
+        env:
+          # All three are attacker-influenceable free text (REPO_NAME can come
+          # straight from pluginInfo.json's self-declared "repoName" field, which
+          # schema validation flags but does not block when /submit overrides a
+          # failing scan; PLUGININFO_URL and CATEGORY are raw issue-form text with no
+          # schema gate at all). Passed via env and referenced as "$VAR" rather than
+          # ${{ }}-interpolated directly into the script/commit-message text, so shell
+          # metacharacters in any of them can't break out of the intended commands.
+          REPO_NAME: ${{ steps.comment.outputs.repo_name }}
+          PLUGININFO_URL: ${{ steps.extract.outputs.plugininfo_url }}
+          CATEGORY: ${{ steps.extract.outputs.category }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BRANCH="add-plugin/$REPO_NAME"
+          git checkout -B "$BRANCH"
+
+          OUT=$(python .github/scripts/add_plugin_entry.py \
+            --plugin-list pluginList.json \
+            --categories pluginCategories.json \
+            --repo-name "$REPO_NAME" \
+            --plugininfo-url "$PLUGININFO_URL" \
+            --category "$CATEGORY") || true
+          echo "$OUT"
+          {
+            echo "status<<EOF"
+            echo "$OUT"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+          if [[ "$OUT" == ADDED* ]]; then
+            git add pluginList.json
+            git commit -m "Add $REPO_NAME to pluginList.json
+
+          Requested in #$ISSUE_NUMBER."
+            git push -f origin "$BRANCH"
+          fi
+
+      - name: Open or update the listing PR
+        if: steps.authz.outputs.ok == 'true' && steps.comment.outputs.ready == 'true' && startsWith(steps.edit.outputs.status, 'ADDED')
+        uses: actions/github-script@v7
+        env:
+          # BRANCH/REPO_NAME both ultimately trace back to attacker-influenceable
+          # free text (see the "Add pluginList.json entry" step above) -- env/
+          # process.env rather than ${{ }}-interpolated into the script text, so a
+          # value containing a `'` can't break out of the JS string literal.
+          BRANCH: ${{ steps.edit.outputs.branch }}
+          REPO_NAME: ${{ steps.comment.outputs.repo_name }}
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            const branch = process.env.BRANCH;
+            const repoName = process.env.REPO_NAME;
+
+            const result = JSON.parse(fs.readFileSync('scan-result.json', 'utf8'));
+            const badge = { blocker: '🛑', 'best-practice': '⚠️', optional: '💡' };
+            const label = { blocker: 'Blocker', 'best-practice': 'Best practice', optional: 'Optional' };
+            const order = { blocker: 0, 'best-practice': 1, optional: 2 };
+            const blocking = result.findings
+              .filter(f => f.severity !== 'optional')
+              .sort((a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
+
+            const reporter = context.payload.issue.user.login;
+            const repoUrl = '${{ steps.comment.outputs.repo_url }}';
+            const registeredOwner = result.owner;
+
+            // Hidden marker recheck-listing-pr.yml parses to know which plugin/issue
+            // this PR is for, without re-deriving either from the visible prose below
+            // (same pattern as new-major-release-issue-recheck.yml's `<!-- plugin:... -->`).
+            const lines = [`<!-- listing-pr repo:${repoName} issue:${issue_number} -->`,
+                            `Adds \`${repoName}\` to \`pluginList.json\`, requested in #${issue_number}.`, ''];
+            if (repoUrl) lines.push(`**Plugin repo:** ${repoUrl}`);
+            lines.push(`**Submitted by:** @${reporter}`);
+            if (registeredOwner) {
+              const same = registeredOwner.toLowerCase() === reporter.toLowerCase();
+              lines.push(`**Registered owner (from srcURL):** @${registeredOwner}` +
+                (same ? ' (matches submitter)'
+                      : result.owner_confirmed
+                        ? ' - differs from the submitter, but ownership was verified via `submissionToken` in pluginInfo.json.'
+                        : ' - differs from the submitter and was **not** verified; note the contact email on ' +
+                          'file is the submitter\'s, not necessarily the owner\'s. (This PR still only opened ' +
+                          'because the reporter used `/submit` to override that finding.)'));
+            } else {
+              lines.push('**Registered owner:** could not be resolved from srcURL');
+            }
+            lines.push('');
+            if (result.pass) {
+              lines.push('✅ The automated plugin check passed - no blocking issues found.', '');
+            } else {
+              lines.push(
+                `⚠️ **Opened despite ${blocking.length} unresolved finding(s) below** - the reporter used ` +
+                '`/submit` to ask for review anyway rather than fix them first:', '');
+              for (const f of blocking) {
+                lines.push(`- ${badge[f.severity] || ''} **${label[f.severity] || f.severity} - ${f.code}** - ${f.message}`);
+              }
+              lines.push('');
+            }
+            lines.push(
+              'Schema, category, and archived/issues-disabled were already checked before ' +
+              'this PR existed.', '',
+              '**Merging is entirely up to a maintainer\'s judgement** - this PR being open is not an approval, ' +
+              'especially if it was opened via `/submit` over unresolved findings above.', '',
+              `_A repo maintainer (or @${reporter}) can comment \`/recheck\` here to re-run the plugin ` +
+              'check against the repo\'s current state and refresh the findings above._');
+            const body = lines.join('\n');
+
+            const existing = await github.rest.pulls.list({ owner, repo, head: `${owner}:${branch}`, state: 'open' });
+            let pr = existing.data[0];
+            if (!pr) {
+              const created = await github.rest.pulls.create({
+                owner, repo, title: `[Plugin] Add ${repoName}`, body, head: branch, base: 'master',
+              });
+              pr = created.data;
+            } else {
+              // Keep the body fresh - a later /recheck or /submit may change the findings list.
+              await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body });
+            }
+
+            const MARKER = '<!-- submission-listing-pr -->';
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: `${MARKER}\n📦 Listing PR: ${pr.html_url}\n\nClosing this issue - further discussion ` +
+                    'happens on the PR now. Merging it is a separate decision for a maintainer to make.',
+            });
+
+            // The issue's job is done once a PR exists; whether that PR gets merged is a
+            // separate, later decision that belongs to a maintainer, not this workflow.
+            await github.rest.issues.update({ owner, repo, issue_number, state: 'closed' });
+
+      - name: Comment if already listed
+        if: steps.authz.outputs.ok == 'true' && steps.comment.outputs.ready == 'true' && startsWith(steps.edit.outputs.status, 'ALREADY_LISTED')
+        uses: actions/github-script@v7
+        env:
+          REPO_NAME: ${{ steps.comment.outputs.repo_name }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: `\`${process.env.REPO_NAME}\` is already in \`pluginList.json\` - nothing to do here. Closing.`,
+            });
+            await github.rest.issues.update({ owner, repo, issue_number, state: 'closed' });
+
+      - name: Comment if the category couldn't be matched
+        if: steps.authz.outputs.ok == 'true' && steps.comment.outputs.ready == 'true' && startsWith(steps.edit.outputs.status, 'UNKNOWN_CATEGORY')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: "⚠️ Couldn't open the listing PR: the **Category** field on this issue doesn't match " +
+                    "any category name. Edit the issue's Category field to one of the dropdown options, " +
+                    "then comment `/recheck`.",
+            });

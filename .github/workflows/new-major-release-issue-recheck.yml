@@ -1,0 +1,275 @@
+# On-demand recheck for a single new-major-release tracking issue, instead of only
+# via the bulk manual scan (new-major-release-scan.yml) or the daily reconcile sweep
+# (daily-fpp-compat.yml). Mirrors scan-new-submission.yml's pattern:
+#   /recheck - re-run this one plugin's scan fresh (e.g. after pushing a fix).
+#   /submit  - the owner disagrees with a finding; flag needs-manual-review for a
+#              maintainer to decide regardless of the automated verdict.
+#
+# AUTHZ: unlike a submission/removal issue (opened by the person who then acts on
+# it), a tracking issue is opened by the new-major-release scan itself - there's no
+# "issue creator" to restrict /recheck and /submit to. This resolves the PLUGIN'S
+# REGISTERED OWNER instead (from srcURL, via resolve_plugin_owner.py) and only
+# lets that GitHub login use either command here.
+#
+# Identifies a tracking issue by the hidden
+# `<!-- plugin:<name> new_major_release:fpp<n> -->` marker
+# new_major_release_scan.issue_body() puts in its body - same body-shape approach
+# used throughout this repo's CI (see check-submission-token.yml) rather than a
+# label, since GitHub silently drops template labels that don't exist on the repo.
+
+name: ZZ - Automation - Recheck new major release tracking issue
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+jobs:
+  recheck:
+    # contains() below is a coarse pre-filter (also matches a comment merely mentioning
+    # "/recheck"/"/submit" as a substring, e.g. "/recheck_dont_actually_check" or a URL)
+    # - the extract step's word-boundary regex is the real, precise command parse. See
+    # scan-new-submission.yml / remove-plugin-verify.yml, which had the exact same bug.
+    #
+    # `state == 'open'` blocks /recheck and /submit once the tracking issue is closed
+    # (certified compatible) - nothing left to recheck once that's happened.
+    if: >-
+      github.event.issue.state == 'open' &&
+      contains(github.event.issue.body, '<!-- plugin:') &&
+      (contains(github.event.comment.body, '/recheck') || contains(github.event.comment.body, '/submit'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - run: pip install jsonschema
+
+      - name: Extract plugin name + target major from the issue body
+        id: extract
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || '';
+            const m = body.match(/<!--\s*plugin:(\S+)\s+new_major_release:fpp(\d+)\s*-->/);
+            core.setOutput('name', m ? m[1] : '');
+            core.setOutput('target', m ? m[2] : '');
+
+            // Word-boundary match, not substring - the job-level `if:` above is only a
+            // coarse pre-filter that also matches e.g. "/recheck_dont_actually_check".
+            const commentBody = context.payload.comment.body;
+            const isSubmit = /(?:^|\s)\/submit(?:\s|$)/.test(commentBody);
+            const isRecheck = /(?:^|\s)\/recheck(?:\s|$)/.test(commentBody);
+            core.setOutput('command', isSubmit ? 'submit' : (isRecheck ? 'recheck' : ''));
+
+      - name: Resolve the plugin's registered owner
+        id: owner
+        if: steps.extract.outputs.name != '' && steps.extract.outputs.command != ''
+        env:
+          # REPO_NAME traces back to a \S+ regex match off the tracking issue body --
+          # pass via env/$VAR rather than ${{ }}-interpolated directly into the script,
+          # since ${{ }} splices raw text before bash parses it (see
+          # bug-fpp-data-ci-actions-script-injection-repo-name in .wolf/buglog.json).
+          REPO_NAME: ${{ steps.extract.outputs.name }}
+          # Lifts gh_get_contributors()'s rate limit from 60/hr (anonymous) to 5000/hr.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/resolve_plugin_owner.py \
+            --plugin-list pluginList.json --repo-name "$REPO_NAME"
+
+      - name: Restrict /recheck and /submit to that owner
+        id: authz
+        if: steps.extract.outputs.name != '' && steps.extract.outputs.command != ''
+        uses: actions/github-script@v7
+        env:
+          # PLUGIN_NAME/OWNER/CONTRIBUTORS/COMMAND trace back to attacker-influenceable
+          # issue-body text -- pass via env/process.env rather than ${{ }}-interpolated
+          # directly into the script (see bug-fpp-data-ci-actions-script-injection-repo-name).
+          PLUGIN_NAME: ${{ steps.extract.outputs.name }}
+          OWNER: ${{ steps.owner.outputs.owner }}
+          CONTRIBUTORS: ${{ steps.owner.outputs.contributors }}
+          COMMAND: ${{ steps.extract.outputs.command }}
+        with:
+          script: |
+            const commenter = context.payload.comment.user.login;
+            const owner = process.env.OWNER;
+            const contributors = (process.env.CONTRIBUTORS || '').split(',').map(s => s.trim()).filter(Boolean);
+            const command = process.env.COMMAND;
+            const pluginName = process.env.PLUGIN_NAME;
+            const { owner: repoOwner, repo } = context.repo;
+
+            if (owner && commenter.toLowerCase() === owner.toLowerCase()) {
+              core.setOutput('ok', 'true');
+              return;
+            }
+            // Also allow the plugin's own top contributors (commit history only, NOT a
+            // verified collaborator-permission check - fpp-data-ci's token has no
+            // standing to query real access on a repo it doesn't own). Needed because
+            // an org-owned repo's registered "owner" is the org login itself, which no
+            // individual can ever match above - without this, org-owned plugins could
+            // only ever be /recheck'd or /submit'd by fpp-data-ci maintainers, not by
+            // anyone who actually works on the plugin.
+            if (contributors.some(c => c.toLowerCase() === commenter.toLowerCase())) {
+              core.setOutput('ok', 'true');
+              return;
+            }
+            // Repo maintainers (push/maintain/admin on fpp-data-ci) can also trigger
+            // this, not just the plugin's registered owner/contributors.
+            try {
+              const perm = await github.rest.repos.getCollaboratorPermissionLevel({ owner: repoOwner, repo, username: commenter });
+              if (['admin', 'write', 'maintain'].includes(perm.data.permission)) {
+                core.setOutput('ok', 'true');
+                return;
+              }
+            } catch (e) { /* not a collaborator, or lookup failed -- fall through to reject */ }
+            core.setOutput('ok', 'false');
+            const issue_number = context.payload.issue.number;
+            await github.rest.issues.createComment({
+              owner: repoOwner, repo, issue_number,
+              body: `⚠️ @${commenter} only \`${pluginName}\`'s registered owner` +
+                    (owner ? ` (**@${owner}**)` : '') +
+                    (contributors.length ? ` or contributor (${contributors.map(c => `\`${c}\``).join(', ')})` : '') +
+                    ` or a fpp-data-ci maintainer can use \`/${command}\` on this tracking issue. If you ` +
+                    `believe this is wrong, please contact a maintainer.`,
+            });
+
+      - name: Recheck this plugin
+        id: recheck
+        if: steps.authz.outputs.ok == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # REPO_NAME/TARGET_MAJOR trace back to attacker-influenceable issue-body text --
+          # pass via env/$VAR rather than ${{ }}-interpolated directly into the script.
+          REPO_NAME: ${{ steps.extract.outputs.name }}
+          TARGET_MAJOR: ${{ steps.extract.outputs.target }}
+        run: |
+          python .github/scripts/new_major_release_recheck_one.py \
+            --plugin-list pluginList.json \
+            --repo-name "$REPO_NAME" \
+            --target-major "$TARGET_MAJOR" \
+            --schema .github/schema/pluginInfo.schema.json \
+            --out recheck-result.json
+
+      - name: Update the tracking issue
+        if: steps.authz.outputs.ok == 'true'
+        uses: actions/github-script@v7
+        env:
+          # PLUGIN_NAME/TARGET/COMMAND trace back to attacker-influenceable issue-body
+          # text -- pass via env/process.env rather than ${{ }}-interpolated directly
+          # into the script (see bug-fpp-data-ci-actions-script-injection-repo-name).
+          PLUGIN_NAME: ${{ steps.extract.outputs.name }}
+          TARGET: ${{ steps.extract.outputs.target }}
+          COMMAND: ${{ steps.extract.outputs.command }}
+        with:
+          script: |
+            const fs = require('fs');
+            const data = JSON.parse(fs.readFileSync('recheck-result.json', 'utf8'));
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            const pluginName = process.env.PLUGIN_NAME;
+            const target = process.env.TARGET;
+            const command = process.env.COMMAND;
+
+            if (!data.found) {
+              await github.rest.issues.createComment({ owner, repo, issue_number,
+                body: `⚠️ \`${pluginName}\` is no longer in \`pluginList.json\` - nothing to recheck.` });
+              return;
+            }
+            const r = data.result;
+
+            // Post the up-to-date report as a FRESH comment on every /recheck, rather
+            // than editing the original issue body in place - so each recheck visibly
+            // shows up as a new result in the thread (same convention as
+            // scan-new-submission.yml), instead of silently rewriting history in a
+            // way that's easy to miss or lose track of what changed.
+            await github.rest.issues.createComment({ owner, repo, issue_number, body: data.body });
+
+            // Swap the status:<...> label (added by new_major_release_sync_issues.py at creation time).
+            const issue = await github.rest.issues.get({ owner, repo, issue_number });
+            for (const l of issue.data.labels) {
+              if (typeof l === 'object' && l.name && l.name.startsWith('status:') && l.name !== `status:${r.status}`) {
+                try { await github.rest.issues.removeLabel({ owner, repo, issue_number, name: l.name }); } catch (e) {}
+              }
+            }
+            await github.rest.issues.addLabels({ owner, repo, issue_number, labels: [`status:${r.status}`] });
+
+            const summary = `B${r.num_blocker} best-practice ${r.num_best_practice} optional ${r.num_optional}`;
+            if (r.ready_to_close) {
+              // Genuinely passes now - close it even if /submit was also used (nothing
+              // left to override).
+              await github.rest.issues.createComment({ owner, repo, issue_number,
+                body: `✅ Rechecked - now declares FPP ${target} compatibility with no outstanding blockers. Closing.` });
+              await github.rest.issues.update({ owner, repo, issue_number, state: 'closed', state_reason: 'completed' });
+            } else if (command === 'submit') {
+              // /submit always means "flag for manual review", regardless of WHY it's
+              // not ready_to_close (not certified at all, or certified but blockers
+              // remain) - a prior version of this check ran the "certified but has
+              // blockers" branch first, which silently swallowed /submit in that case.
+              const commentBody = context.payload.comment.body || '';
+              const reason = commentBody
+                .replace(/(?:^|\s)\/submit(?:\s|$)/, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+              await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['needs-manual-review'] });
+              const quoted = reason ? `\n\n> ${reason.replace(/\n/g, '\n> ')}` : '\n\n*(no reason given with `/submit`.)*';
+
+              // No verified way yet to identify this repo's actual maintainers (see
+              // the earlier discussion on getCollaboratorPermissionLevel vs a full
+              // collaborators list) - mention, NOT @-mention, the last 5 unique
+              // committers to fpp-data-ci itself as a stand-in until that's resolved.
+              // This is the repo the workflow runs in, so listCommits needs no
+              // special access beyond the default GITHUB_TOKEN.
+              let committerNote = '';
+              try {
+                const { data: commits } = await github.rest.repos.listCommits({ owner, repo, per_page: 30 });
+                const seen = [];
+                for (const c of commits) {
+                  const login = c.author && c.author.login;
+                  if (!login || (c.author.type === 'Bot') || seen.includes(login)) continue;
+                  seen.push(login);
+                  if (seen.length >= 5) break;
+                }
+                if (seen.length) {
+                  const names = seen.map(l => `\`${l}\``).join(', ');
+                  committerNote = `\n\n${names} - please take a look.`;
+                }
+              } catch (e) { /* best-effort only - don't fail the recheck over this */ }
+
+              // Still doesn't declare FPP {target} support at all (not just "has
+              // blockers") - reiterate the plugin's own maintainer/candidates (same
+              // mention-not-@-mention rendering as the issue body's "Maintainer:"
+              // line) and ask again whether they'd rather delist, plus offer /recheck.
+              let stillNotCompatNote = '';
+              if (!r.certified) {
+                let pluginMaintainer;
+                if (r.owner_is_org) {
+                  pluginMaintainer = r.maintainer_candidates && r.maintainer_candidates.length
+                    ? `\`${r.owner}\` org (candidate contributors, access not verified: ${r.maintainer_candidates.map(c => `\`${c}\``).join(', ')})`
+                    : `\`${r.owner}\` org (no individual maintainer identified)`;
+                } else if (r.owner) {
+                  pluginMaintainer = `\`${r.owner}\``;
+                } else {
+                  pluginMaintainer = 'unknown maintainer';
+                }
+                stillNotCompatNote = `\n\n${pluginMaintainer} - \`${pluginName}\` still doesn't declare FPP ` +
+                  `${target} support. Would you prefer to delist this plugin instead? Submit a removal ` +
+                  `request at https://falconchristmas.github.io/fpp-data/submit_remove_plugin/, or comment ` +
+                  `\`/recheck\` after adding FPP ${target} support to re-run this check.`;
+              }
+
+              await github.rest.issues.createComment({ owner, repo, issue_number,
+                body: `Rechecked (${summary}) - flagged for manual review at the owner's request via ` +
+                      `\`/submit\`. Reason given:${quoted}${committerNote}${stillNotCompatNote}` });
+            } else if (r.certified && r.num_blocker > 0) {
+              await github.rest.issues.createComment({ owner, repo, issue_number,
+                body: `Rechecked - declares FPP ${target} compatibility, but still has ${r.num_blocker} ` +
+                      `blocker issues that must be fixed. See the updated report above.` });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number,
+                body: `Rechecked (${summary}) - see the updated report above. Comment \`/recheck\` again ` +
+                      `after another push, or \`/submit\` if you believe a finding doesn't apply.` });
+            }

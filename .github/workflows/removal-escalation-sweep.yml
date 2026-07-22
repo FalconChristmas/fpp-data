@@ -1,0 +1,248 @@
+# Daily sweep over every OPEN `ownership-unconfirmed` removal request. Two things
+# this catches that nothing else does:
+#
+# 1. delist:true appeared but nobody commented /recheck. verify_remove_plugin.py only
+#    ever re-checks on an explicit /recheck comment -- if an owner pushes proof-of-
+#    control and just... doesn't comment, the issue sits unconfirmed forever with no
+#    other trigger. This sweep re-runs the SAME verification fresh for every candidate
+#    issue once a day, so a newly-true delist gets caught and auto-applied (removed
+#    directly, same as a real /recheck would do) without anyone needing to remember.
+#
+# 2. The 7-day escalation verify_remove_plugin.py's `unconfirmed` message promises:
+#    "if this isn't resolved within 7 days, it'll be escalated automatically" -- for
+#    an issue that's STILL unconfirmed after the fresh re-check above, this opens a PR
+#    removing the entry so a maintainer can decide by hand. `/submit` (handled inline
+#    in remove-plugin-verify.yml) is the same escalation, opted into immediately
+#    instead of waiting out the window -- both converge on the same branch-naming
+#    convention (remove-plugin/<repoName>) and PR shape, so whichever fires first, the
+#    other becomes a no-op update rather than a duplicate.
+#
+# HOW "7 days" IS MEASURED: the sticky `<!-- removal-ownership-check -->` verdict
+# comment's `updated_at`. Critically, this sweep only touches that comment when the
+# verdict actually CHANGES (e.g. becomes verified) -- if it's still unconfirmed, the
+# comment is left untouched so its `updated_at` keeps reflecting the last REAL change
+# (a submitter's /recheck, or this sweep applying a fix). Updating it every day
+# regardless would reset the clock daily and the 7-day escalation would never fire.
+#
+# SHELL SAFETY: repoName ultimately comes from free text a submitter typed into the
+# issue form (see resolve_repo_name()'s fallback in lib_plugin_schema.py, which can
+# return arbitrary text unmodified for non-URL/non-owner-repo input) -- so every git/
+# python invocation below uses execFileSync with an argument array, never a shell
+# string built by interpolating repoName, to avoid command injection.
+
+name: ZZ - Automation - Removal escalation sweep
+
+on:
+  schedule:
+    - cron: "17 13 * * *"  # once daily; arbitrary time, offset from the hour
+  workflow_dispatch: {}   # manual trigger, for testing
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - run: pip install jsonschema
+
+      - name: Re-check every unconfirmed removal request; escalate the stale ones
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execFileSync } = require('child_process');
+            const fs = require('fs');
+            const os = require('os');
+            const path = require('path');
+
+            const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+            const VERDICT_MARKER = '<!-- removal-ownership-check -->';
+            const ESCALATION_MARKER = '<!-- removal-escalation-pr -->';
+            const { owner, repo } = context.repo;
+
+            execFileSync('git', ['config', 'user.name', 'github-actions[bot]']);
+            execFileSync('git', ['config', 'user.email', 'github-actions[bot]@users.noreply.github.com']);
+
+            // Runs verify_remove_plugin.py exactly as remove-plugin-verify.yml's
+            // "Verify ownership" step does -- same script, same env var contract --
+            // so a sweep re-check behaves identically to a real /recheck.
+            function reverify(issue) {
+              const outMd = path.join(os.tmpdir(), `verify-${issue.number}.md`);
+              const ghOutput = path.join(os.tmpdir(), `gh-output-${issue.number}.txt`);
+              fs.writeFileSync(ghOutput, '');
+              execFileSync('python', [
+                '.github/scripts/verify_remove_plugin.py',
+                '--plugin-list', 'pluginList.json',
+                '--output', outMd,
+              ], {
+                env: {
+                  ...process.env,
+                  ISSUE_AUTHOR: issue.user.login,
+                  ISSUE_BODY: issue.body || '',
+                  GITHUB_OUTPUT: ghOutput,
+                },
+              });
+              const parsed = {};
+              for (const line of fs.readFileSync(ghOutput, 'utf8').split('\n')) {
+                const i = line.indexOf('=');
+                if (i > 0) parsed[line.slice(0, i)] = line.slice(i + 1);
+              }
+              parsed.message = fs.readFileSync(outMd, 'utf8');
+              return parsed;
+            }
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: 'removal-request,ownership-unconfirmed', per_page: 100,
+            });
+            core.info(`${issues.length} open unconfirmed removal request(s) to check.`);
+
+            for (const issue of issues) {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: issue.number, per_page: 100,
+              });
+              const verdictComment = comments.filter(c => c.body && c.body.includes(VERDICT_MARKER)).pop();
+              if (!verdictComment) continue;   // shouldn't happen for a labeled issue, but nothing to act on
+
+              const fresh = reverify(issue);
+              core.info(`#${issue.number}: fresh verdict = ${fresh.verdict}`);
+
+              if (fresh.verdict !== 'unconfirmed') {
+                // Something changed (most commonly: delist:true appeared -> verified).
+                // Update the sticky comment so the issue reflects reality, same as a
+                // real /recheck would -- this issue leaves the "still unconfirmed"
+                // population, so there's no age-clock concern in touching it now.
+                await github.rest.issues.updateComment({
+                  owner, repo, comment_id: verdictComment.id,
+                  body: `${VERDICT_MARKER}\n${fresh.message}`,
+                });
+
+                if (fresh.verdict === 'verified') {
+                  execFileSync('git', ['checkout', 'master']);
+                  let out;
+                  try {
+                    out = execFileSync('python', [
+                      '.github/scripts/remove_plugin_entry.py',
+                      '--plugin-list', 'pluginList.json',
+                      '--repo-name', fresh.repo_name,
+                    ]).toString();
+                  } catch (e) {
+                    out = ((e.stdout || Buffer.from('')).toString()) + ((e.stderr || Buffer.from('')).toString());
+                  }
+                  core.info(`#${issue.number} (${fresh.repo_name}): ${out.trim()}`);
+                  if (out.startsWith('removed:')) {
+                    execFileSync('git', ['add', 'pluginList.json']);
+                    execFileSync('git', ['commit', '-m',
+                      `Remove ${fresh.repo_name} (verified request #${issue.number}, caught by daily sweep)`]);
+                    execFileSync('git', ['pull', '--rebase', 'origin', 'master']);
+                    execFileSync('git', ['push', 'origin', 'master']);
+                    await github.rest.issues.createComment({
+                      owner, repo, issue_number: issue.number,
+                      body: `✅ \`${fresh.repo_name}\` removed from \`pluginList.json\` — the daily sweep ` +
+                            'found ownership had since been proven (via `delist: true`) even though nobody ' +
+                            'commented `/recheck`. Closing.',
+                    });
+                    await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed' });
+                  }
+                }
+                // not_found / error: sticky comment is updated above; leave the issue
+                // open for its normal /recheck-driven flow (not_found auto-closes on
+                // its own next real trigger, error just needs the submitter to fix
+                // something) -- neither needs escalation-PR handling here.
+                continue;
+              }
+
+              // Still unconfirmed after a fresh check -- only now does the 7-day
+              // clock (off the UNCHANGED sticky comment's updated_at) matter.
+              const age = Date.now() - new Date(verdictComment.updated_at).getTime();
+              if (age < SEVEN_DAYS_MS) {
+                core.info(`#${issue.number}: still unconfirmed, only ${Math.floor(age / 86400000)} day(s) old.`);
+                continue;
+              }
+
+              const repoName = fresh.repo_name;
+              const registeredOwner = fresh.owner || '';
+              const pluginRepoUrl = registeredOwner && fresh.repo ? `https://github.com/${registeredOwner}/${fresh.repo}` : null;
+              const reporter = issue.user.login;
+              const branch = `remove-plugin/${repoName}`;
+              const existingPr = (await github.rest.pulls.list({ owner, repo, head: `${owner}:${branch}`, state: 'open' })).data[0];
+
+              if (!existingPr) {
+                execFileSync('git', ['checkout', '-B', branch, 'origin/master']);
+                let out;
+                try {
+                  out = execFileSync('python', [
+                    '.github/scripts/remove_plugin_entry.py',
+                    '--plugin-list', 'pluginList.json',
+                    '--repo-name', repoName,
+                  ]).toString();
+                } catch (e) {
+                  out = ((e.stdout || Buffer.from('')).toString()) + ((e.stderr || Buffer.from('')).toString());
+                }
+                core.info(`#${issue.number} (${repoName}): ${out.trim()}`);
+                if (!out.startsWith('removed:')) {
+                  // remove_plugin_entry.py only ever writes pluginList.json on
+                  // success, so there's nothing uncommitted to discard here --
+                  // already removed by some other path, or repoName no longer
+                  // matches an entry. Leave the issue as-is for a human to notice
+                  // rather than guessing at a close.
+                  execFileSync('git', ['checkout', 'master']);
+                  continue;
+                }
+                execFileSync('git', ['add', 'pluginList.json']);
+                execFileSync('git', ['commit', '-m',
+                  `Remove ${repoName} (escalated from issue #${issue.number} after 7 days unconfirmed)`]);
+                execFileSync('git', ['push', '-f', 'origin', branch]);
+                execFileSync('git', ['checkout', 'master']);
+              }
+
+              const lines = [
+                `Removes \`${repoName}\` from \`pluginList.json\` — ownership could not be automatically ` +
+                `confirmed for removal request #${issue.number}, and 7 days passed with no resolution ` +
+                `(no \`/recheck\` after proving control, no \`/submit\`), so this was escalated automatically.`,
+                '',
+              ];
+              if (pluginRepoUrl) lines.push(`**Plugin repo:** ${pluginRepoUrl}`);
+              if (registeredOwner) lines.push(`**Registered owner (from srcURL):** \`${registeredOwner}\``);
+              lines.push(`**Requested by:** @${reporter}`, '');
+              lines.push(
+                '⚠️ **Ownership was NOT verified** — the reporter\'s GitHub login did not match the ' +
+                'registered owner above, and no `"delist": true` proof-of-control was pushed. This PR ' +
+                'exists so a maintainer can decide by hand rather than having to edit `pluginList.json` ' +
+                'manually.',
+                '',
+                '**Merging removes the plugin. Closing rejects the request.** Neither happens automatically.');
+              const body = lines.join('\n');
+
+              let pr = existingPr;
+              if (!pr) {
+                const created = await github.rest.pulls.create({
+                  owner, repo, title: `[Plugin] Remove ${repoName}`, body, head: branch, base: 'master',
+                });
+                pr = created.data;
+                try { await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ['needs-manual-review'] }); } catch (e) {}
+              } else {
+                await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body });
+              }
+
+              if (issue.state !== 'closed') {
+                const commentBody = `${ESCALATION_MARKER}\n📦 Escalation PR: ${pr.html_url}\n\n` +
+                  '7 days passed with ownership still unconfirmed, so this was escalated automatically. ' +
+                  'Closing this issue — further discussion happens on the PR now. Merging (removes the ' +
+                  'plugin) or closing (rejects the request) is a maintainer\'s call, not automatic.';
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: commentBody });
+                await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed' });
+              }
+            }

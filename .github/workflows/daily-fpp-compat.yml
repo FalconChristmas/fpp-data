@@ -1,0 +1,218 @@
+# Daily FPP-major compatibility re-check.
+#
+# WHAT THIS IS: the lightweight counterpart to new-major-release-scan.yml. It does NOT
+# clone or lint - it just re-fetches each pluginInfo.json and re-evaluates whether a
+# versions[] entry now declares FPP-<major> support. When a plugin has become
+# compatible, its open tracking issue is commented and CLOSED automatically (verified,
+# not self-reported). Authors are never @-mentioned; closing an issue notifies no one.
+#
+# Runs the new-major-release scanner in metadata-only mode (no --plugins-dir), so
+# it's fast. TARGET_MAJOR comes from the repo variable
+# NEW_MAJOR_RELEASE_TARGET_MAJOR (default 10).
+
+name: ZZ - Automation - Daily FPP compatibility check
+
+on:
+  schedule:
+    - cron: "17 6 * * *"   # 06:17 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  TARGET_MAJOR: ${{ vars.NEW_MAJOR_RELEASE_TARGET_MAJOR || '10' }}
+
+jobs:
+  recheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fpp-data
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - run: pip install jsonschema
+
+      - name: Re-evaluate FPP-${{ env.TARGET_MAJOR }} compatibility (metadata only)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/new_major_release_scan.py \
+            --target-major "$TARGET_MAJOR" \
+            --plugin-list pluginList.json \
+            --schema .github/schema/pluginInfo.schema.json \
+            --out out
+
+      - name: Close issues for plugins that became compatible
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/new_major_release_sync_issues.py \
+            --summary out/summary.json --mode reconcile
+
+      - name: Nudge, then escalate, stale tracking issues with no reply
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ env.TARGET_MAJOR }}
+        uses: actions/github-script@v7
+        with:
+          # Neither maintainer_candidates (unverified contributor guesses, see
+          # new_major_release_scan.py) nor an org owner (no individual to @-mention) are
+          # reliable ways to reach anyone - so a tracking issue can sit open forever
+          # with zero engagement. Ladder, every REMINDER_INTERVAL_DAYS (deliberately
+          # not 7/14/21... so it doesn't always land on the same weekday):
+          #   1-3: plain reminder.
+          #   4:   also flag needs-manual-review - tell fpp-data-ci maintainers there's
+          #        been no response, suggest trying to reach the author another way.
+          #   5:   also warn (on the issue, for whoever eventually reads it) that
+          #        unmaintained plugins may be removed from FPP.
+          #   6:   plain reminder.
+          #   7:   if the plugin doesn't even support target-1 (e.g. for an FPP 10
+          #        scan, doesn't support FPP 9 - two majors behind, not just one),
+          #        open a removal PR automatically (same convention as
+          #        removal-escalation-sweep.yml: branch remove-plugin/<repoName>,
+          #        remove_plugin_entry.py, needs-manual-review on the PR) and close the
+          #        tracking issue - a maintainer merges or closes by hand, same as
+          #        every other auto-generated removal PR. Otherwise, plain reminder -
+          #        no further escalation defined past 7.
+          #
+          # Reminder count is read back from prior "new-major-release-stale-nudge:N"
+          # marker comments (max N seen), not a running counter anywhere else, so this
+          # stays correct even if a run is skipped or the workflow changes. Due date
+          # for reminder N is anchored on issue.created_at (fixed) + N * interval -
+          # never on updated_at, which our own comments would otherwise keep bumping.
+          script: |
+            const fs = require('fs');
+            const { execFileSync } = require('child_process');
+            const REMINDER_INTERVAL_DAYS = 8;
+            const NUDGE_MARKER_RE = /<!-- new-major-release-stale-nudge:(\d+) -->/;
+            const ESCALATION_MARKER = '<!-- new-major-release-stale-removal-pr -->';
+            const { owner, repo } = context.repo;
+            const target = parseInt(process.env.TARGET, 10);
+            const label = `fpp${target}-compat`;
+
+            const summary = JSON.parse(fs.readFileSync('out/summary.json', 'utf8'));
+            const byName = new Map(summary.plugins.map(p => [p.name.toLowerCase(), p]));
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: label, per_page: 100,
+            });
+            core.info(`${issues.length} open FPP ${target} tracking issue(s) to check for staleness.`);
+
+            for (const issue of issues) {
+              const ageDays = (Date.now() - new Date(issue.created_at).getTime()) / 86400000;
+
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: issue.number, per_page: 100,
+              });
+              let sentCount = 0;
+              for (const c of comments) {
+                const m = c.body && c.body.match(NUDGE_MARKER_RE);
+                if (m) sentCount = Math.max(sentCount, parseInt(m[1], 10));
+              }
+              const nextN = sentCount + 1;
+              const dueDay = nextN * REMINDER_INTERVAL_DAYS;
+              if (ageDays < dueDay) continue;
+
+              const m = (issue.body || '').match(/<!--\s*plugin:(\S+)\s+new_major_release:fpp(\d+)\s*-->/);
+              const pluginName = m ? m[1] : null;
+              const plugin = pluginName ? byName.get(pluginName.toLowerCase()) : null;
+
+              if (nextN === 7 && plugin && plugin.last_major !== null && plugin.last_major !== undefined
+                  && plugin.last_major < target - 1) {
+                const repoName = plugin.name;
+                const branch = `remove-plugin/${repoName}`;
+                const existingPr = (await github.rest.pulls.list({ owner, repo, head: `${owner}:${branch}`, state: 'open' })).data[0];
+
+                if (!existingPr) {
+                  execFileSync('git', ['config', 'user.name', 'github-actions[bot]']);
+                  execFileSync('git', ['config', 'user.email', 'github-actions[bot]@users.noreply.github.com']);
+                  execFileSync('git', ['checkout', '-B', branch, 'origin/master']);
+                  let out;
+                  try {
+                    out = execFileSync('python', [
+                      '.github/scripts/remove_plugin_entry.py',
+                      '--plugin-list', 'pluginList.json',
+                      '--repo-name', repoName,
+                    ]).toString();
+                  } catch (e) {
+                    out = ((e.stdout || Buffer.from('')).toString()) + ((e.stderr || Buffer.from('')).toString());
+                  }
+                  core.info(`#${issue.number} (${repoName}): ${out.trim()}`);
+                  if (!out.startsWith('removed:')) {
+                    core.info(`#${issue.number}: remove_plugin_entry.py didn't remove anything, skipping PR.`);
+                    execFileSync('git', ['checkout', 'master']);
+                    continue;
+                  }
+                  execFileSync('git', ['add', 'pluginList.json']);
+                  execFileSync('git', ['commit', '-m',
+                    `Remove ${repoName} (no response after 7 reminders, FPP ${target} new-major-release scan; last supported major was ${plugin.last_major})`]);
+                  execFileSync('git', ['push', '-f', 'origin', branch]);
+                  execFileSync('git', ['checkout', 'master']);
+                }
+
+                const pluginRepoUrl = plugin.owner && plugin.repo ? `https://github.com/${plugin.owner}/${plugin.repo}` : null;
+                const prBody = [
+                  `Removes \`${repoName}\` from \`pluginList.json\` - no response after 7 reminders ` +
+                  `(~${nextN * REMINDER_INTERVAL_DAYS} days) on tracking issue #${issue.number} for the FPP ` +
+                  `${target} new-major-release scan, and the plugin's highest declared FPP major (${plugin.last_major}) is ` +
+                  `more than one version behind (target - 1 = ${target - 1}).`,
+                  '',
+                  ...(pluginRepoUrl ? [`**Plugin repo:** ${pluginRepoUrl}`, ''] : []),
+                  '**Merging removes the plugin. Closing rejects the removal.** Neither happens automatically - ' +
+                  'a maintainer decides.',
+                ].join('\n');
+
+                let pr = existingPr;
+                if (!pr) {
+                  const created = await github.rest.pulls.create({
+                    owner, repo, title: `[Plugin] Remove ${repoName}`, body: prBody, head: branch, base: 'master',
+                  });
+                  pr = created.data;
+                  try { await github.rest.issues.addLabels({ owner, repo, issue_number: pr.number, labels: ['needs-manual-review'] }); } catch (e) {}
+                } else {
+                  await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body: prBody });
+                }
+
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                  body: `${ESCALATION_MARKER}\n📦 No response after 7 reminders, and this plugin is more than ` +
+                        `one FPP major behind - opened a removal PR: ${pr.html_url}. Closing this issue - ` +
+                        `further discussion happens on the PR now.` });
+                await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'not_planned' });
+                core.info(`#${issue.number}: escalated to removal PR ${pr.html_url}.`);
+                continue;
+              }
+
+              const lines = [`<!-- new-major-release-stale-nudge:${nextN} -->`];
+              lines.push(`👋 Reminder ${nextN} - this tracking issue has had no activity in ` +
+                         `${Math.floor(ageDays)} days. Comment \`/recheck\` after updating your plugin, or ` +
+                         `\`/submit\` if you disagree with the findings.`,
+                         '',
+                         `Want to sunset this plugin instead? Submit a removal request at ` +
+                         `https://falconchristmas.github.io/fpp-data/submit_remove_plugin/`);
+              if (nextN === 4) {
+                await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: ['needs-manual-review'] });
+                lines.push('', `⚠️ **For fpp-data-ci maintainers:** no response after 4 reminders - consider ` +
+                                `trying to contact the plugin author some other way.`);
+              }
+              if (nextN === 5) {
+                lines.push('', `⚠️ **Unmaintained plugins may be removed from FPP.** Please respond soon to ` +
+                                `keep this plugin listed.`);
+              }
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number, body: lines.join('\n') });
+              core.info(`#${issue.number}: sent reminder ${nextN} (${Math.floor(ageDays)}d old).`);
+            }
+
+      - name: Upload refreshed dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpp-compat-dashboard
+          path: out/dashboard.md

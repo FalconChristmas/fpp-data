@@ -1,0 +1,83 @@
+# Major-release plugin check & certification scan (manual).
+#
+# WHAT THIS IS: run in the lead-up to an FPP major release. It clones every plugin
+# in pluginList.json, runs the plugin linter + FPP-<major> compatibility check,
+# and produces:
+#   * a dashboard (one status row per plugin)
+#   * a per-plugin DRAFT tracking-issue body
+# uploaded as a build artifact you can review.
+#
+# TAGGING: draft bodies render the maintainer handle as PLAIN TEXT - no @-mention,
+# nobody is notified. Creating the real tracking issues is OPT-IN via the
+# create_issues input (still no @-mention), and defaults to OFF for safe testing.
+
+name: New Major version - Plugin author notification
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_major:
+        description: "FPP major to check compatibility against"
+        required: true
+        default: "10"
+      limit:
+        description: "Scan only the first N plugins (0 = all; for testing)"
+        required: false
+        default: "0"
+      create_issues:
+        description: "Create/update tracking issues in THIS repo (no @-mentions)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  issues: write   # only used when create_issues is true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out fpp-data
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - run: pip install jsonschema
+
+      - name: Clone all listed plugins
+        run: |
+          python .github/scripts/clone_plugins.py \
+            --plugin-list pluginList.json --out plugins --limit "${{ inputs.limit }}"
+
+      - name: Scan (lint + FPP-${{ inputs.target_major }} compatibility)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # lifts API rate limit to 5000/hr
+        run: |
+          python .github/scripts/new_major_release_scan.py \
+            --target-major "${{ inputs.target_major }}" \
+            --plugin-list pluginList.json \
+            --plugins-dir plugins \
+            --schema .github/schema/pluginInfo.schema.json \
+            --limit "${{ inputs.limit }}" \
+            --out out
+
+      - name: Upload dashboard + draft issues
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpp${{ inputs.target_major }}-plugin-check
+          path: out/
+
+      - name: Job summary
+        run: cat out/dashboard.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create / update tracking issues (opt-in, no @-mentions)
+        if: ${{ inputs.create_issues }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/new_major_release_sync_issues.py \
+            --summary out/summary.json --mode create --limit "${{ inputs.limit }}"
