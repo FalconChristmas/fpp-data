@@ -35,10 +35,12 @@ def main():
     ap.add_argument("--plugin-list", default="pluginList.json")
     ap.add_argument("--out", default="plugins")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--only-owner", default="", help="clone only plugins owned by this GitHub account (case-insensitive)")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     entries = lib.load_pluginlist(args.plugin_list)
+    entries = lib.filter_by_owner(entries, args.only_owner)
     if args.limit:
         entries = entries[: args.limit]
 

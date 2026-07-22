@@ -127,6 +127,26 @@ def parse_raw_github_repo(url: str) -> Optional[tuple[str, str]]:
     return (m.group(1), m.group(2)) if m else None
 
 
+def filter_by_owner(entries: list, only_owner: Optional[str]) -> list:
+    """Keep only pluginList entries whose repo owner matches `only_owner` (case-insensitive).
+
+    Owner is derived from the entry's pluginInfo raw URL (entries[*][1]), the same
+    signal clone_plugins.py already uses to pick a clone target - no network call
+    needed, so filtering happens before any cloning/scanning work. Falsy `only_owner`
+    (None/"") is a no-op, returning `entries` unchanged.
+    """
+    if not only_owner:
+        return entries
+    target = only_owner.strip().lower()
+    out = []
+    for entry in entries:
+        info_url = entry[1] if len(entry) > 1 else ""
+        owner_repo = parse_raw_github_repo(info_url)
+        if owner_repo and owner_repo[0].lower() == target:
+            out.append(entry)
+    return out
+
+
 def schema_validation_error(info: dict, schema: dict) -> Optional[str]:
     """Validate pluginInfo.json against the schema. Returns a message, or None if valid.
 

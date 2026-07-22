@@ -10,9 +10,12 @@ Modes:
   --mode reconcile  do NOT create anything; for a plugin now compatible, comment
                     and CLOSE its open issue. (used by the daily workflow)
 
-NEVER @-mentions an author. Bodies (from new_major_release_scan.issue_body) render
-the maintainer handle as plain text, so no one is notified. Same-repo issue writes
-use the default GITHUB_TOKEN - no PAT needed.
+By default, never @-mentions an author: bodies (from new_major_release_scan.issue_body)
+render the maintainer handle as plain text, so no one is notified. If the scan that
+produced summary.json was run with --mention-owner, `mention_owner: true` is carried
+in summary.json and real @-mentions are used instead - opt-in, and only ever applied
+to non-draft issue bodies. Same-repo issue writes use the default GITHUB_TOKEN - no
+PAT needed.
 
 Usage:
   new_major_release_sync_issues.py --summary out/summary.json --mode create|reconcile [--dry-run] [--limit N]
@@ -82,6 +85,7 @@ def main():
     with open(args.summary, encoding="utf-8") as f:
         summary = json.load(f)
     target = summary["target_major"]
+    mention_owner = summary.get("mention_owner", False)
     plugins = summary["plugins"]
     if args.limit:
         plugins = plugins[: args.limit]
@@ -101,7 +105,7 @@ def main():
     for r in plugins:
         name = r["name"]
         title = f"[FPP {target}] {name} - compatibility & plugin check"
-        body = issue_body(r, target, draft=False)
+        body = issue_body(r, target, draft=False, mention_owner=mention_owner)
         iss = existing.get(name)
 
         if args.mode == "reconcile":

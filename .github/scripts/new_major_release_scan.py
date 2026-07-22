@@ -235,7 +235,7 @@ ICON = {"compatible": "✅", "needs-update": "🔧", "unmaintained": "💤",
         "removal-requested": "🗑️"}
 
 
-def issue_body(r, target, draft=True):
+def issue_body(r, target, draft=True, mention_owner=False):
     L = []
     L.append(f"<!-- plugin:{r['name']} new_major_release:fpp{target} -->")
     if draft:
@@ -247,22 +247,36 @@ def issue_body(r, target, draft=True):
     if r.get("owner") and r.get("repo"):
         L.append(f"Repo: https://github.com/{r['owner']}/{r['repo']}")
     if r["owner"]:
-        mention = "not @-mentioned in this dry run" if draft else "not @-mentioned automatically"
+        # mention_owner is opt-in (workflow input) and only takes effect on real,
+        # non-draft issues - draft bodies (uploaded as a review artifact, never
+        # posted) always stay plain text so a reviewer can't accidentally trigger
+        # a notification by pasting one into GitHub by hand.
+        do_mention = mention_owner and not draft
+        mention = "not @-mentioned in this dry run" if draft else (
+            "not @-mentioned automatically" if not mention_owner else None)
         if r.get("owner_is_org"):
             # An org login isn't a person - @-mentioning it doesn't notify anyone
             # who isn't already watching the repo. maintainer_candidates come from
             # commit history only (GET .../contributors), NOT a verified access
             # check - fpp-data-ci's token has no standing to query real collaborator
             # permissions on a repo it doesn't own, so these are a best-effort lead,
-            # not a confirmed maintainer list.
+            # not a confirmed maintainer list. Even with mention_owner on, we only
+            # @-mention individuals we have a lead on, never the org login itself.
             if r.get("maintainer_candidates"):
-                names = ", ".join(f"`{c}`" for c in r["maintainer_candidates"])
-                L.append(f"Maintainer: `{r['owner']}` org (repo owned by an org, not an individual - "
-                         f"org mentions don't reliably notify anyone). Candidate contributors "
-                         f"(commit history only, access **not verified**): {names} *({mention})*")
+                if do_mention:
+                    names = ", ".join(f"@{c}" for c in r["maintainer_candidates"])
+                    L.append(f"Maintainer: `{r['owner']}` org (repo owned by an org, not an individual). "
+                             f"Candidate contributors (commit history only, access **not verified**): {names}")
+                else:
+                    names = ", ".join(f"`{c}`" for c in r["maintainer_candidates"])
+                    L.append(f"Maintainer: `{r['owner']}` org (repo owned by an org, not an individual - "
+                             f"org mentions don't reliably notify anyone). Candidate contributors "
+                             f"(commit history only, access **not verified**): {names} *({mention})*")
             else:
                 L.append(f"Maintainer: `{r['owner']}` org (repo owned by an org, not an individual - "
                          f"no individual maintainer could be identified) *({mention})*")
+        elif do_mention:
+            L.append(f"Maintainer: @{r['owner']}")
         else:
             L.append(f"Maintainer: `{r['owner']}` (https://github.com/{r['owner']}) *({mention})*")
     L.append("")
@@ -341,6 +355,9 @@ def main():
     ap.add_argument("--schema", default=None, help="pluginInfo.schema.json (omit to skip schema validation)")
     ap.add_argument("--out", default="out")
     ap.add_argument("--limit", type=int, default=0, help="scan only first N (testing)")
+    ap.add_argument("--only-owner", default="", help="scan only plugins owned by this GitHub account (case-insensitive)")
+    ap.add_argument("--mention-owner", action="store_true",
+                     help="@-mention the repo owner in real (non-draft) tracking issues, notifying them")
     args = ap.parse_args()
 
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
@@ -349,6 +366,7 @@ def main():
         with open(args.schema, encoding="utf-8") as f:
             schema = json.load(f)
     entries = lib.load_pluginlist(args.plugin_list)
+    entries = lib.filter_by_owner(entries, args.only_owner)
     if args.limit:
         entries = entries[: args.limit]
 
@@ -366,7 +384,8 @@ def main():
     with open(os.path.join(args.out, "dashboard.md"), "w", encoding="utf-8") as f:
         f.write(build_dashboard(results, args.target_major))
     with open(os.path.join(args.out, "summary.json"), "w", encoding="utf-8") as f:
-        json.dump({"target_major": args.target_major, "plugins": results}, f, indent=2)
+        json.dump({"target_major": args.target_major, "mention_owner": args.mention_owner,
+                   "plugins": results}, f, indent=2)
     print(f"\nWrote {args.out}/dashboard.md, {len(results)} issue drafts, summary.json")
 
 

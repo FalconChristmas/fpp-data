@@ -9,7 +9,13 @@
 #
 # TAGGING: draft bodies render the maintainer handle as PLAIN TEXT - no @-mention,
 # nobody is notified. Creating the real tracking issues is OPT-IN via the
-# create_issues input (still no @-mention), and defaults to OFF for safe testing.
+# create_issues input, and defaults to OFF for safe testing. Real @-mentions of the
+# repo owner are a SEPARATE opt-in on top of that (mention_owner input, default OFF) -
+# turning it on WILL notify external plugin authors, so leave it off for dry runs.
+#
+# SCOPING: only_account restricts the whole run (clone + scan + any issue
+# create/update) to plugins owned by one GitHub account, e.g. for testing against
+# your own fork before running the notification against everyone.
 
 name: New Major version - Plugin author notification
 
@@ -24,8 +30,17 @@ on:
         description: "Scan only the first N plugins (0 = all; for testing)"
         required: false
         default: "0"
+      only_account:
+        description: "Only check plugins owned by this GitHub account (blank = all accounts)"
+        required: false
+        default: ""
       create_issues:
-        description: "Create/update tracking issues in THIS repo (no @-mentions)"
+        description: "Create/update tracking issues in THIS repo"
+        type: boolean
+        required: false
+        default: false
+      mention_owner:
+        description: "@-mention repo owners in created/updated issues (notifies them - opt-in, only applies with create_issues)"
         type: boolean
         required: false
         default: false
@@ -51,7 +66,8 @@ jobs:
       - name: Clone all listed plugins
         run: |
           python .github/scripts/clone_plugins.py \
-            --plugin-list pluginList.json --out plugins --limit "${{ inputs.limit }}"
+            --plugin-list pluginList.json --out plugins --limit "${{ inputs.limit }}" \
+            --only-owner "${{ inputs.only_account }}"
 
       - name: Scan (lint + FPP-${{ inputs.target_major }} compatibility)
         env:
@@ -63,6 +79,8 @@ jobs:
             --plugins-dir plugins \
             --schema .github/schema/pluginInfo.schema.json \
             --limit "${{ inputs.limit }}" \
+            --only-owner "${{ inputs.only_account }}" \
+            ${{ inputs.mention_owner && '--mention-owner' || '' }} \
             --out out
 
       - name: Upload dashboard + draft issues
@@ -74,7 +92,7 @@ jobs:
       - name: Job summary
         run: cat out/dashboard.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Create / update tracking issues (opt-in, no @-mentions)
+      - name: Create / update tracking issues (opt-in)
         if: ${{ inputs.create_issues }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
