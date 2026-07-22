@@ -56,9 +56,16 @@ permissions:
 
 jobs:
   verify:
+    # Identify these issues by BODY SHAPE, not by the template's declared
+    # `labels:` - GitHub silently drops a template label that doesn't already
+    # exist in the repo, so a label filter here would just never match and
+    # nobody would notice (this is exactly what happened: 'category-change-request'
+    # was never created in the repo, so this job never ran on a single real
+    # submission until the trigger was switched to body-shape). Same fix as
+    # check-submission-token.yml/scan-new-submission.yml use for the same reason.
     if: >-
       github.event.issue.state == 'open' &&
-      contains(github.event.issue.labels.*.name, 'category-change-request') &&
+      contains(github.event.issue.body, '### New category') &&
       (github.event_name != 'issue_comment' ||
        contains(github.event.comment.body, '/recheck') ||
        contains(github.event.comment.body, '/submit'))

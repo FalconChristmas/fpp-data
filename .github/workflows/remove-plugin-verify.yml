@@ -80,9 +80,15 @@ jobs:
     # `state == 'open'` blocks /recheck and /submit once the issue is closed
     # (verified/not-listed auto-close, or a maintainer closing it by hand) --
     # nothing left to re-verify once it's resolved.
+    # Identify these issues by BODY SHAPE, not by the template's declared
+    # `labels:` - GitHub silently drops a template label that doesn't already
+    # exist in the repo, so a label filter here would just never match and
+    # nobody would notice ('removal-request' was never created in the repo).
+    # Same fix as check-submission-token.yml/scan-new-submission.yml use for
+    # the same reason, and as change-category-verify.yml's identical bug.
     if: >-
       github.event.issue.state == 'open' &&
-      contains(github.event.issue.labels.*.name, 'removal-request') &&
+      contains(github.event.issue.body, '### Reason') &&
       (github.event_name != 'issue_comment' ||
        contains(github.event.comment.body, '/recheck') ||
        contains(github.event.comment.body, '/submit'))
