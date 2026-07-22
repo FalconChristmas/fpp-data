@@ -54,7 +54,6 @@
             [ "fpp-FPPMon", "https://raw.githubusercontent.com/KulpLights/fpp-FPPMon/master/pluginInfo.json", "Monitoring" ],
             [ "fpp-KFMT", "https://raw.githubusercontent.com/KulpLights/fpp-kfmt/master/pluginInfo.json", "Audio" ],
             [ "fpp-jukebox", "https://raw.githubusercontent.com/PiSignage/fpp-jukebox/main/pluginInfo.json", "Interaction" ],
-            [ "fpp-node-red", "https://raw.githubusercontent.com/darylc/fpp-node-red/master/pluginInfo.json", "Automation"],
             [ "fpp-WLED-Control", "https://raw.githubusercontent.com/CaffeinatedFunctionality/fpp-WLED-Control/master/pluginInfo.json", "Automation"],
             [ "fpp-PulseMesh", "https://raw.githubusercontent.com/PulseMeshLabs/fpp-pulsemesh/refs/heads/main/pluginInfo.json", "Audio"],
             [ "fpp-sumup", "https://raw.githubusercontent.com/PiSignage/fpp-sumup/refs/heads/master/pluginInfo.json", "Payments" ],
