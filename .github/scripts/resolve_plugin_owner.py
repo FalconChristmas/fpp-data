@@ -6,10 +6,12 @@ a submission or removal issue (opened by the person who then acts on it), a trac
 issue is opened by the new-major-release scan itself - there's no "issue creator" to
 restrict those commands to. The plugin's actual registered owner is the right
 authority instead - and, since an org-owned repo's "owner" is the org login (no
-individual can ever match that), the plugin's own top contributors are also allowed,
-same unverified-access caveat as new_major_release_scan.py's maintainer_candidates
-(commit history only, not a real collaborator-permission check - fpp-data-ci's token
-has no standing to query that on a repo it doesn't own).
+individual can ever match that), the plugin's own maintainer candidates
+(lib.gh_get_maintainer_candidates - PR merged_by evidence, never someone proven to
+lack access) are also allowed. Same caveat as new_major_release_scan.py's
+maintainer_candidates: fpp-data-ci's token has no standing to query real collaborator
+permissions on a repo it doesn't own, so this is strong evidence, not a literal
+permissions check.
 
 Usage: resolve_plugin_owner.py --plugin-list pluginList.json --repo-name <name>
 Writes `owner` (empty if unresolvable) and `contributors` (comma-separated logins,
@@ -24,7 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib_plugin_schema import (  # noqa: E402
-    fetch_json, gh_get_contributors, gh_get_pr_mergers, load_pluginlist, parse_github_repo,
+    fetch_json, gh_get_maintainer_candidates, load_pluginlist, parse_github_repo,
 )
 
 
@@ -45,10 +47,7 @@ def main():
         src = parse_github_repo((info or {}).get("srcURL", "") or "")
         if src:
             owner, repo = src
-            # Same preference as new_major_release_scan.py: people who've merged someone
-            # else's PR are a stronger authority signal than raw commit-count contributors,
-            # which credit a one-off external submitter the same as an actual maintainer.
-            contributors = gh_get_pr_mergers(owner, repo, token) or gh_get_contributors(owner, repo, token)
+            contributors = gh_get_maintainer_candidates(owner, repo, token)
 
     print(f"owner={owner or '(unresolved)'} contributors={','.join(contributors) or '(none)'}")
     out = os.environ.get("GITHUB_OUTPUT")

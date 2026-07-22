@@ -172,13 +172,7 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
             # top contributors instead, as the individuals actually likely to see this.
             owner_is_org = (meta.get("owner") or {}).get("type") == "Organization"
             if owner_is_org:
-                # Prefer people who've actually merged someone else's PR (real
-                # gatekeeping authority) over raw commit-count contributors, which
-                # credits one-off external submitters same as maintainers. Falls
-                # back to contributors when there's no cross-merge history to go
-                # on (e.g. a repo where only its own author ever merges).
-                maintainer_candidates = (lib.gh_get_pr_mergers(owner, repo, token)
-                                         or lib.gh_get_contributors(owner, repo, token))
+                maintainer_candidates = lib.gh_get_maintainer_candidates(owner, repo, token)
 
     # --- static plugin lint (needs a clone) -----------------------------
     linted = False
@@ -256,25 +250,26 @@ def issue_body(r, target, draft=True, mention_owner=False):
             "not @-mentioned automatically" if not mention_owner else None)
         if r.get("owner_is_org"):
             # An org login isn't a person - @-mentioning it doesn't notify anyone
-            # who isn't already watching the repo. maintainer_candidates come from
-            # commit history only (GET .../contributors), NOT a verified access
-            # check - fpp-data-ci's token has no standing to query real collaborator
-            # permissions on a repo it doesn't own, so these are a best-effort lead,
-            # not a confirmed maintainer list. Even with mention_owner on, we only
-            # @-mention individuals we have a lead on, never the org login itself.
+            # who isn't already watching the repo. maintainer_candidates
+            # (lib.gh_get_maintainer_candidates) are backed by PR merged_by evidence -
+            # authoritative regardless of merge strategy, and never include someone
+            # proven NOT to have access (their own PR here was merged by someone
+            # else) - but fpp-data-ci's token still has no standing to query real
+            # collaborator permissions on a repo it doesn't own, so this is strong
+            # evidence, not a literal permissions check. Even with mention_owner on,
+            # we only @-mention individuals we have this evidence for, never the org
+            # login itself.
             if r.get("maintainer_candidates"):
                 if do_mention:
                     names = ", ".join(f"@{c}" for c in r["maintainer_candidates"])
-                    L.append(f"Maintainer: `{r['owner']}` org (repo owned by an org, not an individual). "
-                             f"Candidate contributors (commit history only, access **not verified**): {names}")
+                    L.append(f"Maintainer: `{r['owner']}` org. Confirmed committers: {names}")
                 else:
                     names = ", ".join(f"`{c}`" for c in r["maintainer_candidates"])
-                    L.append(f"Maintainer: `{r['owner']}` org (repo owned by an org, not an individual - "
-                             f"org mentions don't reliably notify anyone). Candidate contributors "
-                             f"(commit history only, access **not verified**): {names} *({mention})*")
+                    L.append(f"Maintainer: `{r['owner']}` org (org mentions don't reliably notify anyone). "
+                             f"Confirmed committers: {names} *({mention})*")
             else:
-                L.append(f"Maintainer: `{r['owner']}` org (repo owned by an org, not an individual - "
-                         f"no individual maintainer could be identified) *({mention})*")
+                L.append(f"Maintainer: `{r['owner']}` org (no individual maintainer could be identified) "
+                         f"*({mention})*")
         elif do_mention:
             L.append(f"Maintainer: @{r['owner']}")
         else:

@@ -11,6 +11,7 @@ import json
 import re
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import jsonschema
@@ -204,66 +205,80 @@ def gh_get_repo(owner: str, repo: str, token: Optional[str]) -> tuple[Optional[d
         return None, str(e)
 
 
-def gh_get_contributors(owner: str, repo: str, token: Optional[str], limit: int = 5) -> list[str]:
-    """Top `limit` contributor logins (by commit count, the API's default order)
-    for owner/repo. Public endpoint, no special access needed.
+def gh_get_pr_merged_by(owner: str, repo: str, token: Optional[str],
+                         scan_limit: int = 100) -> tuple[dict[str, str], set[str]]:
+    """(login -> most recent merged_at ISO date) for everyone who has ever clicked
+    merge on owner/repo, plus the set of PR authors PROVEN not to have write access
+    there (their own PR was merged by someone else - direct, positive evidence, unlike
+    an absence of evidence).
 
-    Used when a plugin's repo is org-owned (see new_major_release_scan.py): the org login
-    itself isn't a person who can be @-mentioned or notified, so the individual
-    contributors most likely to actually see a tracking issue are surfaced
-    instead. Best-effort - returns [] on any failure (private/empty repo, rate
-    limit, anonymous-only history, etc.), never raises.
+    merged_by is authoritative regardless of merge strategy (squash/rebase/merge
+    commit) - it always names whoever actually had merge rights. That's an improvement
+    over reading commit.author off the first-parent chain (see gh_get_maintainer_candidates
+    below): for a squash- or rebase-merged PR, the resulting mainline commit's `author`
+    is the PR's original submitter, not the person who merged it, and a single-parent
+    commit can't be told apart from a genuine direct push by shape alone. Confirmed via
+    manual audit (2026-07-22) across every FalconChristmas/KulpLights/PulseMeshLabs/
+    remote-falcon plugin repo: contributors like NathanKulp and AlexWHughes were
+    getting listed as "confirmed committers" on fpp-Capture/fpp-osc/fpp-vastfmt purely
+    because dkulp's squash-merges preserved their authorship, despite 100% of their
+    PRs there being merged by someone else.
+
+    merged_by is NOT present on the pulls list endpoint (only on GET .../pulls/{n}),
+    so this fetches each merged PR individually - bounded by `scan_limit` closed PRs
+    examined (audited at ~2-11 calls/repo typically, up to ~94 for an unusually
+    PR-heavy repo; still trivial against a 5000/hr authenticated budget). Best-effort -
+    returns ({}, set()) on any failure, never raises.
     """
-    api = f"https://api.github.com/repos/{owner}/{repo}/contributors?per_page={limit}"
     headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    try:
-        req = urllib.request.Request(api, headers=headers)
+
+    def _get(url):
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-        return [c["login"] for c in data if isinstance(c, dict) and c.get("login") and not c.get("type") == "Bot"][:limit]
+            return json.loads(resp.read().decode("utf-8", "replace"))
+
+    try:
+        prs = _get(f"https://api.github.com/repos/{owner}/{repo}/pulls"
+                   f"?state=closed&per_page={scan_limit}&sort=updated&direction=desc")
     except Exception:  # noqa: BLE001
-        return []
+        return {}, set()
+    if not isinstance(prs, list):
+        return {}, set()
+    merged = sorted((p for p in prs if isinstance(p, dict) and p.get("merged_at")),
+                     key=lambda p: p["merged_at"], reverse=True)
+
+    latest: dict[str, str] = {}
+    disproven: set[str] = set()
+    for p in merged:
+        try:
+            detail = _get(f"https://api.github.com/repos/{owner}/{repo}/pulls/{p['number']}")
+        except Exception:  # noqa: BLE001
+            continue
+        merger = (detail.get("merged_by") or {}).get("login")
+        author = (detail.get("user") or {}).get("login")
+        date = p["merged_at"]
+        if merger and (merger not in latest or date > latest[merger]):
+            latest[merger] = date
+        if author and merger and author != merger:
+            disproven.add(author)
+    return latest, disproven
 
 
-def gh_get_pr_mergers(owner: str, repo: str, token: Optional[str],
-                       scan_limit: int = 100, limit: int = 5) -> list[str]:
-    """Distinct logins with demonstrated write access to owner/repo, found by
-    walking first-parent history from HEAD (the same mainline `git log
-    --first-parent` shows) - a stronger maintainer signal than
-    gh_get_contributors for an org repo that takes outside PRs: a one-off
-    external contributor's commit inflates the contributor count exactly as
-    much as a real maintainer's.
+def gh_get_commit_authors_by_recency(owner: str, repo: str, token: Optional[str],
+                                      scan_limit: int = 100) -> dict[str, str]:
+    """(login -> most recent commit date) walking first-parent history from HEAD (the
+    same mainline `git log --first-parent` shows), over up to `scan_limit` recent
+    commits.
 
-    Every commit on the first-parent chain required write access to get
-    there, however it got there: a merge commit only exists because someone
-    with merge rights created it (and its `author` field IS that person, not
-    the PR's submitter), while a plain commit reachable via first-parent was
-    pushed directly to the branch - only possible with write access. A merged
-    PR's OWN commits are correctly excluded either way: they're only reachable
-    via the merge commit's second parent, never its first, so the walk never
-    touches them.
-
-    This starts from (and subsumes) an earlier version of this function that
-    only credited merge-commit authors - that missed FalconChristmas' most
-    tenured contributors entirely (cpinkham on fpp-BigButtons,
-    computergeek1507 on fpp-brightness: both write directly to the branch,
-    never merging anyone else's PR in these repos, so a mergers-only view saw
-    them as strangers). The first-parent walk catches both cases in one pass,
-    with no separate self-merge check needed - direct-push or merge, everyone
-    it finds already proved write access by definition.
-
-    One API call fetches up to `scan_limit` recent commits (each with its full
-    parent SHA list); the first-parent chain is then walked locally with no
-    further requests, starting at the batch's first entry (HEAD, since the
-    list endpoint returns newest-first) and repeatedly following
-    commit.parents[0].sha within the fetched batch. The walk stops early if a
-    parent isn't in the fetched batch (older than `scan_limit` commits back) -
-    fine for finding currently-active maintainers, not meant to cover a repo's
-    entire history. `limit` bounds the returned list. Public endpoint, no
-    special access needed. Best-effort - returns [] on any failure, never
-    raises.
+    A first-parent commit's `author` proves write access ONLY when it's unambiguous -
+    a genuine direct push. It can't be trusted for a merge commit's author on its own
+    (see gh_get_pr_merged_by's docstring for why); a caller wanting real evidence
+    should treat this purely as a fallback source, filtered against that function's
+    `disproven` set before use. One API call, walked locally with no further requests;
+    stops early if a parent falls outside the fetched batch. Best-effort - returns {}
+    on any failure, never raises.
     """
     api = f"https://api.github.com/repos/{owner}/{repo}/commits?per_page={scan_limit}"
     headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
@@ -274,26 +289,58 @@ def gh_get_pr_mergers(owner: str, repo: str, token: Optional[str],
         with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
             commits = json.loads(resp.read().decode("utf-8", "replace"))
     except Exception:  # noqa: BLE001
-        return []
+        return {}
     if not isinstance(commits, list) or not commits:
-        return []
+        return {}
     by_sha = {c["sha"]: c for c in commits if isinstance(c, dict) and c.get("sha")}
-    authors: list[str] = []
+    latest: dict[str, str] = {}
     seen_shas: set[str] = set()
     cur = commits[0]
     while isinstance(cur, dict) and cur.get("sha") not in seen_shas:
         seen_shas.add(cur["sha"])
         author = cur.get("author") or {}
         login = author.get("login")
-        if login and author.get("type") != "Bot" and login not in authors:
-            authors.append(login)
-            if len(authors) >= limit:
-                break
+        date = cur.get("commit", {}).get("author", {}).get("date")
+        if login and author.get("type") != "Bot" and date and (login not in latest or date > latest[login]):
+            latest[login] = date
         parents = cur.get("parents") or []
         if not parents:
             break
         cur = by_sha.get(parents[0].get("sha"))
-    return authors
+    return latest
+
+
+def gh_get_maintainer_candidates(owner: str, repo: str, token: Optional[str],
+                                  min_names: int = 2, max_names: int = 4,
+                                  recency_days: int = 5 * 365) -> list[str]:
+    """Ordered (most-recent-first) list of `min_names`-`max_names` GitHub logins
+    likely to have real write access to owner/repo - for @-mentioning or authorizing
+    commands on a tracking issue.
+
+    gh_get_pr_merged_by is primary evidence (authoritative regardless of merge
+    strategy). gh_get_commit_authors_by_recency only fills remaining slots, and NEVER
+    for a login in the `disproven` set - a person whose own PR here was proven merged
+    by someone else is never used to pad the list out, even if that leaves the repo
+    below `min_names`. Prefers activity within the last `recency_days`; only reaches
+    further back in time if that window doesn't yield `min_names` names. Validated by
+    hand against every FalconChristmas/KulpLights/PulseMeshLabs/remote-falcon plugin
+    repo on 2026-07-22 - see gh_get_pr_merged_by's docstring. Best-effort - returns []
+    on any failure, never raises.
+    """
+    merged_by, disproven = gh_get_pr_merged_by(owner, repo, token)
+    walked = {login: date for login, date in gh_get_commit_authors_by_recency(owner, repo, token).items()
+              if login not in disproven}
+
+    candidates = dict(walked)
+    candidates.update(merged_by)  # merged_by wins on overlap - the stronger signal
+    if not candidates:
+        return []
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=recency_days)).date().isoformat()
+    ordered = sorted(candidates.items(), key=lambda kv: kv[1], reverse=True)
+    recent = [c for c in ordered if c[1][:10] >= cutoff]
+    chosen = recent if len(recent) >= min_names else ordered[:max(min_names, len(recent))]
+    return [login for login, _ in chosen[:max_names]]
 
 
 def list_open_issues(gh_repo: str, label: str, token: Optional[str]) -> list[dict]:
