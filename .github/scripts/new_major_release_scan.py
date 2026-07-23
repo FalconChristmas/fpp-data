@@ -193,6 +193,8 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         status = "needs-update"
 
     num_blocker = sum(1 for s, _, _ in findings if s == BLOCKER)
+    num_best_practice = sum(1 for s, _, _ in findings if s == BEST_PRACTICE)
+    num_optional = sum(1 for s, _, _ in findings if s == OPTIONAL)
     return {
         "name": name,
         # pluginInfo.json's OWN "name" field - the human-readable title shown on the
@@ -209,10 +211,13 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         "certified": certified,
         "last_major": last_major,
         # certified only means "declares a versions[] entry for the target major" -
-        # it says nothing about outstanding BLOCKER findings (schema errors, lint
-        # failures, etc). ready_to_close is the actual gate for auto-closing a
-        # tracking issue: declared compatible AND no unresolved blockers.
-        "ready_to_close": certified and num_blocker == 0,
+        # it says nothing about outstanding findings (schema errors, lint failures,
+        # best-practice nits, etc). ready_to_close is the actual gate for auto-closing
+        # a tracking issue: declared compatible AND zero findings of ANY severity, not
+        # just blockers - a plugin with open best-practice/optional items still has
+        # something for the maintainer to see, so the issue should stay open.
+        "ready_to_close": (certified and num_blocker == 0
+                           and num_best_practice == 0 and num_optional == 0),
         "removal_requested": removal_requested,
         "issues_enabled": meta.get("has_issues"),
         "archived": meta.get("archived"),
@@ -220,8 +225,8 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         "linted": linted,
         "findings": findings,
         "num_blocker": num_blocker,
-        "num_best_practice": sum(1 for s, _, _ in findings if s == BEST_PRACTICE),
-        "num_optional": sum(1 for s, _, _ in findings if s == OPTIONAL),
+        "num_best_practice": num_best_practice,
+        "num_optional": num_optional,
     }
 
 
