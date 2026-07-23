@@ -65,6 +65,7 @@
             [ "fpp-live-follow", "https://raw.githubusercontent.com/pgianotto/fpp-live-follow/master/pluginInfo.json", "Interaction" ],
             [ "fpp-performance-capture", "https://raw.githubusercontent.com/pgianotto/animatronic-motion-system/master/pluginInfo.json", "Hardware" ],
             [ "fpp-SETIQ", "https://raw.githubusercontent.com/diaquas/fpp-SETIQ/main/pluginInfo.json", "Interaction" ],
-            [ "fpp-node-red", "https://raw.githubusercontent.com/darylc/fpp-node-red/refs/heads/master/pluginInfo.json", "Automation" ]
+            [ "fpp-node-red", "https://raw.githubusercontent.com/darylc/fpp-node-red/refs/heads/master/pluginInfo.json", "Automation" ],
+            [ "fpp-haCommands", "https://raw.githubusercontent.com/jessica12ryan/fpp-haCommands/refs/heads/main/pluginInfo.json", "Automation" ]
         ]
 }
