@@ -174,6 +174,98 @@ def _webhook_no_auth_hits(root: str, exts=(".php",)):
                 break
 
 
+_MONEY_DOMAIN_RX = re.compile(
+    r'paypal\.(?:me|com)|\bpaypal\b|buymeacoffee\.com|buy\s*me\s*a\s*coffee'
+    r'|ko-?fi\.com|\bko-?fi\b|venmo\.com|\bvenmo\b|cash\.app|\bcash\s*app\b|cashapp\b'
+    r'|patreon\.com|\bpatreon\b|gofundme\.com|\bgofundme\b|opencollective\.com'
+    r'|liberapay\.com|tipeee\.com|subscribestar\.(?:com|adult)|github\.com/sponsors', re.I)
+_MONEY_EXTS = (".php", ".html", ".htm", ".inc", ".md", ".markdown", ".json", ".txt", ".js")
+
+
+def _donation_reference_hits(root: str):
+    """Yield (relpath, lineno, line) for a reference to a specific donation/payment
+    platform (PayPal, Buy Me a Coffee, Ko-fi, Venmo, Cash App, Patreon, GoFundMe, GitHub
+    Sponsors, ...) anywhere in the plugin. Deliberately does NOT use _grep's doc/help/test
+    skip - a donation link in a README or help page is just as much a policy violation as
+    one in the plugin's live UI. Matches platform NAMES, not just full URLs, since people
+    often write "Venmo: @handle" with no link - but deliberately does NOT match the bare
+    word "donate"/"donation" (tried that; it flagged a plugin's physical GPIO "donation
+    sensor" on a Santa mailbox prop - donation-shaped English, not a payment reference)."""
+    for path in _iter_files(root, _MONEY_EXTS):
+        rel = os.path.relpath(path, root)
+        low = "/" + rel.lower()
+        if any(v in low for v in _VENDOR_DIRS):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _MONEY_DOMAIN_RX.search(line):
+                yield rel, i, line.strip()
+
+
+_TELEMETRY_DOMAIN_RX = re.compile(
+    r'google-analytics\.com|googletagmanager\.com|gtag\s*\(|analytics\.google\.com'
+    r'|mixpanel\.com|mixpanel\.(?:init|track)\s*\('
+    r'|segment\.(?:io|com)|analytics\.track\s*\('
+    r'|amplitude\.com|posthog\.com'
+    r'|sentry\.io|Sentry\.init\s*\(|Raven\.config\s*\('
+    r'|hotjar\.com|fullstory\.com|heap\.io|statsig\.com'
+    r'|clarity\.ms|countly\.(?:com|io)|appcenter\.ms'
+    r'|plausible\.io|umami\.is', re.I)
+_PHONE_HOME_PHRASE_RX = re.compile(
+    r'\bphone(?:s|d)?\s*home\b|\bcall(?:s|ing)?\s*home\b|\busage\s*(?:statistics|stats)\b'
+    r'|\banonymous\s*usage\b|\busage\s*telemetry\b|\bsend\s*telemetry\b|\breport(?:s|ing)?\s*usage\b', re.I)
+
+
+def _phone_home_hits(root: str):
+    """Yield (relpath, lineno, line) for a bundled third-party analytics/telemetry SDK
+    (Google Analytics, Mixpanel, Segment, Amplitude, Sentry, ...) or an explicit
+    usage-stats/phone-home phrase, anywhere in the plugin (code or docs - same reasoning
+    as _donation_reference_hits: disclosed-in-a-README counts too). Heuristic: can't tell
+    "essential to plugin function" (e.g. a weather plugin calling its own weather API)
+    apart from usage/analytics collection, which is why this is flagged for human review
+    rather than treated as proven - see PLUGIN_GUIDELINES.md #11 for the actual rule."""
+    for path in _iter_files(root, _MONEY_EXTS):
+        rel = os.path.relpath(path, root)
+        low = "/" + rel.lower()
+        if any(v in low for v in _VENDOR_DIRS):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _TELEMETRY_DOMAIN_RX.search(line) or _PHONE_HOME_PHRASE_RX.search(line):
+                yield rel, i, line.strip()
+
+
+_AD_NETWORK_DOMAIN_RX = re.compile(
+    r'googlesyndication\.com|doubleclick\.net|adservice\.google\.com'
+    r'|taboola\.com|outbrain\.com|media\.net|amazon-adsystem\.com'
+    r'|criteo\.com|revcontent\.com|adroll\.com'
+    r'|amazon\.[a-z.]{2,6}/[^\s"\'<>]*[?&]tag=', re.I)
+_AD_PHRASE_RX = re.compile(
+    r'\bsponsored\s+(?:by|content|post)\b|\badvertisement\b'
+    r'|\bshop\s+now\b|\bbuy\s+now\b|\d{1,2}%\s*off\b'
+    r'|\baffiliate\s+(?:link|program)\b'
+    r'|check\s+out\s+my\s+other\s+plugins?\b', re.I)
+# UI-rendered files only (not README/docs/pluginInfo.json) - unlike donation-link and
+# phone-home, this rule is scoped to "inside the FPP UI" specifically (PLUGIN_GUIDELINES.md
+# #12), so a README line thanking a hardware sponsor for donating gear isn't in scope here.
+_AD_EXTS = (".php", ".html", ".htm", ".inc", ".js")
+
+
+def _advertising_hits(root: str):
+    """Yield (relpath, lineno, line) for a known ad-network domain/Amazon affiliate tag, or
+    an explicit ad/promotion phrase ("shop now", "sponsored by", "check out my other
+    plugins", ...), in the plugin's actual UI files. Heuristic and partial by design - it
+    catches mechanical, low-false-positive cases (ad networks, boilerplate ad phrasing);
+    a banner image linking to a vendor with no telltale text needs a human to catch. See
+    PLUGIN_GUIDELINES.md #12."""
+    for path in _iter_files(root, _AD_EXTS):
+        rel = os.path.relpath(path, root)
+        low = "/" + rel.lower()
+        if any(v in low for v in _VENDOR_DIRS):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _AD_NETWORK_DOMAIN_RX.search(line) or _AD_PHRASE_RX.search(line):
+                yield rel, i, line.strip()
+
+
 def _is_comment_line(line: str) -> bool:
     stripped = line.lstrip()
     return (stripped[:2] in ("//", "/*", "* ") or stripped[:1] in ("#", ";")
@@ -944,6 +1036,48 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"to match. Rename the GitHub repo to `{declared}` (Settings > repository name) "
                        f"or change repoName to `{src[1]}`, whichever is the real name here - just make "
                        f"sure pluginList.json's listing name is updated to match too."))
+
+    # Plugins may not solicit donations, payments, or subscriptions anywhere -
+    # not just runtime UI, but README/help/docs too (hence the dedicated
+    # _donation_reference_hits, not _grep, which skips those). BLOCKER: this is
+    # a flat prohibition (PLUGIN_GUIDELINES.md §10), not a style nudge.
+    hit = next(iter(_donation_reference_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "ask-for-money",
+                   f"references or links to a donation/payment/subscription service ({hit[0]}:"
+                   f"{hit[1]}: `{hit[2]}`) - FPP plugins may not solicit donations, payments, or "
+                   f"subscriptions (PayPal, Buy Me a Coffee, Ko-fi, Venmo, Cash App, Patreon, GitHub "
+                   f"Sponsors, or similar) anywhere in the plugin - UI, README, help pages, or "
+                   f"pluginInfo.json. Remove it before this can be listed"))
+
+    # Plugins may not log usage/statistics and send them off-box - no bundled
+    # analytics/telemetry SDK, no home-rolled phone-home endpoint - except where
+    # transmitting data is essential to the plugin's actual function (a weather
+    # plugin fetching weather, a plugin calling its own cloud backend to do the
+    # thing it exists to do). BEST_PRACTICE not BLOCKER: the linter can't tell
+    # "essential to function" apart from usage collection, so this needs a
+    # human to judge intent, not an automatic block. See PLUGIN_GUIDELINES.md #11.
+    hit = next(iter(_phone_home_hits(root)), None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "phone-home",
+                   f"possible usage telemetry / phone-home ({hit[0]}:{hit[1]}: `{hit[2]}`) - plugins "
+                   f"may not log plugin usage/statistics and send them off-box, except where that "
+                   f"data transmission is essential to the plugin's actual function. If this is "
+                   f"analytics/telemetry rather than core functionality, remove it; if you have a "
+                   f"genuine need for usage stats, talk to the FPP developers about extending the "
+                   f"existing opt-in `fpp-stats` system instead of rolling your own"))
+
+    # Plugins may not advertise anything inside the FPP UI - products, vendors,
+    # things for sale, or even other plugins. BEST_PRACTICE: this only catches
+    # mechanical cases (known ad networks, boilerplate ad phrasing) - a banner
+    # image with no telltale text needs a human. See PLUGIN_GUIDELINES.md #12.
+    hit = next(iter(_advertising_hits(root)), None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "advertising",
+                   f"possible advertising in the plugin's UI ({hit[0]}:{hit[1]}: `{hit[2]}`) - "
+                   f"plugins may not advertise anything inside the FPP UI, including products, "
+                   f"vendors, things for sale, or other plugins (yours or anyone else's). If this "
+                   f"is genuinely ad/promotional content, remove it"))
 
     # --- repo hygiene --------------------------------------------------------
     if not any(n.startswith(("license", "copying")) for n in lower):

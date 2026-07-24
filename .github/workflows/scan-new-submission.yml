@@ -426,6 +426,7 @@ jobs:
           # value containing a `'` can't break out of the JS string literal.
           BRANCH: ${{ steps.edit.outputs.branch }}
           REPO_NAME: ${{ steps.comment.outputs.repo_name }}
+          PLUGININFO_URL: ${{ steps.extract.outputs.plugininfo_url }}
         with:
           script: |
             const fs = require('fs');
@@ -433,6 +434,7 @@ jobs:
             const issue_number = context.payload.issue.number;
             const branch = process.env.BRANCH;
             const repoName = process.env.REPO_NAME;
+            const plugininfoUrl = process.env.PLUGININFO_URL;
 
             const result = JSON.parse(fs.readFileSync('scan-result.json', 'utf8'));
             const badge = { blocker: '🛑', 'best-practice': '⚠️', optional: '💡' };
@@ -452,6 +454,7 @@ jobs:
             const lines = [`<!-- listing-pr repo:${repoName} issue:${issue_number} -->`,
                             `Adds \`${repoName}\` to \`pluginList.json\`, requested in #${issue_number}.`, ''];
             if (repoUrl) lines.push(`**Plugin repo:** ${repoUrl}`);
+            if (plugininfoUrl) lines.push(`**pluginInfo.json:** ${plugininfoUrl}`);
             lines.push(`**Submitted by:** @${reporter}`);
             if (registeredOwner) {
               const same = registeredOwner.toLowerCase() === reporter.toLowerCase();
@@ -482,6 +485,10 @@ jobs:
               'this PR existed.', '',
               '**Merging is entirely up to a maintainer\'s judgement** - this PR being open is not an approval, ' +
               'especially if it was opened via `/submit` over unresolved findings above.', '',
+              '⚠️ **Before merging:** install this plugin on a real (or test) FPP instance and visually ' +
+              'inspect it - the automated check only covers what it can grep for. Confirm the UI actually ' +
+              'renders correctly in both light and dark theme, nothing looks broken, and there\'s nothing ' +
+              'the automated findings above wouldn\'t catch (ads, phone-home, donation links, ...).', '',
               `_A repo maintainer (or @${reporter}) can comment \`/recheck\` here to re-run the plugin ` +
               'check against the repo\'s current state and refresh the findings above._');
             const body = lines.join('\n');
