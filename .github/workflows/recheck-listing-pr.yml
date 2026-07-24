@@ -107,6 +107,17 @@ jobs:
           ref: add-plugin/${{ steps.extract.outputs.repo_name }}
           fetch-depth: 0
 
+      # These bot branches are forked off master once, at submission time, and never
+      # updated after - so their own .github/scripts/.github/schema is whatever the
+      # linter looked like back then, not today's rules (confirmed in practice: a rule
+      # added to master after a PR opened silently didn't fire on that PR's /recheck).
+      # Overlay master's CURRENT copy before running anything, so /recheck always
+      # reflects today's guidelines. pluginList.json itself is deliberately left alone -
+      # that's the PR's actual proposed change, not part of the toolchain.
+      - name: Use master's current scan scripts, not this branch's frozen-at-submission copy
+        if: steps.authz.outputs.ok == 'true'
+        run: git checkout origin/master -- .github/scripts .github/schema
+
       - uses: actions/setup-python@v5
         if: steps.authz.outputs.ok == 'true'
         with:

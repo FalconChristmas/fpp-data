@@ -174,6 +174,98 @@ def _webhook_no_auth_hits(root: str, exts=(".php",)):
                 break
 
 
+_MONEY_DOMAIN_RX = re.compile(
+    r'paypal\.(?:me|com)|\bpaypal\b|buymeacoffee\.com|buy\s*me\s*a\s*coffee'
+    r'|ko-?fi\.com|\bko-?fi\b|venmo\.com|\bvenmo\b|cash\.app|\bcash\s*app\b|cashapp\b'
+    r'|patreon\.com|\bpatreon\b|gofundme\.com|\bgofundme\b|opencollective\.com'
+    r'|liberapay\.com|tipeee\.com|subscribestar\.(?:com|adult)|github\.com/sponsors', re.I)
+_MONEY_EXTS = (".php", ".html", ".htm", ".inc", ".md", ".markdown", ".json", ".txt", ".js")
+
+
+def _donation_reference_hits(root: str):
+    """Yield (relpath, lineno, line) for a reference to a specific donation/payment
+    platform (PayPal, Buy Me a Coffee, Ko-fi, Venmo, Cash App, Patreon, GoFundMe, GitHub
+    Sponsors, ...) anywhere in the plugin. Deliberately does NOT use _grep's doc/help/test
+    skip - a donation link in a README or help page is just as much a policy violation as
+    one in the plugin's live UI. Matches platform NAMES, not just full URLs, since people
+    often write "Venmo: @handle" with no link - but deliberately does NOT match the bare
+    word "donate"/"donation" (tried that; it flagged a plugin's physical GPIO "donation
+    sensor" on a Santa mailbox prop - donation-shaped English, not a payment reference)."""
+    for path in _iter_files(root, _MONEY_EXTS):
+        rel = os.path.relpath(path, root)
+        low = "/" + rel.lower()
+        if any(v in low for v in _VENDOR_DIRS):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _MONEY_DOMAIN_RX.search(line):
+                yield rel, i, line.strip()
+
+
+_TELEMETRY_DOMAIN_RX = re.compile(
+    r'google-analytics\.com|googletagmanager\.com|gtag\s*\(|analytics\.google\.com'
+    r'|mixpanel\.com|mixpanel\.(?:init|track)\s*\('
+    r'|segment\.(?:io|com)|analytics\.track\s*\('
+    r'|amplitude\.com|posthog\.com'
+    r'|sentry\.io|Sentry\.init\s*\(|Raven\.config\s*\('
+    r'|hotjar\.com|fullstory\.com|heap\.io|statsig\.com'
+    r'|clarity\.ms|countly\.(?:com|io)|appcenter\.ms'
+    r'|plausible\.io|umami\.is', re.I)
+_PHONE_HOME_PHRASE_RX = re.compile(
+    r'\bphone(?:s|d)?\s*home\b|\bcall(?:s|ing)?\s*home\b|\busage\s*(?:statistics|stats)\b'
+    r'|\banonymous\s*usage\b|\busage\s*telemetry\b|\bsend\s*telemetry\b|\breport(?:s|ing)?\s*usage\b', re.I)
+
+
+def _phone_home_hits(root: str):
+    """Yield (relpath, lineno, line) for a bundled third-party analytics/telemetry SDK
+    (Google Analytics, Mixpanel, Segment, Amplitude, Sentry, ...) or an explicit
+    usage-stats/phone-home phrase, anywhere in the plugin (code or docs - same reasoning
+    as _donation_reference_hits: disclosed-in-a-README counts too). Heuristic: can't tell
+    "essential to plugin function" (e.g. a weather plugin calling its own weather API)
+    apart from usage/analytics collection, which is why this is flagged for human review
+    rather than treated as proven - see PLUGIN_GUIDELINES.md #11 for the actual rule."""
+    for path in _iter_files(root, _MONEY_EXTS):
+        rel = os.path.relpath(path, root)
+        low = "/" + rel.lower()
+        if any(v in low for v in _VENDOR_DIRS):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _TELEMETRY_DOMAIN_RX.search(line) or _PHONE_HOME_PHRASE_RX.search(line):
+                yield rel, i, line.strip()
+
+
+_AD_NETWORK_DOMAIN_RX = re.compile(
+    r'googlesyndication\.com|doubleclick\.net|adservice\.google\.com'
+    r'|taboola\.com|outbrain\.com|media\.net|amazon-adsystem\.com'
+    r'|criteo\.com|revcontent\.com|adroll\.com'
+    r'|amazon\.[a-z.]{2,6}/[^\s"\'<>]*[?&]tag=', re.I)
+_AD_PHRASE_RX = re.compile(
+    r'\bsponsored\s+(?:by|content|post)\b|\badvertisement\b'
+    r'|\bshop\s+now\b|\bbuy\s+now\b|\d{1,2}%\s*off\b'
+    r'|\baffiliate\s+(?:link|program)\b'
+    r'|check\s+out\s+my\s+other\s+plugins?\b', re.I)
+# UI-rendered files only (not README/docs/pluginInfo.json) - unlike donation-link and
+# phone-home, this rule is scoped to "inside the FPP UI" specifically (PLUGIN_GUIDELINES.md
+# #12), so a README line thanking a hardware sponsor for donating gear isn't in scope here.
+_AD_EXTS = (".php", ".html", ".htm", ".inc", ".js")
+
+
+def _advertising_hits(root: str):
+    """Yield (relpath, lineno, line) for a known ad-network domain/Amazon affiliate tag, or
+    an explicit ad/promotion phrase ("shop now", "sponsored by", "check out my other
+    plugins", ...), in the plugin's actual UI files. Heuristic and partial by design - it
+    catches mechanical, low-false-positive cases (ad networks, boilerplate ad phrasing);
+    a banner image linking to a vendor with no telltale text needs a human to catch. See
+    PLUGIN_GUIDELINES.md #12."""
+    for path in _iter_files(root, _AD_EXTS):
+        rel = os.path.relpath(path, root)
+        low = "/" + rel.lower()
+        if any(v in low for v in _VENDOR_DIRS):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _AD_NETWORK_DOMAIN_RX.search(line) or _AD_PHRASE_RX.search(line):
+                yield rel, i, line.strip()
+
+
 def _is_comment_line(line: str) -> bool:
     stripped = line.lstrip()
     return (stripped[:2] in ("//", "/*", "* ") or stripped[:1] in ("#", ";")
@@ -250,6 +342,66 @@ def _secret_in_log_hits(root: str, exts=SCRIPT_EXT):
             if log_call_rx.search(line) and var_rx.search(line):
                 yield rel, i, line.strip()
                 break
+
+
+def _log_dir_non_log_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line, fname) for a hardcoded path under FPP's log
+    directory (/home/fpp/media/logs/) whose filename doesn't end in .log - a PID
+    file, sqlite DB, command queue, or cache file stored in the log directory
+    instead of the plugin's own directory. Concrete motivating case:
+    fpp-sled-mailbox stores sled_daemon.pid, sled.db, sled_trigger.cmd, and
+    sled_radar_<side>.json all inside media/logs/ alongside its actual
+    plugin-fpp-sled-mailbox.log. The log directory is rotated and swept wholesale
+    into Support Zips as *logs* - non-log state stored there either gets rotated
+    away unexpectedly or bloats every Support Zip with data nobody asked for.
+    Yields every occurrence (not just the first) - the caller dedupes by `fname`
+    so a file referenced from many places (e.g. a PID file opened in five
+    different .php pages) is still reported once, but each DISTINCT offending
+    file (pid/db/queue/cache/...) gets its own finding rather than only the
+    first one seen in the whole tree."""
+    path_rx = re.compile(r'''(['"])/home/fpp/media/logs/([^'"]+)\1''')
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = path_rx.search(line)
+            if not m:
+                continue
+            fname = m.group(2).rsplit("/", 1)[-1]
+            if "." not in fname:
+                continue
+            ext = fname.rsplit(".", 1)[-1].lower()
+            if ext != "log":
+                yield rel, i, line.strip(), fname
+
+
+def _outside_plugin_territory_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line) for a hardcoded file path under /home/fpp/media/
+    that falls outside the directories a plugin is expected to touch on its own -
+    its own log file (/media/logs/, the *kind* of file there is checked separately
+    by _log_dir_non_log_hits above), FPP's config storage (/media/config/, see the
+    core-config check's docstring), the plugins directory (/media/plugins/), or the
+    playlists directory (/media/playlists/, an established integration point for
+    plugin-managed temp playlists) - e.g. a state file dropped straight into
+    /home/fpp/media/ itself. fpp_install.sh/fpp_uninstall.sh are excluded: an
+    installer legitimately reaches outside the plugin's own footprint (systemd
+    units, Apache config, cron, etc.) as part of installing/removing itself."""
+    file_rx = re.compile(r'''(['"])(/home/fpp/media/[^'"]*\.\w{1,8})\1''')
+    allowed_rx = re.compile(r'^/home/fpp/media/(?:config|plugins|playlists|logs)/', re.I)
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel) or os.path.basename(path) in ("fpp_install.sh", "fpp_uninstall.sh"):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = file_rx.search(line)
+            if not m or allowed_rx.match(m.group(2)):
+                continue
+            yield rel, i, line.strip()
 
 
 def _log_naming_hits(root: str, exts=SCRIPT_EXT):
@@ -890,6 +1042,51 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"/home/fpp/media/logs/{repo}.log today, so it's rotated and included in "
                        f"the Support Zip"))
 
+    # The reverse problem: a non-.log file (PID file, sqlite DB, command queue,
+    # cache file) stored in FPP's log directory instead of the plugin's own
+    # directory. The log directory is rotated and swept wholesale into Support
+    # Zips as *logs* - non-log state living there either gets rotated away
+    # unexpectedly or bloats every Support Zip with data that isn't a log.
+    # Reports EVERY distinct offending file, not just the first line in the
+    # tree: a plugin with a rogue PID file AND a rogue sqlite DB has two
+    # separate problems, and only surfacing the first one found means the
+    # second is still silently present after the first is fixed and the
+    # linter is re-run. Dedupes by filename (not by line) so a file that's
+    # opened from several different .php pages is still one finding.
+    seen_log_dir_fnames = set()
+    for rel, lineno, line, fname in _log_dir_non_log_hits(root):
+        key = fname.lower()
+        if key in seen_log_dir_fnames:
+            continue
+        seen_log_dir_fnames.add(key)
+        out.append(Finding(BEST_PRACTICE, "log-dir-pollution",
+                   f"non-log file stored in FPP's log directory ({rel}:{lineno}: `{line}`) - "
+                   f"the log directory is rotated and bundled wholesale into Support Zips as *logs*; "
+                   f"a PID file/database/cache/queue file living there either gets rotated away "
+                   f"unexpectedly or bloats every Support Zip with non-log data. Store it in the "
+                   f"plugin's own directory instead (`${{PLUGINDIR}}/{repo}/...` (shell), "
+                   f"`$settings['pluginDirectory']` (PHP), or "
+                   f"`os.path.dirname(os.path.abspath(__file__))` (Python)), and reserve the log "
+                   f"directory for the actual `plugin-{repo}.log`"))
+
+    # Broader than the above: ANY hardcoded file path under /home/fpp/media/
+    # that isn't inside a directory a plugin is expected to touch on its own
+    # (its log file, FPP's config storage, the plugins directory, or the
+    # playlists directory) - e.g. a state file dropped straight into
+    # /home/fpp/media/ itself. Scoped to /media/ specifically (/home/pi/ and
+    # /tmp are already covered by the hardcoded-absolute-path check above) and
+    # skips fpp_install.sh/fpp_uninstall.sh, which legitimately reach outside
+    # the plugin's own footprint (systemd units, Apache config, cron, ...) as
+    # part of installing/removing themselves.
+    hit = next(iter(_outside_plugin_territory_hits(root)), None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "outside-plugin-territory",
+                   f"file path outside the plugin's own directory/log/config/playlists territory "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`) - store plugin-owned files inside the plugin's "
+                   f"own directory (`${{PLUGINDIR}}/{repo}/...`), FPP's config storage "
+                   f"(`/media/config/`), or the log directory (a real `.log` file only), rather "
+                   f"than loose under `/home/fpp/media/` itself"))
+
     # Log filename doesn't start with the mandated "plugin-" prefix - it still
     # lands in the right directory, just under a name FPP's log viewer/Support
     # Zip convention doesn't expect, and it isn't namespaced against collisions.
@@ -944,6 +1141,50 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"to match. Rename the GitHub repo to `{declared}` (Settings > repository name) "
                        f"or change repoName to `{src[1]}`, whichever is the real name here - just make "
                        f"sure pluginList.json's listing name is updated to match too."))
+
+    # Plugins may not solicit donations, payments, or subscriptions anywhere -
+    # not just runtime UI, but README/help/docs too (hence the dedicated
+    # _donation_reference_hits, not _grep, which skips those). BLOCKER: this is
+    # a flat prohibition (PLUGIN_GUIDELINES.md §10), not a style nudge.
+    hit = next(iter(_donation_reference_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "ask-for-money",
+                   f"references or links to a donation/payment/subscription service ({hit[0]}:"
+                   f"{hit[1]}: `{hit[2]}`) - FPP plugins may not solicit donations, payments, or "
+                   f"subscriptions (PayPal, Buy Me a Coffee, Ko-fi, Venmo, Cash App, Patreon, GitHub "
+                   f"Sponsors, or similar) anywhere in the plugin - UI, README, help pages, or "
+                   f"pluginInfo.json. Remove it before this can be listed"))
+
+    # Plugins may not log usage/statistics and send them off-box - no bundled
+    # analytics/telemetry SDK, no home-rolled phone-home endpoint - except where
+    # transmitting data is essential to the plugin's actual function (a weather
+    # plugin fetching weather, a plugin calling its own cloud backend to do the
+    # thing it exists to do). BLOCKER per policy - a submitter who believes a
+    # hit is actually essential-to-function can still `/submit` over it and ask
+    # a maintainer to judge intent rather than this being an automatic block
+    # with no override. See PLUGIN_GUIDELINES.md #11.
+    hit = next(iter(_phone_home_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "phone-home",
+                   f"possible usage telemetry / phone-home ({hit[0]}:{hit[1]}: `{hit[2]}`) - plugins "
+                   f"may not log plugin usage/statistics and send them off-box, except where that "
+                   f"data transmission is essential to the plugin's actual function. If this is "
+                   f"analytics/telemetry rather than core functionality, remove it; if you have a "
+                   f"genuine need for usage stats, talk to the FPP developers about extending the "
+                   f"existing opt-in `fpp-stats` system instead of rolling your own"))
+
+    # Plugins may not advertise anything inside the FPP UI - products, vendors,
+    # things for sale, or even other plugins. BLOCKER per policy - this only
+    # catches mechanical cases (known ad networks, boilerplate ad phrasing), so
+    # what it does flag is high-confidence; a banner image with no telltale
+    # text still needs a human to catch, same as before. See PLUGIN_GUIDELINES.md #12.
+    hit = next(iter(_advertising_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "advertising",
+                   f"possible advertising in the plugin's UI ({hit[0]}:{hit[1]}: `{hit[2]}`) - "
+                   f"plugins may not advertise anything inside the FPP UI, including products, "
+                   f"vendors, things for sale, or other plugins (yours or anyone else's). If this "
+                   f"is genuinely ad/promotional content, remove it"))
 
     # --- repo hygiene --------------------------------------------------------
     if not any(n.startswith(("license", "copying")) for n in lower):
