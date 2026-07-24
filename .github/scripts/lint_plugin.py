@@ -1054,12 +1054,13 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # analytics/telemetry SDK, no home-rolled phone-home endpoint - except where
     # transmitting data is essential to the plugin's actual function (a weather
     # plugin fetching weather, a plugin calling its own cloud backend to do the
-    # thing it exists to do). BEST_PRACTICE not BLOCKER: the linter can't tell
-    # "essential to function" apart from usage collection, so this needs a
-    # human to judge intent, not an automatic block. See PLUGIN_GUIDELINES.md #11.
+    # thing it exists to do). BLOCKER per policy - a submitter who believes a
+    # hit is actually essential-to-function can still `/submit` over it and ask
+    # a maintainer to judge intent rather than this being an automatic block
+    # with no override. See PLUGIN_GUIDELINES.md #11.
     hit = next(iter(_phone_home_hits(root)), None)
     if hit:
-        out.append(Finding(BEST_PRACTICE, "phone-home",
+        out.append(Finding(BLOCKER, "phone-home",
                    f"possible usage telemetry / phone-home ({hit[0]}:{hit[1]}: `{hit[2]}`) - plugins "
                    f"may not log plugin usage/statistics and send them off-box, except where that "
                    f"data transmission is essential to the plugin's actual function. If this is "
@@ -1068,12 +1069,13 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"existing opt-in `fpp-stats` system instead of rolling your own"))
 
     # Plugins may not advertise anything inside the FPP UI - products, vendors,
-    # things for sale, or even other plugins. BEST_PRACTICE: this only catches
-    # mechanical cases (known ad networks, boilerplate ad phrasing) - a banner
-    # image with no telltale text needs a human. See PLUGIN_GUIDELINES.md #12.
+    # things for sale, or even other plugins. BLOCKER per policy - this only
+    # catches mechanical cases (known ad networks, boilerplate ad phrasing), so
+    # what it does flag is high-confidence; a banner image with no telltale
+    # text still needs a human to catch, same as before. See PLUGIN_GUIDELINES.md #12.
     hit = next(iter(_advertising_hits(root)), None)
     if hit:
-        out.append(Finding(BEST_PRACTICE, "advertising",
+        out.append(Finding(BLOCKER, "advertising",
                    f"possible advertising in the plugin's UI ({hit[0]}:{hit[1]}: `{hit[2]}`) - "
                    f"plugins may not advertise anything inside the FPP UI, including products, "
                    f"vendors, things for sale, or other plugins (yours or anyone else's). If this "
