@@ -344,6 +344,66 @@ def _secret_in_log_hits(root: str, exts=SCRIPT_EXT):
                 break
 
 
+def _log_dir_non_log_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line, fname) for a hardcoded path under FPP's log
+    directory (/home/fpp/media/logs/) whose filename doesn't end in .log - a PID
+    file, sqlite DB, command queue, or cache file stored in the log directory
+    instead of the plugin's own directory. Concrete motivating case:
+    fpp-sled-mailbox stores sled_daemon.pid, sled.db, sled_trigger.cmd, and
+    sled_radar_<side>.json all inside media/logs/ alongside its actual
+    plugin-fpp-sled-mailbox.log. The log directory is rotated and swept wholesale
+    into Support Zips as *logs* - non-log state stored there either gets rotated
+    away unexpectedly or bloats every Support Zip with data nobody asked for.
+    Yields every occurrence (not just the first) - the caller dedupes by `fname`
+    so a file referenced from many places (e.g. a PID file opened in five
+    different .php pages) is still reported once, but each DISTINCT offending
+    file (pid/db/queue/cache/...) gets its own finding rather than only the
+    first one seen in the whole tree."""
+    path_rx = re.compile(r'''(['"])/home/fpp/media/logs/([^'"]+)\1''')
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = path_rx.search(line)
+            if not m:
+                continue
+            fname = m.group(2).rsplit("/", 1)[-1]
+            if "." not in fname:
+                continue
+            ext = fname.rsplit(".", 1)[-1].lower()
+            if ext != "log":
+                yield rel, i, line.strip(), fname
+
+
+def _outside_plugin_territory_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line) for a hardcoded file path under /home/fpp/media/
+    that falls outside the directories a plugin is expected to touch on its own -
+    its own log file (/media/logs/, the *kind* of file there is checked separately
+    by _log_dir_non_log_hits above), FPP's config storage (/media/config/, see the
+    core-config check's docstring), the plugins directory (/media/plugins/), or the
+    playlists directory (/media/playlists/, an established integration point for
+    plugin-managed temp playlists) - e.g. a state file dropped straight into
+    /home/fpp/media/ itself. fpp_install.sh/fpp_uninstall.sh are excluded: an
+    installer legitimately reaches outside the plugin's own footprint (systemd
+    units, Apache config, cron, etc.) as part of installing/removing itself."""
+    file_rx = re.compile(r'''(['"])(/home/fpp/media/[^'"]*\.\w{1,8})\1''')
+    allowed_rx = re.compile(r'^/home/fpp/media/(?:config|plugins|playlists|logs)/', re.I)
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel) or os.path.basename(path) in ("fpp_install.sh", "fpp_uninstall.sh"):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = file_rx.search(line)
+            if not m or allowed_rx.match(m.group(2)):
+                continue
+            yield rel, i, line.strip()
+
+
 def _log_naming_hits(root: str, exts=SCRIPT_EXT):
     """Yield (relpath, lineno, line) for a log filename built from logDirectory/LOGDIR
     that doesn't include the mandated "plugin-" prefix - e.g. `$pluginName.".log"` instead
@@ -981,6 +1041,51 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"`{bad_hit[2]}`) - log to {howto} instead, which resolves to "
                        f"/home/fpp/media/logs/{repo}.log today, so it's rotated and included in "
                        f"the Support Zip"))
+
+    # The reverse problem: a non-.log file (PID file, sqlite DB, command queue,
+    # cache file) stored in FPP's log directory instead of the plugin's own
+    # directory. The log directory is rotated and swept wholesale into Support
+    # Zips as *logs* - non-log state living there either gets rotated away
+    # unexpectedly or bloats every Support Zip with data that isn't a log.
+    # Reports EVERY distinct offending file, not just the first line in the
+    # tree: a plugin with a rogue PID file AND a rogue sqlite DB has two
+    # separate problems, and only surfacing the first one found means the
+    # second is still silently present after the first is fixed and the
+    # linter is re-run. Dedupes by filename (not by line) so a file that's
+    # opened from several different .php pages is still one finding.
+    seen_log_dir_fnames = set()
+    for rel, lineno, line, fname in _log_dir_non_log_hits(root):
+        key = fname.lower()
+        if key in seen_log_dir_fnames:
+            continue
+        seen_log_dir_fnames.add(key)
+        out.append(Finding(BEST_PRACTICE, "log-dir-pollution",
+                   f"non-log file stored in FPP's log directory ({rel}:{lineno}: `{line}`) - "
+                   f"the log directory is rotated and bundled wholesale into Support Zips as *logs*; "
+                   f"a PID file/database/cache/queue file living there either gets rotated away "
+                   f"unexpectedly or bloats every Support Zip with non-log data. Store it in the "
+                   f"plugin's own directory instead (`${{PLUGINDIR}}/{repo}/...` (shell), "
+                   f"`$settings['pluginDirectory']` (PHP), or "
+                   f"`os.path.dirname(os.path.abspath(__file__))` (Python)), and reserve the log "
+                   f"directory for the actual `plugin-{repo}.log`"))
+
+    # Broader than the above: ANY hardcoded file path under /home/fpp/media/
+    # that isn't inside a directory a plugin is expected to touch on its own
+    # (its log file, FPP's config storage, the plugins directory, or the
+    # playlists directory) - e.g. a state file dropped straight into
+    # /home/fpp/media/ itself. Scoped to /media/ specifically (/home/pi/ and
+    # /tmp are already covered by the hardcoded-absolute-path check above) and
+    # skips fpp_install.sh/fpp_uninstall.sh, which legitimately reach outside
+    # the plugin's own footprint (systemd units, Apache config, cron, ...) as
+    # part of installing/removing themselves.
+    hit = next(iter(_outside_plugin_territory_hits(root)), None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "outside-plugin-territory",
+                   f"file path outside the plugin's own directory/log/config/playlists territory "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`) - store plugin-owned files inside the plugin's "
+                   f"own directory (`${{PLUGINDIR}}/{repo}/...`), FPP's config storage "
+                   f"(`/media/config/`), or the log directory (a real `.log` file only), rather "
+                   f"than loose under `/home/fpp/media/` itself"))
 
     # Log filename doesn't start with the mandated "plugin-" prefix - it still
     # lands in the right directory, just under a name FPP's log viewer/Support
