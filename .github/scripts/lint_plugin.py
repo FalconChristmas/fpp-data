@@ -43,7 +43,7 @@ BLOCKER, BEST_PRACTICE, OPTIONAL = "blocker", "best-practice", "optional"
 
 HOOKS = ("fpp_install.sh", "fpp_uninstall.sh", "preStart.sh", "postStart.sh",
          "preStop.sh", "postStop.sh")
-SCRIPT_EXT = (".sh", ".py", ".php")
+SCRIPT_EXT = (".sh", ".py", ".php", ".js")
 
 # Files fppd actually executes as root (fppd.service has no User=, so it and
 # everything it shells out to - runPreStartScripts/install_plugin/
