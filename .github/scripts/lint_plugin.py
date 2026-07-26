@@ -358,6 +358,25 @@ def _advertising_hits(root: str):
                 yield rel, i, line.strip()
 
 
+def _menu_type_counts(root: str) -> dict:
+    """type -> [(relpath, lineno), ...] for every 'type' => '<value>' entry inside
+    menu.inc's $menuEntries array. Regex-based (not a real PHP parser) - matches the
+    array-literal shape the template and every real plugin's menu.inc use, one
+    'type' => '...' pair per array entry on its own line."""
+    result: dict = {}
+    for path in _iter_files(root, (".inc",)):
+        if os.path.basename(path).lower() != "menu.inc":
+            continue
+        rel = os.path.relpath(path, root)
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = re.search(r'''['"]type['"]\s*=>\s*['"](\w+)['"]''', line)
+            if m:
+                result.setdefault(m.group(1), []).append((rel, i))
+    return result
+
+
 def _is_comment_line(line: str) -> bool:
     stripped = line.lstrip()
     return (stripped[:2] in ("//", "/*", "* ") or stripped[:1] in ("#", ";")
@@ -1353,6 +1372,20 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"is genuinely ad/promotional content, remove it"))
 
     # --- repo hygiene --------------------------------------------------------
+
+    # menu.inc: at most one entry per `type` (status/content/output/help) -
+    # PLUGIN_GUIDELINES.md #9.1. A plugin can appear under multiple menu areas,
+    # just never twice within the SAME area - the guideline's own anti-pattern
+    # example is exactly this (three separate 'help' entries instead of one page).
+    for mtype, hits in sorted(_menu_type_counts(root).items()):
+        if len(hits) > 1:
+            rel, lineno = hits[1]
+            out.append(Finding(BEST_PRACTICE, "menu-duplicate-type",
+                       f"menu.inc has {len(hits)} '{mtype}' entries ({rel}:{lineno}) - each of the "
+                       f"four menu areas (status/content/output/help) may contain at most one entry "
+                       f"from your plugin. Combine the extra pages into a single page (e.g. tabs or "
+                       f"sections within one page) instead of adding a separate menu entry per page"))
+
     if not any(n.startswith(("license", "copying")) for n in lower):
         out.append(Finding(OPTIONAL, "no-license", "no LICENSE file - add one for redistribution clarity"))
     if not any(n.startswith("readme") for n in lower):
