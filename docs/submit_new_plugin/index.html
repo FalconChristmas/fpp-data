@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Submit a plugin - Falcon Player</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1a1a1a; --bg:#fff; --muted:#5a5a5a;
+          --line:#d8d8d8; --accent:#0969da; --ok:#1a7f37; --err:#cf222e; --code:#f6f8fa; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e6edf3; --bg:#0d1117; --muted:#9198a1; --line:#30363d;
+            --accent:#4493f8; --ok:#3fb950; --err:#f85149; --code:#161b22; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:2rem 1rem; background:var(--bg); color:var(--fg);
+         font:16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size:1.5rem; margin:0 0 .25rem; }
+  .sub { color:var(--muted); margin:0 0 1.5rem; }
+  fieldset { border:1px solid var(--line); border-radius:8px; padding:1.25rem; margin:0 0 1.25rem; }
+  legend { padding:0 .4rem; font-weight:600; font-size:.9rem; }
+  label { display:block; font-weight:600; margin:.9rem 0 .3rem; font-size:.9rem; }
+  label:first-of-type { margin-top:.2rem; }
+  .hint { font-weight:400; color:var(--muted); font-size:.85rem; }
+  input, select, textarea { width:100%; padding:.6rem .7rem; border:1px solid var(--line);
+        border-radius:6px; background:var(--bg); color:var(--fg); font-size:1rem; font-family:inherit; }
+  button, .btn { margin-top:1.1rem; padding:.6rem 1.1rem; border:0; border-radius:6px;
+         background:var(--accent); color:#fff; font-size:1rem; font-weight:600; cursor:pointer;
+         display:inline-block; text-decoration:none; text-align:center; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  #step2 { display:none; }
+  #step2.show { display:block; }
+  .msg { margin-top:.8rem; font-size:.9rem; }
+  .msg.err { color:var(--err); }
+  .msg.ok { color:var(--ok); }
+  .note { background:var(--code); border:1px solid var(--line); border-radius:6px;
+          padding:.9rem 1rem; font-size:.9rem; color:var(--muted); }
+  .note strong { color:var(--fg); }
+  code { background:var(--code); padding:.1rem .3rem; border-radius:4px; font-size:.85em; }
+  details { margin-top:1rem; font-size:.85rem; color:var(--muted); }
+  summary { cursor:pointer; }
+  .info-block { margin-top:1rem; font-size:.85rem; color:var(--muted); }
+  .info-block-title { margin:0; font-weight:600; color:var(--fg); }
+  /* The logo asset ships white (built for FPP's dark header). The inlined copy below
+     uses currentColor instead, so it stays visible in light mode too. */
+  header { display:flex; align-items:center; gap:.85rem; margin-bottom:1.4rem; }
+  .fpplogo { height:2.1rem; width:auto; color:var(--fg); flex:0 0 auto; }
+  header h1 { margin:0; font-size:1.4rem; }
+  header .sub { margin:.1rem 0 0; }
+  textarea#tokenOut { font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+                      font-size:.75rem; min-height:6rem; margin-top:.5rem; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <svg class="fpplogo" role="img" aria-label="FPP" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56.195 18.616"> <g id="fpp-logo" transform="translate(-373.818 -583.897)"> <path id="Path_21" data-name="Path 21" d="M415.23,583.9h-9.6a5.18,5.18,0,0,0-4.837,4.026l-2.1,10.458a3.426,3.426,0,0,0,.618,2.876,3.281,3.281,0,0,0,2.626,1.184h2.731l.083-.344a3.139,3.139,0,0,1-2.173-3.826l.242-1.208c.065,0,.13.006.2.006h9.6a5.179,5.179,0,0,0,4.837-4.026l1.022-5.086a3.423,3.423,0,0,0-.618-2.875A3.279,3.279,0,0,0,415.23,583.9Zm-.747,4.349-.878,4.369a1.228,1.228,0,0,1-1.322,1.095h-7.835a.772.772,0,0,1-.618-.276.807.807,0,0,1-.144-.679l.907-4.512a1.256,1.256,0,0,1,1.181-.969h7.951a.76.76,0,0,1,.609.276A.828.828,0,0,1,414.483,588.246Z" transform="translate(-7.429)" fill="currentColor"/> <path id="Path_22" data-name="Path 22" d="M444.822,585.081A3.28,3.28,0,0,0,442.2,583.9h-9.6a5.18,5.18,0,0,0-4.837,4.026l-2.1,10.458a3.426,3.426,0,0,0,.618,2.876,3.281,3.281,0,0,0,2.626,1.184h2.731l.083-.344a3.139,3.139,0,0,1-2.174-3.826l.243-1.208c.065,0,.13.006.2.006h9.6a5.179,5.179,0,0,0,4.837-4.026l1.022-5.086A3.425,3.425,0,0,0,444.822,585.081Zm-3.373,3.165-.878,4.369a1.228,1.228,0,0,1-1.323,1.095h-7.834a.775.775,0,0,1-.618-.276.809.809,0,0,1-.143-.679l.907-4.512a1.256,1.256,0,0,1,1.181-.969h7.951a.761.761,0,0,1,.609.276A.83.83,0,0,1,441.449,588.246Z" transform="translate(-15.51)" fill="currentColor"/> <path id="Path_23" data-name="Path 23" d="M389.077,584h-8.237A5.178,5.178,0,0,0,376,588.026l-2.1,10.458a3.427,3.427,0,0,0,.618,2.876,3.28,3.28,0,0,0,2.626,1.184h2.73a.2.2,0,0,0,.19-.152.156.156,0,0,0-.106-.193,3.14,3.14,0,0,1-2.174-3.826l.731-3.638h8.454a1.8,1.8,0,0,1,1.431.639.165.165,0,0,0,.183.046.2.2,0,0,0,.132-.156,3.385,3.385,0,0,0-.695-2.76,3.29,3.29,0,0,0-2.576-1.127H379.19l.609-3.032a1.269,1.269,0,0,1,1.185-.987h7.127a3.181,3.181,0,0,1,3.329,3.341.153.153,0,0,0,.156.16h0a.2.2,0,0,0,.192-.159l.531-2.642a3.428,3.428,0,0,0-.618-2.876A3.282,3.282,0,0,0,389.077,584Z" transform="translate(0 -0.031)" fill="currentColor"/> </g> </svg>
+    <div>
+      <h1>Submit a plugin</h1>
+      <p class="sub">Requests should be submitted by the plugin owner.</p>
+    </div>
+  </header>
+
+  <p>
+    This page is to request the listing of a new plugin for
+    <a href="https://falconchristmas.github.io/" target="_blank" rel="noopener">FPP - Falcon Player</a>.
+    New plugins need to pass certain checks prior to being listed.
+  </p>
+
+  <p>
+    Please read the
+    <a href="https://github.com/FalconChristmas/fpp-data/blob/master/PLUGINS.md" target="_blank" rel="noopener">plugin guidelines</a>
+    before submitting - they cover what's required for a listing to be accepted.
+  </p>
+
+  <p class="note">
+    Your <strong>email is encrypted in this page, in your browser</strong>, before it goes anywhere.
+    Only FPP maintainers can read it - it never appears publicly on the GitHub issue.
+    Everything else you enter here is public, as it's part of the plugin listing.
+  </p>
+
+  <div class="info-block">
+    <p class="info-block-title">What happens after I submit?</p>
+    <ol style="padding-left:1.2rem">
+      <li><strong>The issue is opened under your GitHub account</strong>, so you're notified
+          automatically on any reply.</li>
+      <li><strong>Two automated checks run within a minute or two</strong> and comment directly
+          on the issue: one confirms your contact token is well-formed, the other clones your
+          repo and runs a check on your plugin. If it finds any issues it will let you know.</li>
+      <li><strong>If the scan asks for changes</strong>, push a fix to your repo, then comment
+          <code>/recheck</code> on the issue to re-run it - no need to edit the issue itself.</li>
+      <li><strong>Once the checks pass, a maintainer still reviews it by hand</strong> -
+          category fit, description wording, and anything the automation can't judge - before
+          opening a pull request that adds your plugin to <code>pluginList.json</code>.</li>
+      <li><strong>Once that PR merges</strong>, your plugin appears in everyone's Plugin
+          Manager straight away.</li>
+    </ol>
+  </div>
+
+  <fieldset>
+    <legend>Your plugin</legend>
+
+    <label for="repo_url">Your plugin's GitHub repo</label>
+    <input id="repo_url" type="text" autocomplete="off" spellcheck="false" placeholder="you/fpp-AnnouncementAssistant">
+    <div id="fetchMsg" class="msg hint"></div>
+
+    <label for="email">Contact email
+      <span class="hint">- encrypted here; visible only to FPP maintainers</span></label>
+    <input id="email" type="email" autocomplete="off" spellcheck="false" placeholder="you@example.com">
+
+    <button id="go">Encrypt &amp; continue</button>
+    <div id="msg" class="msg"></div>
+
+    <!-- Hidden, not asked here: category can't be carried over at all (GitHub Issue
+         Forms cannot prefill dropdown fields, full stop - see generate() below).
+         plugininfo_url is auto-read from your repo's pluginInfo.json when possible
+         and sent on to the issue as its own PUBLIC_FIELD (below); if it isn't known
+         it lands blank there and you fill it in on GitHub directly.
+         display_name and repo_name are read from pluginInfo.json too, but ONLY used
+         locally here (issue title + the token payload's repo binding + a sanity
+         check that a repoName was found at all) - the issue form itself doesn't ask
+         for either, since scan_submission.py derives both straight from
+         pluginInfo.json server-side and a submitter-typed copy would just be a
+         second, driftable source of truth for the same data. -->
+    <input id="display_name" type="hidden">
+    <input id="repo_name" type="hidden">
+    <input id="plugininfo_url" type="hidden">
+  </fieldset>
+
+  <fieldset id="step2">
+    <legend>Almost done</legend>
+    <p style="margin:.2rem 0 0">
+      Your contact info is encrypted and ready.
+    </p>
+    <a id="continue" class="btn" href="#" rel="noopener">Continue on GitHub →</a>
+    <div class="msg hint" id="fallbackMsg"></div>
+
+    <details>
+      <summary>Not working? Copy the token manually</summary>
+      <p>Open the <a id="plainLink" href="#">plain issue form</a> and paste this into
+         <strong>Contact token</strong>:</p>
+      <textarea id="tokenOut" readonly spellcheck="false"></textarea>
+    </details>
+  </fieldset>
+</main>
+
+<script>
+// ---------------------------------------------------------------------------
+// CONFIG
+const REPO = "FalconChristmas/fpp-data";
+const TEMPLATE = "plugin-submission.yml";
+
+// Public key - safe to publish. The private key exists only as an Actions secret on
+// FPP's private contacts repo, so only maintainers can decrypt.
+const PUBLIC_JWK = {
+  "kty": "RSA",
+  "n": "y4fjfc-KTxeShku0IINEE06dgkXG-PmdxW-vC2UsJ7s1Mp1LpNcT-Ly6FYad9SatLz_r4oRuKD4ezhGepZgj6FxLn6-XK9PuXfFCNPPNcxgH307daqIRNixLvnXGVt679KdCQDJlYn1FBaG9Mcf0fCwFDqKvq5Ad6LA1wFocNqX7HMZ2nAMO8qc4lf6S39YVl3vEnsjUuRIr9mkVhpn2QWz3hbFMalTjnrqKqE-UvCVrvOpHyYF1Gdx-6quD4a1L6hxlImvUSGO5kQl0cleujNVqSFeOLaFtEpQ5Ym00TpvRT46uulTVl1xOjWJDFd_ifkHusLfCdXDhyKSJs-0Trw",
+  "e": "AQAB",
+  "alg": "RSA-OAEP-256",
+  "ext": true,
+  "key_ops": [
+    "encrypt"
+  ]
+};
+
+// Category is deliberately NOT handled on this page at all: GitHub Issue Forms cannot
+// prefill a `dropdown`-type field via query parameters under any circumstances (only
+// input/textarea fields support that) - confirmed platform limitation, not something a
+// value-matching fix can work around. The submitter picks Category on the real GitHub
+// form instead, where its dropdown works normally.
+// ---------------------------------------------------------------------------
+
+const PREFIX = "FPPC1:";
+const $ = (id) => document.getElementById(id);
+const setMsg = (el, text, cls) => { el.textContent = text; el.className = "msg" + (cls ? " " + cls : ""); };
+
+// Best-effort auto-fill of display_name/repo_name/plugininfo_url/description from the
+// repo's own pluginInfo.json, so the submitter mostly doesn't have to retype what their
+// repo already says. These fields are hidden on THIS page (not shown for review here) -
+// they still land on the next page's normal, editable inputs, so anything missing or
+// wrong (no pluginInfo.json yet, private repo, wrong branch, ...) just arrives blank
+// there and gets filled in / corrected on GitHub directly, same as Category.
+async function deriveFromRepo() {
+  const fetchMsg = $("fetchMsg");
+  const raw = $("repo_url").value.trim();
+  if (!raw) return null;
+
+  // Accepts github.com/owner/repo, raw.githubusercontent.com/owner/repo(/branch/pluginInfo.json...),
+  // or bare owner/repo - anything after the repo segment (branch, file path, .git) is ignored.
+  const m = raw.match(/^(?:https?:\/\/)?(?:www\.)?(?:github\.com|raw\.githubusercontent\.com)\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:\/.*)?$/)
+         || raw.match(/^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?$/);
+  if (!m) {
+    setMsg(fetchMsg, "Enter your repo as owner/repo or a full github.com / raw.githubusercontent.com URL.", "err");
+    return null;
+  }
+  const [, owner, repo] = m;
+  $("repo_name").value = repo;   // fallback so the contact token can still bind to a repo below
+  // Normalize to a full URL (not "owner/repo" shorthand) so it renders as a clickable
+  // link once it lands in the issue body - GitHub auto-links bare URLs, not shorthand.
+  $("repo_url").value = `https://github.com/${owner}/${repo}`;
+
+  setMsg(fetchMsg, "Looking up repo…", "");
+  try {
+    const repoRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`);
+    if (!repoRes.ok) throw new Error(`repo lookup failed (HTTP ${repoRes.status}) - is it public?`);
+    const branch = (await repoRes.json()).default_branch || "main";
+
+    const infoUrl = `https://raw.githubusercontent.com/${owner}/${repo}/refs/heads/${branch}/pluginInfo.json`;
+    $("plugininfo_url").value = infoUrl;
+
+    const infoRes = await fetch(infoUrl, { cache: "no-store" });
+    if (!infoRes.ok) throw new Error(`no pluginInfo.json at the repo root (HTTP ${infoRes.status})`);
+    const info = await infoRes.json();
+
+    if (info.name) $("display_name").value = info.name;
+    $("repo_name").value = info.repoName || repo;
+
+    setMsg(fetchMsg, "Read pluginInfo.json - you'll confirm the details on the next page.", "ok");
+  } catch (e) {
+    setMsg(fetchMsg, `Couldn't read pluginInfo.json (${e.message}). You'll fill those fields in on the next page.`, "");
+  }
+  return repo;
+}
+$("repo_url").addEventListener("blur", deriveFromRepo);
+
+function b64(bytes) {
+  let s = "";
+  for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b);
+  return btoa(s);
+}
+const wrap = (s) => s.replace(/(.{72})/g, "$1\n").trim();
+
+// Fields that go straight onto the public issue, mapped to the form's field ids.
+// repo_url, display_name, and repo_name are deliberately NOT here even though this
+// page reads/derives all three: the issue form has no matching fields for them
+// (scan_submission.py derives repoName and the real owner/repo from pluginInfo.json
+// server-side, rather than trusting a submitter-typed copy - and a prior "GitHub repo"
+// field that was purely cosmetic got removed for the same reason, see
+// plugin-submission.yml), so sending them as query params would just be prefilling
+// fields that don't exist. They're still used locally below (title, token payload,
+// sanity check).
+const PUBLIC_FIELDS = ["plugininfo_url"];
+
+async function generate() {
+  const msg = $("msg");
+  const email = $("email").value.trim();
+
+  if (!$("repo_url").value.trim()) return setMsg(msg, "Please enter your plugin's GitHub repo.", "err");
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    return setMsg(msg, "That doesn't look like an email address.", "err");
+
+  // Make sure repo_name/plugininfo_url/etc. reflect the CURRENT repo_url even if the
+  // field never lost focus (e.g. paste-then-click) rather than relying solely on blur.
+  setMsg(msg, "Reading pluginInfo.json…", "");
+  await deriveFromRepo();
+
+  const repoName = $("repo_name").value.trim();
+  const displayName = $("display_name").value.trim();
+  if (!/^[A-Za-z0-9._-]+$/.test(repoName))
+    return setMsg(msg, "Couldn't work out a repoName from that repo - check the URL and try again.", "err");
+
+  const v = Object.fromEntries(PUBLIC_FIELDS.map(f => [f, $(f).value.trim()]));
+
+  setMsg(msg, "Encrypting…", "");
+  try {
+    const key = await crypto.subtle.importKey(
+      "jwk", PUBLIC_JWK, { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]
+    );
+    // Only the email is encrypted - repo (from plugininfo_url, already a public
+    // field on the issue) and the submission date (the issue's own created_at) are
+    // both available unencrypted elsewhere, so there's no reason to also carry them
+    // in the ciphertext. Trade-off: a token lifted off someone else's public issue
+    // and replayed onto a different plugin isn't caught by the crypto anymore, since
+    // decryption no longer binds email to repo - that's left to the maintainer's
+    // manual review before merge (see the "what happens after" list above).
+    const ct = await crypto.subtle.encrypt({ name: "RSA-OAEP" }, key,
+                                           new TextEncoder().encode(email));
+    const token = PREFIX + "\n" + wrap(b64(ct));
+
+    // Issue Forms prefill from query params keyed by field id. Checkboxes can't be
+    // prefilled - the acknowledgements stay on GitHub, ticked deliberately. `title` is
+    // a special top-level param (not a field id) that overrides the template's default
+    // "do not edit this title" placeholder with the actual plugin name.
+    const qs = new URLSearchParams({
+      template: TEMPLATE, title: `[New plugin request] ${displayName || repoName}`, ...v, contact_token: token,
+    });
+    const url = `https://github.com/${REPO}/issues/new?${qs}`;
+
+    $("continue").href = url;
+    $("plainLink").href = `https://github.com/${REPO}/issues/new?template=${TEMPLATE}`;
+    $("tokenOut").value = token;
+    $("step2").classList.add("show");
+    setMsg(msg, "Encrypted.", "ok");
+    // Very long URLs can be refused by some browsers; warn rather than fail silently.
+    setMsg($("fallbackMsg"),
+           url.length > 7000 ? "If GitHub shows an error, use the manual option below." : "");
+    $("step2").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  } catch (e) {
+    setMsg(msg, "Encryption failed: " + e.message, "err");
+  }
+}
+
+$("go").addEventListener("click", generate);
+
+if (!crypto?.subtle) {
+  setMsg($("msg"), "This browser can't encrypt here (needs a secure context - open this page over https).", "err");
+  $("go").disabled = true;
+}
+</script>
+</body>
+</html>
