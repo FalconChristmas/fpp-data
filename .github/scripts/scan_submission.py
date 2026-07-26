@@ -32,6 +32,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib_plugin_schema import (  # noqa: E402
+    compatible_with_major,
     fetch_json,
     field,
     gh_get_repo,
@@ -107,6 +108,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plugininfo-url", required=True)
     ap.add_argument("--schema", required=True)
+    ap.add_argument("--target-major", type=int, required=True,
+                     help="current FPP major a new submission must declare a versions[] entry for")
     ap.add_argument("--plugin-list", default="pluginList.json")
     ap.add_argument("--reporter", default=None, help="GitHub login of the issue's original reporter")
     ap.add_argument("--issue-number", default=None)
@@ -128,6 +131,18 @@ def main():
         schema_err = schema_validation_error(info, schema)
         if schema_err:
             findings.append((BLOCKER, "schema", schema_err))
+
+        # --- version compatibility ------------------------------------------
+        # Same signal the fpp<major> new-major-release scan uses for LISTED plugins
+        # (compatible_with_major, shared via lib_plugin_schema so the two can't drift) -
+        # a brand-new submission gets no grandfathering either: if it doesn't declare a
+        # versions[] entry for the CURRENT major, that's a blocker here, not just an
+        # advisory nudge on some future tracking issue.
+        if not compatible_with_major(info.get("versions") or [], args.target_major):
+            findings.append((BLOCKER, "not-compatible-with-target",
+                f"no `versions[]` entry declares support for the current FPP {args.target_major}. Add one "
+                f"once you've confirmed it works, e.g. "
+                f'`{{"minFPPVersion": "{args.target_major}.0", "maxFPPVersion": "0", "branch": "master", "sha": ""}}`.'))
 
     gh = parse_github_repo(info.get("srcURL", "") or "") if info else None
     gh = gh or parse_raw_github_repo(args.plugininfo_url)

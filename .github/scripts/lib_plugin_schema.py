@@ -28,6 +28,36 @@ HTTP_TIMEOUT = 15  # seconds - generous for CI, still bounded
 MENTION_OWNER = False
 
 
+def _major(v) -> Optional[int]:
+    head = str(v).split(".")[0]
+    return int(head) if head.isdigit() else None
+
+
+def compatible_with_major(versions, m: int) -> bool:
+    """Is any versions[] entry certified for FPP major `m`?
+
+    Mirrors the Plugin Manager's own logic (D21): an OPEN-ended max ("0"/""/"0.0")
+    only certifies the major the entry was built for - an open entry built for an
+    OLDER major shows as "untested" on a newer one, not compatible. A CLOSED range
+    certifies `m` when min-major <= m <= max-major.
+    """
+    for v in versions or []:
+        if not isinstance(v, dict):
+            continue
+        mn = _major(v.get("minFPPVersion")) if v.get("minFPPVersion") else None
+        if mn is None:
+            continue
+        mx = v.get("maxFPPVersion")
+        if mx in (None, "", "0", "0.0"):
+            if mn == m:            # open-ended: certifies only its own major
+                return True
+        else:
+            mxm = _major(mx)
+            if mxm is not None and mn <= m <= mxm:
+                return True
+    return False
+
+
 def owner_ref(login: str) -> str:
     """A plugin owner's GitHub login, formatted per MENTION_OWNER.
 

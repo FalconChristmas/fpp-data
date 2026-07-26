@@ -172,10 +172,15 @@ jobs:
           # out of the intended command. Same class of fix as the "Comment + close"
           # step in remove-plugin-verify.yml.
           PLUGININFO_URL: ${{ steps.extract.outputs.plugininfo_url }}
+          # Same repo variable the fpp<major> new-major-release scan reads (daily-fpp-compat.yml,
+          # new-major-release-scan.yml) - one place to bump when FPP cuts a new major, instead of
+          # this workflow drifting out of sync with what "current" means.
+          TARGET_MAJOR: ${{ vars.NEW_MAJOR_RELEASE_TARGET_MAJOR || '10' }}
         run: |
           python .github/scripts/scan_submission.py \
             --plugininfo-url "$PLUGININFO_URL" \
             --schema .github/schema/pluginInfo.schema.json \
+            --target-major "$TARGET_MAJOR" \
             --plugin-list pluginList.json \
             --reporter "${{ github.event.issue.user.login }}" \
             --issue-number "${{ github.event.issue.number }}" \
