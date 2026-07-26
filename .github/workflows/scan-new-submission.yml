@@ -286,7 +286,7 @@ jobs:
                      '');
               for (const f of findings) {
                 if (f.severity === 'optional') continue;
-                msg.push(`- ${badge[f.severity] || ''} **${label[f.severity] || f.severity} - ${f.code}** - ${f.message}`);
+                msg.push(`- ${badge[f.severity] || ''} **${label[f.severity] || f.severity} - ${f.code}** - ${f.message}`, '');
               }
               if (isSubmitOverride) {
                 msg.push('',
@@ -313,7 +313,7 @@ jobs:
             const optional = cloneFailed ? [] : findings.filter(f => f.severity === 'optional');
             if (optional.length) {
               msg.push('', '<details open><summary>💡 Optional polish (not blocking)</summary>', '');
-              for (const f of optional) msg.push(`- ${f.message}`);
+              for (const f of optional) msg.push(`- ${f.message}`, '');
               msg.push('', '</details>');
             }
 
@@ -476,9 +476,8 @@ jobs:
                 `⚠️ **Opened despite ${blocking.length} unresolved finding(s) below** - the reporter used ` +
                 '`/submit` to ask for review anyway rather than fix them first:', '');
               for (const f of blocking) {
-                lines.push(`- ${badge[f.severity] || ''} **${label[f.severity] || f.severity} - ${f.code}** - ${f.message}`);
+                lines.push(`- ${badge[f.severity] || ''} **${label[f.severity] || f.severity} - ${f.code}** - ${f.message}`, '');
               }
-              lines.push('');
             }
             lines.push(
               'Schema, category, and archived/issues-disabled were already checked before ' +

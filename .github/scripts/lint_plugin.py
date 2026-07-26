@@ -154,6 +154,98 @@ def _sql_concat_hits(root: str, exts=SCRIPT_EXT):
                 yield rel, i, line.strip()
 
 
+_JS_REQUEST_SRC_RX = r'req\.(?:query|body|params|headers|cookies)\b'
+
+
+def _js_exec_injection_hits(root: str, exts=(".js",), window: int = 3):
+    """Yield (relpath, lineno, line) for a Node child_process exec-family call
+    (exec/execSync - NOT execFile/spawn, which take argv arrays and don't go through a
+    shell unless {shell: true} is passed) whose command string is built from Express
+    request data (req.query/req.body/req.params/req.headers/req.cookies), either inline
+    or via a template literal/concatenation on a nearby line. JS analogue of the PHP
+    exec-injection check above, which only matches $_GET/$_POST/$_REQUEST."""
+    call_rx = re.compile(r'\b(?:child_process\.)?(exec|execSync)\s*\(')
+    src_rx = re.compile(_JS_REQUEST_SRC_RX)
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        lines = _read(path).splitlines()
+        for i in range(len(lines)):
+            if _is_comment_line(lines[i]) or not call_rx.search(lines[i]):
+                continue
+            hi = min(len(lines), i + window)
+            if src_rx.search("\n".join(lines[i:hi])):
+                yield rel, i + 1, lines[i].strip()
+
+
+def _js_ssrf_hits(root: str, exts=(".js",), window: int = 2):
+    """Yield (relpath, lineno, line) for a Node outbound HTTP call (fetch/axios/http(s).get)
+    whose URL is built from Express request data within a couple of lines - JS analogue of
+    the PHP SSRF check above."""
+    call_rx = re.compile(r'\b(?:fetch|axios(?:\.\w+)?|https?\.get|https?\.request)\s*\(')
+    src_rx = re.compile(_JS_REQUEST_SRC_RX)
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        lines = _read(path).splitlines()
+        for i in range(len(lines)):
+            if _is_comment_line(lines[i]) or not call_rx.search(lines[i]):
+                continue
+            hi = min(len(lines), i + window)
+            if src_rx.search("\n".join(lines[i:hi])):
+                yield rel, i + 1, lines[i].strip()
+
+
+def _js_sql_concat_hits(root: str, exts=(".js",)):
+    """Yield (relpath, lineno, line) for a `db.prepare()`/`db.exec()` call (better-sqlite3's
+    idiom, but the shape generalizes) whose SQL is a template literal containing `${...}`
+    interpolation, or built with `+` string concatenation, instead of a `?`/named
+    placeholder. JS/better-sqlite3 analogue of the PHP ->query() check above - a per-line
+    heuristic, not real taint tracking, so it flags for triage rather than proving the
+    interpolated value traces back to user input."""
+    template_rx = re.compile(r'\.(?:prepare|exec)\s*\(\s*`[^`]*\$\{')
+    concat_rx = re.compile(r'''\.(?:prepare|exec)\s*\(\s*['"][^'"]*['"]\s*\+''')
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            if template_rx.search(line) or concat_rx.search(line):
+                yield rel, i, line.strip()
+
+
+def _js_runtime_sudo_hits(root: str, exts=(".js",)):
+    """Yield (relpath, lineno, line) for a call whose first argument is the literal string
+    `sudo` - `spawn('sudo', ...)`, a template-literal `execSync` call starting with sudo,
+    or a project's own thin wrapper
+    around one of those (e.g. `run('sudo', ['dpkg', '-i', file])`). Deliberately NOT scoped
+    to exec/execSync/spawn/spawnSync by name: real code almost always wraps the raw
+    child_process call in a small helper (`run()`, `shellExec()`, ...), and the wrapper's
+    own name varies per project - matching on "first arg is the literal string sudo"
+    instead is what actually generalizes. Unlike the sudo check above - scoped to HOOKS,
+    the one-time install/uninstall/pre-post scripts fppd runs as root - this targets a
+    plugin's always-on Node application, which normally runs as the unprivileged `fpp`
+    user under its own systemd unit. A sudo call reachable from that long-running process
+    (worse still if it's wired to an HTTP route handler) is a continuously-exploitable
+    unprivileged-to-root escalation, not a one-shot install step - concrete motivating
+    case: a plugin's admin API shelling out through passwordless sudo, via its own `run()`
+    wrapper around spawn(), to install a package and manage a systemd unit at runtime."""
+    call_rx = re.compile(r'''\w+\s*\(\s*['"`]\s*sudo\b''')
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            if call_rx.search(line):
+                yield rel, i, line.strip()
+
+
 def _webhook_no_auth_hits(root: str, exts=(".php",)):
     """Yield (relpath, lineno, line) for a file that reads a webhook-shaped request field
     (From/Body/Sender - common inbound-SMS/messaging-provider field names) with no
@@ -475,6 +567,37 @@ def _missing_timeout_hits(root: str, exts=(".php", ".py", ".sh")):
                 break
 
 
+def _unverified_package_install_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line) for a file that downloads a file over the network
+    (curl/wget with an output flag - i.e. saving to disk, not piping to a shell, which
+    `remote-exec` above already covers) and separately installs it as a system package
+    (`dpkg -i` / `rpm -i`, including the JS array-argument idiom `['dpkg', '-i', path]`)
+    with no checksum or signature verification (sha256sum/sha1sum/md5sum, gpg --verify)
+    anywhere in the same file. File-level presence/absence, like _missing_timeout_hits -
+    a file legitimately mixing verified and unverified installs is rare, and multi-line/
+    JS-array argument lists make a single-line taint match between the download and the
+    install unreliable. HTTPS transport makes this lower-risk than a live MITM, but it's
+    still no defense-in-depth if the download URL/CDN/upstream repo is ever compromised,
+    and the install runs as root (dpkg -i almost always does)."""
+    download_rx = re.compile(
+        r'\bcurl\b[^\n]*(-o\b|-O\b|--output\b)|\bwget\b[^\n]*(-O\b|--output-document\b)|\bwget\s+[\'"]?https?://')
+    install_rx = re.compile(r'''\bdpkg\s*[,'"\s]*-i\b|\brpm\s*[,'"\s]*-i\b''')
+    verify_rx = re.compile(r'sha256sum|sha1sum|md5sum|gpg\s*[,\'"\s]*--verify|\bchecksum\b', re.I)
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        if not (download_rx.search(text) and install_rx.search(text)) or verify_rx.search(text):
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            if install_rx.search(line):
+                yield rel, i, line.strip()
+                break
+
+
 def _device_path_no_allowlist_hits(root: str, exts=(".cpp", ".c", ".h", ".hpp", ".php", ".py"), window: int = 20):
     """Yield (relpath, lineno, line) for a device path built by concatenating a variable
     (`"/dev/" + var` in C++ or Python, `"/dev/".$var` in PHP, `f"/dev/{var}"` in Python)
@@ -635,6 +758,21 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"`--break-system-packages`: it's safe here because pip targets "
                    f"`/usr/local/lib/python3.x/dist-packages`, which isn't tracked by dpkg, so it "
                    f"can't conflict with anything apt manages"))
+
+    # Downloads a file, then separately installs it as a system package (dpkg -i /
+    # rpm -i) with no checksum/signature check anywhere in the file. Distinct from
+    # `remote-exec` above: that catches `curl | sh` (piped straight into a shell);
+    # this catches "download to disk, then dpkg -i it" - same lack of integrity
+    # verification, different shape, and dpkg -i almost always runs as root.
+    hit = next(iter(_unverified_package_install_hits(root)), None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "unverified-package-install",
+                   f"installs a downloaded package with no checksum/signature check "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`) - HTTPS protects the transport, but there's no "
+                   f"defense-in-depth if the download URL, CDN, or upstream release is ever "
+                   f"compromised, and this install almost certainly runs as root. Verify the download "
+                   f"before installing it, e.g. `curl -fsSL <checksums-url> | grep <file> | sha256sum "
+                   f"-c -` (or check the upstream project's published GPG signature) before `dpkg -i`"))
 
     # Bootstrapping a second language/version-package-manager (uv, pipx, nvm,
     # rustup, conda/miniconda, asdf, volta, sdkman) is its own anti-pattern,
@@ -896,37 +1034,65 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         hit = next(iter(_assign_then_sink(
             root, r'\$_(?:GET|POST|REQUEST)\b',
             r'(exec|system|passthru|shell_exec|popen)\s*\(\s*\$%s\b')), None)
+    # Node/Express case: exec/execSync fed by req.query/req.body/req.params/... .
+    if hit is None:
+        hit = next(iter(_js_exec_injection_hits(root)), None)
     if hit:
         out.append(Finding(BLOCKER, "exec-injection",
                    f"unsanitized request data reaches a shell command ({hit[0]}:{hit[1]}: `{hit[2]}`) "
                    f"- an attacker can run arbitrary shell commands as the FPP user. Validate the "
                    f"value against an allow-list before using it, and wrap it in `escapeshellarg()` "
-                   f"(PHP) / `shlex.quote()` (Python) before it reaches exec/system/shell_exec"))
+                   f"(PHP) / `shlex.quote()` (Python) / pass args as an array to `execFile`/`spawn` "
+                   f"instead of a shell string (Node) before it reaches exec/system/shell_exec"))
 
     # SQL built via string concatenation, passed to ->query()/->exec() with no
-    # prepare/bind and no escapeString() anywhere in the file.
-    hit = next(iter(_sql_concat_hits(root)), None)
+    # prepare/bind and no escapeString() anywhere in the file (PHP), or via a
+    # template-literal/concatenated string passed to db.prepare()/db.exec() (Node,
+    # e.g. better-sqlite3) instead of a placeholder.
+    hit = next(iter(_sql_concat_hits(root)), None) or next(iter(_js_sql_concat_hits(root)), None)
     if hit:
+        if hit[0].endswith(".js"):
+            fix = ("Use a placeholder instead: `db.prepare('... WHERE x = ?').run(value)` (or "
+                   "`@x`/named params), not a template literal or `+` concatenation")
+        else:
+            fix = ("Use a prepared statement instead: `$stmt = $db->prepare('... WHERE x = :x'); "
+                   "$stmt->bindValue(':x', $value); $stmt->execute();`")
         out.append(Finding(BLOCKER, "sql-injection",
                    f"SQL query built by string concatenation ({hit[0]}:{hit[1]}: `{hit[2]}`) - if any "
-                   f"part of that string traces back to user input, this is SQL injection. Use a "
-                   f"prepared statement instead: `$stmt = $db->prepare('... WHERE x = :x'); "
-                   f"$stmt->bindValue(':x', $value); $stmt->execute();`"))
+                   f"part of that string traces back to user input, this is SQL injection. {fix}"))
 
     # SSRF: request data used to build the URL/host of an outbound request.
     # curl calls are unambiguously network; file_get_contents also reads local
     # files, so it only counts here if the same line has an http(s) scheme too
-    # (otherwise it's a path-traversal/LFI shape, not SSRF).
+    # (otherwise it's a path-traversal/LFI shape, not SSRF). fetch/axios/http(s).get
+    # cover the same shape in Node.
     hit = first(r'CURLOPT_URL\s*,[^;\n]*\$_(GET|POST|REQUEST)\b') \
         or first(r'curl_init\s*\([^;\n]*\$_(GET|POST|REQUEST)\b') \
         or first(r'file_get_contents\s*\([^;\n]*https?://[^;\n]*\$_(GET|POST|REQUEST)\b') \
-        or first(r'file_get_contents\s*\([^;\n]*\$_(GET|POST|REQUEST)[^;\n]*https?://')
+        or first(r'file_get_contents\s*\([^;\n]*\$_(GET|POST|REQUEST)[^;\n]*https?://') \
+        or next(iter(_js_ssrf_hits(root)), None)
     if hit:
         out.append(Finding(BLOCKER, "ssrf",
                    f"outbound request URL/host built from request data ({hit[0]}:{hit[1]}: "
                    f"`{hit[2]}`) - an attacker can make your plugin fetch an internal-only address "
                    f"(localhost, another device on the LAN, a cloud metadata endpoint) and read the "
                    f"response back. Validate the host against an allow-list before using it in a URL"))
+
+    # Runtime sudo in a JS exec-family call: the plugin's always-on Node process
+    # (typically running as the unprivileged `fpp` user) shelling out through sudo
+    # is a continuously-reachable root escalation, not a one-time install step - see
+    # _js_runtime_sudo_hits' docstring. Separate from, and more severe than, the
+    # HOOKS-scoped `sudo` BEST_PRACTICE check above.
+    hit = next(iter(_js_runtime_sudo_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "runtime-sudo",
+                   f"runtime application code shells out through sudo ({hit[0]}:{hit[1]}: `{hit[2]}`) "
+                   f"- unlike sudo in an install/uninstall hook (which already runs as root), this "
+                   f"runs inside the plugin's always-on process, normally started as the unprivileged "
+                   f"`fpp` user. If `fpp` has passwordless sudo for this command, anything that can "
+                   f"reach this code path (e.g. an HTTP route) gets root, continuously - not just once "
+                   f"at install time. Move the privileged action into fpp_install.sh/fpp_upgrade.sh "
+                   f"(run once, already as root) instead of invoking sudo from the running service"))
 
     # Inbound webhook trusts a request field as an authorization credential,
     # with no signature/HMAC/token verification anywhere in the file.

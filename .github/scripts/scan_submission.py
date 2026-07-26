@@ -182,9 +182,7 @@ def main():
                 findings.append((BLOCKER, "owner-unconfirmed",
                     f"submitter @{args.reporter} does not match `{gh[0]}`, this repo's registered owner "
                     f"(from srcURL). Add `\"submissionToken\": \"{expected}\"` to your pluginInfo.json and "
-                    f"comment `/recheck` to prove you have write access here - or, if you're submitting on "
-                    f"the owner's behalf with their consent, comment `/submit` instead to flag this for a "
-                    f"maintainer's judgement rather than auto-verifying."))
+                    f"comment `/recheck` to prove you have write access here."))
 
         # --- clone + static lint -------------------------------------------------
         if gh:
