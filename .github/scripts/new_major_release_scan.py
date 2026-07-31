@@ -145,6 +145,14 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
             if owner_is_org:
                 maintainer_candidates = lib.gh_get_maintainer_candidates(owner, repo, token)
 
+    # --- open issue/PR staleness (best-effort, independent of push staleness) -
+    # A repo can look "active" by push date while its owner ignores the
+    # community entirely - stale open issues/PRs catch that case separately
+    # from the archived/pushed_at signal below.
+    issue_pr_stats = lib.gh_get_stale_issue_pr_stats(owner, repo, token) if (owner and repo) else None
+    issue_pr_stats = issue_pr_stats or {"open_issues": None, "open_prs": None,
+                                         "stale_issues": 0, "stale_prs": 0}
+
     # --- static plugin lint (needs a clone) -----------------------------
     linted = False
     if plugin_dir:
@@ -154,12 +162,16 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
 
     # --- status --------------------------------------------------------------
     stale = months_since(meta.get("pushed_at"))
+    stale_issue_pr_count = issue_pr_stats["stale_issues"] + issue_pr_stats["stale_prs"]
+    needs_attention = stale_issue_pr_count >= lib.NEEDS_ATTENTION_MIN_STALE
     if removal_requested:
         status = "removal-requested"
     elif certified:
         status = "compatible"
     elif meta.get("archived") or (stale is not None and stale >= STALE_MONTHS):
         status = "unmaintained"
+    elif needs_attention:
+        status = "needs-attention"
     else:
         status = "needs-update"
 
@@ -183,16 +195,22 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         "last_major": last_major,
         # certified only means "declares a versions[] entry for the target major" -
         # it says nothing about outstanding findings (schema errors, lint failures,
-        # best-practice nits, etc). ready_to_close is the actual gate for auto-closing
-        # a tracking issue: declared compatible AND zero findings of ANY severity, not
-        # just blockers - a plugin with open best-practice/optional items still has
-        # something for the maintainer to see, so the issue should stay open.
+        # best-practice nits, etc) or unaddressed community activity. ready_to_close
+        # is the actual gate for auto-closing a tracking issue: declared compatible,
+        # zero findings of ANY severity (not just blockers), AND no stale open
+        # issues/PRs - a plugin that's technically compatible but ignoring its own
+        # issue tracker still has something for the maintainer to see.
         "ready_to_close": (certified and num_blocker == 0
-                           and num_best_practice == 0 and num_optional == 0),
+                           and num_best_practice == 0 and num_optional == 0
+                           and stale_issue_pr_count == 0),
         "removal_requested": removal_requested,
         "issues_enabled": meta.get("has_issues"),
         "archived": meta.get("archived"),
         "months_since_push": stale,
+        "open_issues": issue_pr_stats["open_issues"],
+        "open_prs": issue_pr_stats["open_prs"],
+        "stale_issues": issue_pr_stats["stale_issues"],
+        "stale_prs": issue_pr_stats["stale_prs"],
         "linted": linted,
         "findings": findings,
         "num_blocker": num_blocker,
@@ -202,7 +220,7 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
 
 
 ICON = {"compatible": "✅", "needs-update": "🔧", "unmaintained": "💤",
-        "removal-requested": "🗑️"}
+        "removal-requested": "🗑️", "needs-attention": "⚠️"}
 
 
 def issue_body(r, target, draft=True, mention_owner=False):
@@ -261,6 +279,18 @@ def issue_body(r, target, draft=True, mention_owner=False):
                  f"updating it, start at [Request Plugin Removal]({REMOVAL_GUIDED_PAGE}) and we'll "
                  f"remove it from the list, no update needed.")
         L.append("")
+    if r["status"] == "needs-attention" or (r["stale_issues"] + r["stale_prs"]) > 0:
+        stale_total = r["stale_issues"] + r["stale_prs"]
+        parts = []
+        if r["stale_issues"]:
+            parts.append(f"{r['stale_issues']} open issue" + ("" if r["stale_issues"] == 1 else "s"))
+        if r["stale_prs"]:
+            parts.append(f"{r['stale_prs']} open pull request" + ("" if r["stale_prs"] == 1 else "s"))
+        age = lib.STALE_ISSUE_PR_AGE_MONTHS
+        L.append(f"> ⚠️ {' and '.join(parts)} have been open for {age}+ months with no resolution "
+                 f"({stale_total} total) - if you're still active on this plugin, please take a look at "
+                 f"{'them' if stale_total != 1 else 'it'}: https://github.com/{r['owner']}/{r['repo']}/issues")
+        L.append("")
     L.append(f"As part of this new process, in the lead up to each new version release we will create "
              f"a GitHub issue like this one and ask that you review compatibility of your plugin with "
              f"the new version and outline any new best practices for plugins. Please review this "
@@ -305,15 +335,17 @@ def build_dashboard(results, target):
     L = [f"# FPP {target} plugin readiness - {datetime.now(timezone.utc):%Y-%m-%d}",
          "",
          f"{total} plugins · ✅ {by('compatible')} compatible · "
-         f"🔧 {by('needs-update')} need update · 💤 {by('unmaintained')} unmaintained",
+         f"🔧 {by('needs-update')} need update · ⚠️ {by('needs-attention')} need attention · "
+         f"💤 {by('unmaintained')} unmaintained",
          "",
-         "| Plugin | Status | FPP-compat | Issues | Last push | 🛑 Blocker | ⚠️ Best practice | 💡 Optional |",
-         "|---|---|---|---|---|--:|--:|--:|"]
+         "| Plugin | Status | FPP-compat | Issues | Last push | ⚠️ Stale issues/PRs | 🛑 Blocker | ⚠️ Best practice | 💡 Optional |",
+         "|---|---|---|---|---|--:|--:|--:|--:|"]
     for r in sorted(results, key=lambda r: (r["status"] != "needs-update", r["name"].lower())):
         issues = {True: "on", False: "**off**", None: "?"}[r["issues_enabled"]]
         push = f"{r['months_since_push']}mo" if r["months_since_push"] is not None else "?"
+        stale_total = r["stale_issues"] + r["stale_prs"]
         L.append(f"| {r['name']} | {ICON.get(r['status'], '')} {r['status']} | "
-                 f"{'yes' if r['certified'] else 'no'} | {issues} | {push} | "
+                 f"{'yes' if r['certified'] else 'no'} | {issues} | {push} | {stale_total or ''} | "
                  f"{r['num_blocker'] or ''} | {r['num_best_practice'] or ''} | {r['num_optional'] or ''} |")
     return "\n".join(L)
 

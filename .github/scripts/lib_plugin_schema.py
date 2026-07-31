@@ -373,6 +373,58 @@ def gh_get_maintainer_candidates(owner: str, repo: str, token: Optional[str],
     return [login for login, _ in chosen[:max_names]]
 
 
+STALE_ISSUE_PR_AGE_MONTHS = 2   # age at which an open issue/PR counts as "stale"
+NEEDS_ATTENTION_MIN_STALE = 1   # stale issues+PRs needed to flag needs-attention (tune after real data)
+
+
+def gh_get_stale_issue_pr_stats(owner: str, repo: str, token: Optional[str]) -> Optional[dict]:
+    """Open issue/PR counts for owner/repo, split by staleness (open >=
+    STALE_ISSUE_PR_AGE_MONTHS). Returns
+    {"open_issues": int, "open_prs": int, "stale_issues": int, "stale_prs": int}
+    or None on failure (best-effort - caller treats None like "no signal").
+    Flagging itself (NEEDS_ATTENTION_MIN_STALE) is deliberately low: even a
+    single issue/PR sitting untouched for STALE_ISSUE_PR_AGE_MONTHS is treated
+    as a real signal, not noise - a healthy repo triages fast, so it's a
+    stronger indicator than counting raw open issues.
+
+    GitHub's /issues endpoint returns PRs too (each carries a "pull_request"
+    key); fetched separately from /pulls to split the two counts. One page
+    (100, sorted oldest-first) each - plenty for this repo's issue volume, and
+    sorting oldest-first means a repo with more than 100 open items still gets
+    an accurate stale count (the stale ones are the oldest, so they're on the
+    first page even if some non-stale ones get cut off).
+    """
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=STALE_ISSUE_PR_AGE_MONTHS * 30)).isoformat()
+
+    def _get(url):
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+
+    try:
+        issues = _get(f"https://api.github.com/repos/{owner}/{repo}/issues"
+                       f"?state=open&sort=created&direction=asc&per_page=100")
+        prs = _get(f"https://api.github.com/repos/{owner}/{repo}/pulls"
+                   f"?state=open&sort=created&direction=asc&per_page=100")
+    except Exception:  # noqa: BLE001 - best-effort; caller treats this like no data
+        return None
+    if not isinstance(issues, list) or not isinstance(prs, list):
+        return None
+
+    real_issues = [i for i in issues if isinstance(i, dict) and "pull_request" not in i]
+    stale_issues = sum(1 for i in real_issues if (i.get("created_at") or "") < cutoff)
+    stale_prs = sum(1 for p in prs if isinstance(p, dict) and (p.get("created_at") or "") < cutoff)
+    return {
+        "open_issues": len(real_issues),
+        "open_prs": len(prs),
+        "stale_issues": stale_issues,
+        "stale_prs": stale_prs,
+    }
+
+
 def list_open_issues(gh_repo: str, label: str, token: Optional[str]) -> list[dict]:
     """Open issues on `gh_repo` (\"owner/repo\") carrying `label`. One page (100) is
     plenty for this repo's issue volume - not worth paginating.
