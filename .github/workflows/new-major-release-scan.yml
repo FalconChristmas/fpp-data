@@ -52,6 +52,7 @@ permissions:
 jobs:
   scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Check out fpp-data
         uses: actions/checkout@v4
@@ -88,6 +89,7 @@ jobs:
         with:
           name: fpp${{ inputs.target_major }}-plugin-check
           path: out/
+          retention-days: 365
 
       - name: Job summary
         run: cat out/dashboard.md >> "$GITHUB_STEP_SUMMARY"

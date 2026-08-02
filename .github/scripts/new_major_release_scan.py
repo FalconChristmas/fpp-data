@@ -376,6 +376,13 @@ def main():
     os.makedirs(os.path.join(args.out, "issues"), exist_ok=True)
     results = []
     for entry in entries:
+        name = entry[0]
+        # Same untrusted, PR-submitted entry name clone_plugins.py guards before
+        # cloning - it lands in a filesystem path again here (out/issues/<name>.md),
+        # so it needs the same gate rather than trusting the earlier clone step ran.
+        if not lib.safe_plugin_name(name):
+            print(f"SKIP {name!r}: unsafe plugin name")
+            continue
         r = scan_plugin(entry, args.target_major, args.plugins_dir, token, schema)
         results.append(r)
         with open(os.path.join(args.out, "issues", f"{r['name']}.md"), "w", encoding="utf-8") as f:

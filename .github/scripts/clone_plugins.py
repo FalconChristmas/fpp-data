@@ -17,6 +17,8 @@ from urllib.parse import urlparse
 
 import lib_plugin_schema as lib
 
+CLONE_TIMEOUT_SECS = 120
+
 
 def clone_target(info_url: str):
     """(owner, repo, branch) from a raw pluginInfo URL, else None."""
@@ -49,6 +51,10 @@ def main():
     for entry in entries:
         name = entry[0]
         info_url = entry[1] if len(entry) > 1 else ""
+        if not lib.safe_plugin_name(name):
+            print(f"SKIP {name!r}: unsafe plugin name")
+            fail += 1
+            continue
         tgt = clone_target(info_url)
         dest = os.path.join(args.out, name)
         if os.path.isdir(os.path.join(dest, ".git")):
@@ -60,11 +66,16 @@ def main():
             continue
         owner, repo, branch = tgt
         url = f"https://github.com/{owner}/{repo}.git"
-        r = subprocess.run(["git", "clone", "--depth", "1", "--branch", branch, url, dest],
-                           env=env, capture_output=True, text=True)
-        if r.returncode != 0:
-            r = subprocess.run(["git", "clone", "--depth", "1", url, dest],
-                               env=env, capture_output=True, text=True)
+        try:
+            r = subprocess.run(["git", "clone", "--depth", "1", "--branch", branch, url, dest],
+                               env=env, capture_output=True, text=True, timeout=CLONE_TIMEOUT_SECS)
+            if r.returncode != 0:
+                r = subprocess.run(["git", "clone", "--depth", "1", url, dest],
+                                   env=env, capture_output=True, text=True, timeout=CLONE_TIMEOUT_SECS)
+        except subprocess.TimeoutExpired:
+            fail += 1
+            print(f"FAIL {name}: clone timed out after {CLONE_TIMEOUT_SECS}s")
+            continue
         if r.returncode == 0:
             ok += 1
         else:

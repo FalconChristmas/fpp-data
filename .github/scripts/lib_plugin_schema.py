@@ -8,6 +8,7 @@ slow/dead host can't hang the CI job.
 from __future__ import annotations
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -18,6 +19,22 @@ import jsonschema
 
 USER_AGENT = "fpp-data-plugin-ci"
 HTTP_TIMEOUT = 15  # seconds - generous for CI, still bounded
+
+
+def safe_plugin_name(name: str) -> bool:
+    """True iff `name` (a pluginList.json entry name, from external-author PRs) is
+    safe to use as a single path segment - no separators, no ".."/".", not absolute.
+
+    Every script that turns an entry name into a filesystem path (clone_plugins.py's
+    clone destination, new_major_release_scan.py's per-plugin issue file) must gate
+    on this first - the name never gets a second sanitization pass once it's in hand,
+    so this is the one place that decides.
+    """
+    return bool(
+        name and name not in (".", "..")
+        and "/" not in name and "\\" not in name
+        and not os.path.isabs(name)
+    )
 
 # This CI NEVER @-mentions an author (see new_major_release_sync_issues.py,
 # new_major_release_scan.py) -- bulk scans pinging authors would be spam. verify_remove_plugin.py's
