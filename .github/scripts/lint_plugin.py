@@ -668,6 +668,95 @@ def _socket_port_hits(root: str, port: int, exts=SCRIPT_EXT, window: int = 3):
                 break
 
 
+def _menu_entries(root: str):
+    """Yield (relpath, lineno, type, page) for each entry in menu.inc's $menuEntries
+    array. Block-based (not just the single-field regex _menu_type_counts uses) since
+    this needs 'type' and 'page' from the SAME entry, which can land on different
+    lines. Assumes entries have no nested parens (true of every real plugin's
+    menu.inc, which only ever holds scalar 'key' => 'value' pairs) - a plugin with
+    something more exotic in there just won't match, same trade-off _menu_type_counts
+    already makes."""
+    entry_rx = re.compile(r'Array\(([^)]*?)\)', re.S)
+    type_rx = re.compile(r'''['"]type['"]\s*=>\s*['"](\w+)['"]''')
+    page_rx = re.compile(r'''['"]page['"]\s*=>\s*['"]([^'"]+)['"]''')
+    for path in _iter_files(root, (".inc",)):
+        if os.path.basename(path).lower() != "menu.inc":
+            continue
+        rel = os.path.relpath(path, root)
+        text = _read(path)
+        for m in entry_rx.finditer(text):
+            block = m.group(1)
+            tm, pm = type_rx.search(block), page_rx.search(block)
+            if not tm or not pm:
+                continue
+            lineno = text.count("\n", 0, m.start()) + 1
+            yield rel, lineno, tm.group(1), pm.group(1)
+
+
+_OFF_BOX_REDIRECT_RX = re.compile(
+    r"header\s*\(\s*['\"]Location:|<meta[^>]+http-equiv=[\"']refresh[\"']|location\.(?:replace|href)\s*[=(]",
+    re.I)
+# A literal (or string-concatenation-built) absolute http(s) scheme feeding one of
+# the redirect mechanisms above, as opposed to a plain relative Location (e.g.
+# 'Location: index.php' or 'Location: /plugin.php?...') - which stays inside FPP's
+# own page flow and isn't what this rule is after. Matches a quoted scheme directly
+# ("https?://...") or the start of one being concatenated ('http://' . $host . ...).
+_OFF_BOX_SCHEME_RX = re.compile(r"""['"]https?://""", re.I)
+
+
+def _menu_off_box_redirect_hits(root: str):
+    """Yield (menu_rel, menu_lineno, target_rel) for a menu.inc entry whose 'page' is a
+    local file that itself performs a same-tab redirect (Location header, meta refresh,
+    or JS location.replace/href) to an absolute http(s) URL - i.e. the menu link LOOKS
+    like it opens a plugin page inside FPP but actually navigates the current tab away
+    from FPP entirely, same-origin or not. The menu mechanism already has a sanctioned
+    way to send someone off-site: a literal 'page' => 'http://...' entry, which the
+    template renders as target='_blank' - an explicit pop-up that says up front where
+    it's going and leaves the FPP tab alone. A local .php/.inc shim that redirects the
+    current tab at request time is the pattern to catch here; it's indistinguishable
+    from a normal in-FPP menu page until you actually click it."""
+    for rel, lineno, mtype, page in _menu_entries(root):
+        if re.match(r'https?://', page, re.I):
+            continue
+        target = None
+        for path in _iter_files(root, (".php", ".inc", ".html")):
+            if os.path.basename(path) == page:
+                target = path
+                break
+        if not target:
+            continue
+        text = _read(target)
+        if not _OFF_BOX_REDIRECT_RX.search(text):
+            continue
+        if _OFF_BOX_SCHEME_RX.search(text):
+            yield rel, lineno, os.path.relpath(target, root)
+
+
+_DEFAULT_CRED_RX = re.compile(
+    r"(?:bcrypt\.hash(?:Sync)?|password_hash)\s*\(\s*['\"](admin|password|changeme|letmein|12345|123456)['\"]",
+    re.I)
+
+
+def _default_credential_hits(root: str, exts=(".php", ".js")):
+    """Yield (relpath, lineno, line) for a hashed-password seed call whose plaintext
+    input is a well-known default word (admin/password/changeme/...) rather than a
+    per-install random value. Forcing a change on first login (as this plugin does)
+    mitigates it, but the well-known default is still exposed for a window between
+    install and first login, and only via whatever channel the plugin happens to
+    print it to (often just install-script stdout, easy to miss) - a per-install
+    random default, printed the same way, closes that window instead of just
+    shortening it."""
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            if _DEFAULT_CRED_RX.search(line):
+                yield rel, i, line.strip()
+
+
 def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None = None,
                      schema: dict | None = None) -> list[Finding]:
     """Run all static checks against a plugin working tree; return findings.
@@ -1385,6 +1474,37 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"four menu areas (status/content/output/help) may contain at most one entry "
                        f"from your plugin. Combine the extra pages into a single page (e.g. tabs or "
                        f"sections within one page) instead of adding a separate menu entry per page"))
+
+    # A menu.inc entry whose local 'page' file quietly redirects the current tab off
+    # FPP (same-origin or not), rather than either rendering as a normal in-FPP plugin
+    # page or declaring itself as an external link up front (the guideline-sanctioned
+    # 'page' => 'http://...' shape, which opens as an explicit new-tab pop-up). Human
+    # review, not a blocker - some plugins legitimately front a real separate service
+    # and a pop-up is the right way to do that; a same-tab redirect isn't.
+    hit = next(iter(_menu_off_box_redirect_hits(root)), None)
+    if hit:
+        rel, lineno, target_rel = hit
+        out.append(Finding(BEST_PRACTICE, "menu-off-box-redirect",
+                   f"menu.inc entry ({rel}:{lineno}) points at {target_rel}, which redirects the "
+                   f"current tab away from FPP - the menu link looks like it opens a plugin page "
+                   f"inside FPP but doesn't. Menu entries should land on a page that renders inside "
+                   f"FPP; if the plugin genuinely needs to send users to a separate application, use "
+                   f"menu.inc's own supported external-link shape ('page' => 'http://...', which "
+                   f"opens as an explicit new-tab pop-up) instead of a local page that silently "
+                   f"navigates the current tab elsewhere"))
+
+    # A first-run admin account seeded with a well-known default password
+    # (admin/password/changeme/...) rather than a per-install random one. Forcing a
+    # change on first login helps, but the well-known default is still live for
+    # whatever window exists between install and first login.
+    hit = next(iter(_default_credential_hits(root)), None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "default-admin-credentials",
+                   f"first-run account seeded with a well-known default password ({hit[0]}:{hit[1]}: "
+                   f"`{hit[2]}`) - even with a forced change on first login, anything scanning for "
+                   f"this specific plugin can log in during the window between install and first "
+                   f"login. Generate a random per-install default instead (and surface it the same "
+                   f"way - install output, first-run banner, etc.)"))
 
     if not any(n.startswith(("license", "copying")) for n in lower):
         out.append(Finding(OPTIONAL, "no-license", "no LICENSE file - add one for redistribution clarity"))
