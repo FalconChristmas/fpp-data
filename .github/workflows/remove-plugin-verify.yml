@@ -77,21 +77,24 @@ jobs:
     # does the precise, word-boundary command match that actually decides
     # whether a real command was used.
     #
-    # `state == 'open'` blocks /recheck and /submit once the issue is closed
-    # (verified/not-listed auto-close, or a maintainer closing it by hand) --
-    # nothing left to re-verify once it's resolved.
-    # Identify these issues by BODY SHAPE, not by the template's declared
-    # `labels:` - GitHub silently drops a template label that doesn't already
-    # exist in the repo, so a label filter here would just never match and
-    # nobody would notice ('removal-request' was never created in the repo).
-    # Same fix as check-submission-token.yml/scan-new-submission.yml use for
-    # the same reason, and as change-category-verify.yml's identical bug.
+    # Also runs on closed issues (verified/not-listed auto-close, or a maintainer
+    # closing it by hand) - reusing that issue's thread instead of opening a new one,
+    # same allow-list either way (see the "Restrict..." step). Identify these issues
+    # by BODY SHAPE, not by the template's declared `labels:` - GitHub silently drops
+    # a template label that doesn't already exist in the repo, so a label filter here
+    # would just never match and nobody would notice ('removal-request' was never
+    # created in the repo). Same fix as check-submission-token.yml/scan-new-submission.yml
+    # use for the same reason, and as change-category-verify.yml's identical bug.
+    #
+    # `/recheck`/`/submit` comments run regardless of open/closed (re-using a closed
+    # issue's thread); a bare `opened`/`edited` event still requires the issue to be
+    # open - otherwise editing a closed issue's body would silently re-run the whole
+    # verify-and-maybe-open-a-PR flow with no command involved at all.
     if: >-
-      github.event.issue.state == 'open' &&
       contains(github.event.issue.body, '### Reason') &&
-      (github.event_name != 'issue_comment' ||
-       contains(github.event.comment.body, '/recheck') ||
-       contains(github.event.comment.body, '/submit'))
+      ((github.event_name == 'issue_comment' &&
+        (contains(github.event.comment.body, '/recheck') || contains(github.event.comment.body, '/submit'))) ||
+       (github.event_name != 'issue_comment' && github.event.issue.state == 'open'))
     runs-on: ubuntu-latest
     steps:
       - name: Restrict /recheck and /submit to the original reporter
@@ -253,7 +256,9 @@ jobs:
                     `repo), please submit a new listing request via the guided form: ` +
                     `https://falconchristmas.github.io/fpp-data/submit_new_plugin/\n\n` +
                     `Closing this one out since there's no existing listing to act on. If this is ` +
-                    `wrong, comment \`/submit\` and we'll flag it for a maintainer instead.`});
+                    `wrong, comment \`/submit\` and we'll flag it for a maintainer instead. This issue ` +
+                    `being closed doesn't stop \`/recheck\` from working - comment it any time later to ` +
+                    `get a fresh report against the current state.`});
             await github.rest.issues.update({owner, repo, issue_number, state: 'closed'});
 
       # --- unconfirmed ownership, escalated via /submit -------------------------
@@ -364,7 +369,9 @@ jobs:
             const existingComment = comments.data.find(c => c.body && c.body.includes(MARKER));
             const commentBody = `${MARKER}\n📦 Escalation PR: ${pr.html_url}\n\nClosing this issue — ` +
               'further discussion happens on the PR now. Merging (removes the plugin) or closing ' +
-              '(rejects the request) is a maintainer\'s call, not automatic.';
+              '(rejects the request) is a maintainer\'s call, not automatic. This issue being closed ' +
+              'doesn\'t stop `/recheck` from working - comment it any time later to get a fresh report ' +
+              'against the current state.';
             if (existingComment) {
               await github.rest.issues.updateComment({ owner, repo, comment_id: existingComment.id, body: commentBody });
             } else {

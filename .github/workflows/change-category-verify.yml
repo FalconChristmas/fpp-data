@@ -63,12 +63,15 @@ jobs:
     # was never created in the repo, so this job never ran on a single real
     # submission until the trigger was switched to body-shape). Same fix as
     # check-submission-token.yml/scan-new-submission.yml use for the same reason.
+    # `/recheck`/`/submit` comments run regardless of open/closed (re-using a closed
+    # issue's thread); a bare `opened`/`edited` event still requires the issue to be
+    # open - otherwise editing a closed issue's body would silently re-run the whole
+    # verify-and-maybe-open-a-PR flow with no command involved at all.
     if: >-
-      github.event.issue.state == 'open' &&
       contains(github.event.issue.body, '### New category') &&
-      (github.event_name != 'issue_comment' ||
-       contains(github.event.comment.body, '/recheck') ||
-       contains(github.event.comment.body, '/submit'))
+      ((github.event_name == 'issue_comment' &&
+        (contains(github.event.comment.body, '/recheck') || contains(github.event.comment.body, '/submit'))) ||
+       (github.event_name != 'issue_comment' && github.event.issue.state == 'open'))
     runs-on: ubuntu-latest
     steps:
       - name: Restrict /recheck and /submit to the original reporter
@@ -225,7 +228,8 @@ jobs:
                     `repo), please submit a new listing request via the guided form: ` +
                     `https://falconchristmas.github.io/fpp-data/submit_new_plugin/\n\n` +
                     `Closing this one out. If this is wrong, comment \`/submit\` and we'll flag it ` +
-                    `for a maintainer instead.`});
+                    `for a maintainer instead. This issue being closed doesn't stop \`/recheck\` from ` +
+                    `working - comment it any time later to get a fresh report against the current state.`});
             await github.rest.issues.update({owner, repo, issue_number, state: 'closed'});
 
       - name: "Auto-close: already that category"
@@ -246,7 +250,9 @@ jobs:
             await github.rest.issues.createComment({owner, repo, issue_number,
               body: `@${author} \`${repoName}\` is already filed under **${newCategoryLong}** - ` +
                     `nothing to change. Closing this out. If that's wrong, comment \`/submit\` and ` +
-                    `we'll flag it for a maintainer instead.`});
+                    `we'll flag it for a maintainer instead. This issue being closed doesn't stop ` +
+                    `\`/recheck\` from working - comment it any time later to get a fresh report ` +
+                    `against the current state.`});
             await github.rest.issues.update({owner, repo, issue_number, state: 'closed'});
 
       # --- from here on: verified OR unconfirmed - both get a PR ---------------
@@ -358,7 +364,9 @@ jobs:
             const existingComment = comments.data.find(c => c.body && c.body.includes(MARKER));
             const commentBody = `${MARKER}\n📦 Pull request: ${pr.html_url}\n\nClosing this issue - ` +
               'further discussion happens on the PR now. Merging (applies the change) or closing ' +
-              '(rejects the request) is a maintainer\'s call, not automatic.';
+              '(rejects the request) is a maintainer\'s call, not automatic. This issue being closed ' +
+              'doesn\'t stop `/recheck` from working - comment it any time later to get a fresh report ' +
+              'against the current state.';
             if (existingComment) {
               await github.rest.issues.updateComment({ owner, repo, comment_id: existingComment.id, body: commentBody });
             } else {

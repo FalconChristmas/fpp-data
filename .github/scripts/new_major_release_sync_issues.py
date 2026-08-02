@@ -119,7 +119,10 @@ def main():
                 else:
                     _req("POST", f"{API}/repos/{repo}/issues/{iss['number']}/comments", token,
                          {"body": f"✅ Detected a `versions[]` entry declaring FPP {target} "
-                                  f"support with no outstanding blockers - thanks! Closing automatically."})
+                                  f"support with no outstanding blockers - thanks! Closing automatically. "
+                                  f"This issue being closed doesn't stop `/recheck` from working - comment "
+                                  f"it any time later (e.g. after a regression) to get a fresh report "
+                                  f"against the current state."})
                     _req("PATCH", f"{API}/repos/{repo}/issues/{iss['number']}", token,
                          {"state": "closed", "state_reason": "completed"})
                 closed += 1
