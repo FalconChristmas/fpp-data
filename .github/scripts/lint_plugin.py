@@ -1319,37 +1319,74 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
             r'setSetting\s+(restartFlag|rebootFlag)\s+1'
             r'|setSetting\s*\(\s*["\'](restartFlag|rebootFlag)["\']'
             r'|SetRestartFlag\s*\(|SetRebootFlag\s*\(')
-        # Track exactly which candidate files were checked and how - "missing
-        # entirely" (no fpp_install.sh at all - a real case, see fpp-after-hours/
-        # FPP-Plugin-TwilioControl) reads very differently from "present but
-        # doesn't set the flag" (add one line) or "present with a subdirectory
-        # variant shadowing a root one" - spelling this out in the finding saves
-        # a manual re-check of which file(s) actually exist before fixing it.
-        sets_restart_flag = False
-        checked = []
-        for cand in ("scripts/fpp_install.sh", "fpp_install.sh", "scripts/fpp_upgrade.sh", "fpp_upgrade.sh"):
-            p = os.path.join(root, cand)
-            if not os.path.isfile(p):
-                checked.append(f"{cand} (not present)")
-                continue
-            if restart_flag_rx.search(_read(p)):
-                sets_restart_flag = True
-                break
-            checked.append(f"{cand} (present, no restart/reboot flag)")
-        if not sets_restart_flag:
+
+        def _restart_flag_gap(cands, required_if_absent):
+            """Check one lifecycle slot (a tuple of candidate relative paths, most
+            specific first - same scripts/X.sh-then-X.sh fallback FPP itself uses).
+            Returns None if satisfied (a candidate exists and sets the flag, OR
+            none exist and none are required to), else a short status string for
+            the consolidated message below. `required_if_absent` distinguishes
+            fpp_install.sh/fpp_uninstall.sh (FPP always runs these if present, so
+            "doesn't exist" IS the gap - create one) from fpp_upgrade.sh (only a
+            gap if it exists and is missing the flag; if absent, the Plugin
+            Manager's Update button falls back to re-running fpp_install.sh, which
+            is already covered by its own slot - PLUGIN_GUIDELINES.md's "native
+            (C++) plugins" section)."""
+            existing = [c for c in cands if os.path.isfile(os.path.join(root, c))]
+            if any(restart_flag_rx.search(_read(os.path.join(root, c))) for c in existing):
+                return None
+            if existing:
+                return f"{'/'.join(existing)} present, no restart/reboot flag"
+            if required_if_absent:
+                return f"no {cands[-1]} (create one)"
+            return None
+
+        # One slot per point in the lifecycle FPP actually invokes a plugin
+        # script and won't run anything else afterward: fresh install always
+        # runs fpp_install.sh; a plugin-only update runs fpp_upgrade.sh INSTEAD
+        # of fpp_install.sh when one exists (so having the flag in fpp_install.sh
+        # alone doesn't cover it); uninstall runs fpp_uninstall.sh and then
+        # unconditionally deletes the plugin directory (scripts/uninstall_plugin,
+        # FPP core), so that's the only code that ever runs before removal.
+        # FPP core's InstallPluginFromInfo()/UninstallPlugin()
+        # (www/api/controllers/plugin.php) never set the flag on the plugin's
+        # behalf at any of these points - it's entirely the plugin's own
+        # responsibility, in whichever of these scripts it actually has.
+        gaps = {}
+        install_gap = _restart_flag_gap(("scripts/fpp_install.sh", "fpp_install.sh"), required_if_absent=True)
+        if install_gap:
+            gaps["install"] = install_gap
+        upgrade_exists = any(os.path.isfile(os.path.join(root, c))
+                              for c in ("scripts/fpp_upgrade.sh", "fpp_upgrade.sh"))
+        if upgrade_exists:
+            upgrade_gap = _restart_flag_gap(("scripts/fpp_upgrade.sh", "fpp_upgrade.sh"), required_if_absent=False)
+            if upgrade_gap:
+                gaps["upgrade"] = upgrade_gap
+        uninstall_gap = _restart_flag_gap(("scripts/fpp_uninstall.sh", "fpp_uninstall.sh"), required_if_absent=True)
+        if uninstall_gap:
+            gaps["uninstall"] = uninstall_gap
+
+        if gaps:
             reason = ("registers command type(s) via commands/descriptions.json" if ships_commands
                       else "builds a native plugin (root-level Makefile)")
-            status = "; ".join(checked) if checked else "none of the candidate install/upgrade scripts exist"
-            out.append(Finding(BEST_PRACTICE, "no-restart-flag-on-install",
-                       f"{reason} but no install/upgrade script sets the restart flag - checked: {status}. "
-                       f"fppd only reads commands/descriptions.json and loads a native plugin's .so once, "
-                       f"at its own startup (PluginManager::loadUserPlugins(), called once from fppd.cpp), "
-                       f"so this stays invisible everywhere a command type is used (playlists, schedules, "
-                       f"events) until fppd happens to restart for some other reason. Add "
-                       f"`source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to fpp_install.sh "
-                       f"(create it if none of the above exist) so the Plugin Manager's restart banner "
-                       f"appears right after install/upgrade instead of leaving the new command silently "
-                       f"unavailable"))
+            detail = "; ".join(f"{stage}: {msg}" for stage, msg in gaps.items())
+            out.append(Finding(BEST_PRACTICE, "no-restart-flag",
+                       f"{reason} but doesn't request an fppd restart at every lifecycle point that "
+                       f"needs one - {detail}. fppd only reads commands/descriptions.json and loads a "
+                       f"native plugin's .so once, at its own startup (PluginManager::loadUserPlugins(), "
+                       f"called once from fppd.cpp) - never again while running, and never in response "
+                       f"to a plugin install/upgrade/uninstall. Each lifecycle point runs independently "
+                       f"(a plugin-only update runs fpp_upgrade.sh INSTEAD of fpp_install.sh when one "
+                       f"exists; uninstall runs fpp_uninstall.sh then unconditionally deletes the plugin "
+                       f"directory, so that script is the only code that ever runs before removal), so "
+                       f"the flag has to be set independently in each one this plugin actually has/needs "
+                       f"- fixing it in one script does not cover the others. Add "
+                       f"`source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to each script "
+                       f"listed above (creating fpp_install.sh/fpp_uninstall.sh if missing - only "
+                       f"fpp_upgrade.sh is optional, and only needs it if you already have one) so the "
+                       f"Plugin Manager's restart banner appears right after that step instead of "
+                       f"leaving the command silently unavailable/lingering as a ghost until fppd "
+                       f"happens to restart for an unrelated reason"))
 
     # --- logging conventions -------------------------------------------------
     log_hit = first(r'''(['"][^'"]*\.log['"])|>>?\s*\S*\.log''')
