@@ -1293,6 +1293,64 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                            f"first failure instead"))
             break
 
+    # A plugin that ships commands/descriptions.json (command types) or a native
+    # lib<repoName>.so (a Makefile at the plugin root - FPP's own core-upgrade
+    # path rebuilds every plugin directory that has one, per PLUGIN_GUIDELINES.md's
+    # "native (C++) plugins" section) is registering something fppd only ever
+    # reads once, at its own startup: PluginManager::loadUserPlugins() (src/
+    # Plugins.cpp, called exactly once from fppd.cpp) is what calls
+    # LoadPluginCommands() (reads commands/descriptions.json) and dlopen()s a
+    # plugin's .so - neither happens again while fppd keeps running. Until fppd
+    # is restarted, a freshly-installed command type is invisible everywhere
+    # (playlists, schedules, events all read from fppd's in-memory command
+    # list) even though every other part of the plugin (api.php, content.php)
+    # is already live, since those are loaded fresh per web request instead.
+    # Contrast with a plugin that ships neither: it may still need a restart
+    # for its own reasons, but this specific, checkable trigger doesn't apply,
+    # so nothing is flagged - not every plugin needs one, only this shape does.
+    ships_commands = os.path.isfile(os.path.join(root, "commands", "descriptions.json"))
+    ships_native = os.path.isfile(os.path.join(root, "Makefile")) or os.path.isfile(os.path.join(root, "makefile"))
+    if ships_commands or ships_native:
+        # A reboot flag also satisfies this: a reboot restarts fppd along with
+        # everything else, so a plugin that already asks for one (e.g. it also
+        # changed something that genuinely needs the OS to come back up) has no
+        # separate gap here - don't make it set both flags just to silence this.
+        restart_flag_rx = re.compile(
+            r'setSetting\s+(restartFlag|rebootFlag)\s+1'
+            r'|setSetting\s*\(\s*["\'](restartFlag|rebootFlag)["\']'
+            r'|SetRestartFlag\s*\(|SetRebootFlag\s*\(')
+        # Track exactly which candidate files were checked and how - "missing
+        # entirely" (no fpp_install.sh at all - a real case, see fpp-after-hours/
+        # FPP-Plugin-TwilioControl) reads very differently from "present but
+        # doesn't set the flag" (add one line) or "present with a subdirectory
+        # variant shadowing a root one" - spelling this out in the finding saves
+        # a manual re-check of which file(s) actually exist before fixing it.
+        sets_restart_flag = False
+        checked = []
+        for cand in ("scripts/fpp_install.sh", "fpp_install.sh", "scripts/fpp_upgrade.sh", "fpp_upgrade.sh"):
+            p = os.path.join(root, cand)
+            if not os.path.isfile(p):
+                checked.append(f"{cand} (not present)")
+                continue
+            if restart_flag_rx.search(_read(p)):
+                sets_restart_flag = True
+                break
+            checked.append(f"{cand} (present, no restart/reboot flag)")
+        if not sets_restart_flag:
+            reason = ("registers command type(s) via commands/descriptions.json" if ships_commands
+                      else "builds a native plugin (root-level Makefile)")
+            status = "; ".join(checked) if checked else "none of the candidate install/upgrade scripts exist"
+            out.append(Finding(BEST_PRACTICE, "no-restart-flag-on-install",
+                       f"{reason} but no install/upgrade script sets the restart flag - checked: {status}. "
+                       f"fppd only reads commands/descriptions.json and loads a native plugin's .so once, "
+                       f"at its own startup (PluginManager::loadUserPlugins(), called once from fppd.cpp), "
+                       f"so this stays invisible everywhere a command type is used (playlists, schedules, "
+                       f"events) until fppd happens to restart for some other reason. Add "
+                       f"`source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to fpp_install.sh "
+                       f"(create it if none of the above exist) so the Plugin Manager's restart banner "
+                       f"appears right after install/upgrade instead of leaving the new command silently "
+                       f"unavailable"))
+
     # --- logging conventions -------------------------------------------------
     log_hit = first(r'''(['"][^'"]*\.log['"])|>>?\s*\S*\.log''')
     if log_hit:
