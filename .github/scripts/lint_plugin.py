@@ -393,6 +393,42 @@ def _advertising_hits(root: str):
                 yield rel, i, line.strip()
 
 
+_TUNNEL_SERVICE_RX = re.compile(
+    r'\bdataplicity\b|\bngrok\b|\bcloudflared\b|cloudflare\s+tunnel|cfargotunnel\.com'
+    r'|\btailscale\b|\bzerotier\b|\blocaltunnel\b|\bloca\.lt\b|serveo\.net|\bpagekite\b'
+    r'|telebit\.cloud|playit\.gg|tunnelto\.dev|localhost\.run'
+    # Raspberry-Pi-oriented remote-access services (FPP's main target hardware) -
+    # a real gap without these, since PiTunnel/Remote.It specifically market to
+    # this exact userbase.
+    r'|\bpitunnel\b|remot3\.it|\bweaved\b'
+    # Self-hosted tunnel tools - scoped to their actual binary names/domains/repo
+    # paths (not just the bare word) to avoid matching generic English ("chisel",
+    # "bore", "expose" are all common words outside this context).
+    r'|jpillora/chisel|\bchisel\s+(?:client|server)\b|\bfrpc\b|\bfrps\b|\brathole\b'
+    r'|\bautossh\b|\bzrok\b|bore\.pub|beyondco/expose|\bexpose\.dev\b|\bloclx\b'
+    r'|localxpose|tunnelmole', re.I)
+
+
+def _tunnel_service_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line) for a reference to a known third-party
+    tunneling/remote-access service (Dataplicity, ngrok, Cloudflare Tunnel,
+    Tailscale, ZeroTier, localtunnel, serveo, pagekite, ...) in the plugin's own
+    code - PLUGIN_GUIDELINES.md #13 requires this be disclosed in
+    pluginInfo.json's description, not just a README/setup page, since a user
+    decides whether to install before reading either of those, and using one of
+    these means the plugin can expose the FPP box's control surface to the
+    internet through a third party."""
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            if _TUNNEL_SERVICE_RX.search(line):
+                yield rel, i, line.strip()
+
+
 def _menu_type_counts(root: str) -> dict:
     """type -> [(relpath, lineno), ...] for every 'type' => '<value>' entry inside
     menu.inc's $menuEntries array. Regex-based (not a real PHP parser) - matches the
@@ -1887,6 +1923,34 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"plugins may not advertise anything inside the FPP UI, including products, "
                    f"vendors, things for sale, or other plugins (yours or anyone else's).\n"
                    f"  - If this is genuinely ad/promotional content, remove it"))
+
+    # A plugin that sets up/depends on a third-party tunneling or remote-access
+    # service (Dataplicity, ngrok, Cloudflare Tunnel, Tailscale, ZeroTier, ...) has
+    # to say so in pluginInfo.json's description, not just a README/setup page -
+    # PLUGIN_GUIDELINES.md #13. Not a prohibition (these are often the only
+    # practical way to receive an inbound webhook on a home network) - a
+    # transparency requirement, since a user decides whether to install before
+    # reading a README or setup page. Description check is deliberately broad
+    # (any of "tunnel"/"remote access"/the specific service names) rather than
+    # requiring an exact match to the code hit, since an author describing this
+    # in their own words ("exposes your Pi to the internet via a tunnel") still
+    # counts as disclosed.
+    hit = next(iter(_tunnel_service_hits(root)), None)
+    if hit:
+        description = (info or {}).get("description") or ""
+        # Reuse _TUNNEL_SERVICE_RX itself (same service names/domains) rather than
+        # keeping a second list in sync - OR'd with the generic phrasing an author
+        # might use in their own words instead of naming the service.
+        disclosure_rx = re.compile(_TUNNEL_SERVICE_RX.pattern + r'|tunnel|remote\s+access', re.I)
+        if not disclosure_rx.search(description):
+            out.append(Finding(BEST_PRACTICE, "tunnel-service-undisclosed",
+                       f"sets up or depends on a third-party tunneling/remote-access service "
+                       f"({hit[0]}:{hit[1]}: `{hit[2]}`) but pluginInfo.json's description doesn't "
+                       f"mention it (PLUGIN_GUIDELINES.md #13).\n"
+                       f"  - A user deciding whether to install has to know upfront that this may "
+                       f"expose their FPP box's control surface to the internet through a third "
+                       f"party - say what the service is and why it's needed directly in the "
+                       f"description field, not just a README or setup page"))
 
     # --- repo hygiene --------------------------------------------------------
 
