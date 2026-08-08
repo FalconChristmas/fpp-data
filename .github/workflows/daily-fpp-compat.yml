@@ -236,3 +236,25 @@ jobs:
         with:
           name: fpp-compat-dashboard
           path: out/dashboard.md
+
+      # Committed at repo root (not just an Actions artifact) so there's a stable,
+      # linkable URL (github.com/.../blob/master/dashboard.md, or raw.githubusercontent.com
+      # for the plain markdown) instead of having to dig through workflow runs. This is
+      # the metadata-only version (2026-08-08 decision) - Blocker/Best practice/Optional
+      # columns are always blank here, same limitation as the artifact above, since this
+      # job never clones/lints (see the file header). Skips the commit entirely when
+      # nothing changed, so a day with zero compat/status movement doesn't add a no-op
+      # commit to history.
+      - name: Commit refreshed dashboard
+        run: |
+          set -e
+          cp out/dashboard.md dashboard.md
+          if git diff --quiet -- dashboard.md; then
+            echo "No change to dashboard.md - skipping commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dashboard.md
+          git commit -m "Refresh dashboard.md ($(date -u +%Y-%m-%d))"
+          git push origin HEAD:master

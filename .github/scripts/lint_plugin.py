@@ -349,7 +349,7 @@ def _phone_home_hits(root: str):
     as _donation_reference_hits: disclosed-in-a-README counts too). Heuristic: can't tell
     "essential to plugin function" (e.g. a weather plugin calling its own weather API)
     apart from usage/analytics collection, which is why this is flagged for human review
-    rather than treated as proven - see PLUGIN_GUIDELINES.md #11 for the actual rule."""
+    rather than treated as proven - see PLUGIN_GUIDELINES.md §11 for the actual rule."""
     for path in _iter_files(root, _MONEY_EXTS):
         rel = os.path.relpath(path, root)
         low = "/" + rel.lower()
@@ -382,7 +382,7 @@ def _advertising_hits(root: str):
     plugins", ...), in the plugin's actual UI files. Heuristic and partial by design - it
     catches mechanical, low-false-positive cases (ad networks, boilerplate ad phrasing);
     a banner image linking to a vendor with no telltale text needs a human to catch. See
-    PLUGIN_GUIDELINES.md #12."""
+    PLUGIN_GUIDELINES.md §12."""
     for path in _iter_files(root, _AD_EXTS):
         rel = os.path.relpath(path, root)
         low = "/" + rel.lower()
@@ -413,7 +413,7 @@ def _tunnel_service_hits(root: str, exts=SCRIPT_EXT):
     """Yield (relpath, lineno, line) for a reference to a known third-party
     tunneling/remote-access service (Dataplicity, ngrok, Cloudflare Tunnel,
     Tailscale, ZeroTier, localtunnel, serveo, pagekite, ...) in the plugin's own
-    code - PLUGIN_GUIDELINES.md #13 requires this be disclosed in
+    code - PLUGIN_GUIDELINES.md §13 requires this be disclosed in
     pluginInfo.json's description, not just a README/setup page, since a user
     decides whether to install before reading either of those, and using one of
     these means the plugin can expose the FPP box's control surface to the
@@ -1900,7 +1900,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # thing it exists to do). BLOCKER per policy - a submitter who believes a
     # hit is actually essential-to-function can still `/submit` over it and ask
     # a maintainer to judge intent rather than this being an automatic block
-    # with no override. See PLUGIN_GUIDELINES.md #11.
+    # with no override. See PLUGIN_GUIDELINES.md §11.
     hit = next(iter(_phone_home_hits(root)), None)
     if hit:
         out.append(Finding(BLOCKER, "phone-home",
@@ -1915,7 +1915,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # things for sale, or even other plugins. BLOCKER per policy - this only
     # catches mechanical cases (known ad networks, boilerplate ad phrasing), so
     # what it does flag is high-confidence; a banner image with no telltale
-    # text still needs a human to catch, same as before. See PLUGIN_GUIDELINES.md #12.
+    # text still needs a human to catch, same as before. See PLUGIN_GUIDELINES.md §12.
     hit = next(iter(_advertising_hits(root)), None)
     if hit:
         out.append(Finding(BLOCKER, "advertising",
@@ -1927,14 +1927,18 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # A plugin that sets up/depends on a third-party tunneling or remote-access
     # service (Dataplicity, ngrok, Cloudflare Tunnel, Tailscale, ZeroTier, ...) has
     # to say so in pluginInfo.json's description, not just a README/setup page -
-    # PLUGIN_GUIDELINES.md #13. Not a prohibition (these are often the only
-    # practical way to receive an inbound webhook on a home network) - a
-    # transparency requirement, since a user decides whether to install before
-    # reading a README or setup page. Description check is deliberately broad
-    # (any of "tunnel"/"remote access"/the specific service names) rather than
-    # requiring an exact match to the code hit, since an author describing this
-    # in their own words ("exposes your Pi to the internet via a tunnel") still
-    # counts as disclosed.
+    # PLUGIN_GUIDELINES.md §13. BLOCKER: not a prohibition on USING one of these
+    # services (they're often the only practical way to receive an inbound
+    # webhook on a home network) - but failing to disclose it is treated the same
+    # as the other flat-prohibition policy checks (ask-for-money, phone-home,
+    # advertising), since a user decides whether to install BEFORE reading a
+    # README or setup page, and this is a real security-relevant side effect
+    # (exposing the FPP box to the internet through a third party) they'd have no
+    # way to know about otherwise. Description check is deliberately broad (any of
+    # "tunnel"/"remote access"/the specific service names) rather than requiring
+    # an exact match to the code hit, since an author describing this in their
+    # own words ("exposes your Pi to the internet via a tunnel") still counts as
+    # disclosed - fixing it is a one-line pluginInfo.json edit, not a code change.
     hit = next(iter(_tunnel_service_hits(root)), None)
     if hit:
         description = (info or {}).get("description") or ""
@@ -1943,10 +1947,10 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         # might use in their own words instead of naming the service.
         disclosure_rx = re.compile(_TUNNEL_SERVICE_RX.pattern + r'|tunnel|remote\s+access', re.I)
         if not disclosure_rx.search(description):
-            out.append(Finding(BEST_PRACTICE, "tunnel-service-undisclosed",
+            out.append(Finding(BLOCKER, "tunnel-service-undisclosed",
                        f"sets up or depends on a third-party tunneling/remote-access service "
                        f"({hit[0]}:{hit[1]}: `{hit[2]}`) but pluginInfo.json's description doesn't "
-                       f"mention it (PLUGIN_GUIDELINES.md #13).\n"
+                       f"mention it (PLUGIN_GUIDELINES.md §13).\n"
                        f"  - A user deciding whether to install has to know upfront that this may "
                        f"expose their FPP box's control surface to the internet through a third "
                        f"party - say what the service is and why it's needed directly in the "
@@ -1955,7 +1959,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # --- repo hygiene --------------------------------------------------------
 
     # menu.inc: at most one entry per `type` (status/content/output/help) -
-    # PLUGIN_GUIDELINES.md #9.1. A plugin can appear under multiple menu areas,
+    # PLUGIN_GUIDELINES.md §9.1. A plugin can appear under multiple menu areas,
     # just never twice within the SAME area - the guideline's own anti-pattern
     # example is exactly this (three separate 'help' entries instead of one page).
     for mtype, hits in sorted(_menu_type_counts(root).items()):
