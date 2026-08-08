@@ -1595,25 +1595,47 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
             else:
                 reason = "ships a native plugin (.so)"
             detail = "; ".join(f"{stage}: {msg}" for stage, msg in gaps.items())
-            out.append(Finding(BEST_PRACTICE, "no-restart-flag",
-                       f"{reason} but doesn't request an fppd restart at every lifecycle point that "
-                       f"needs one - {detail}.\n"
-                       f"  - fppd only reads commands/descriptions.json and loads a native plugin's "
-                       f".so once, at its own startup (PluginManager::loadUserPlugins(), called once "
-                       f"from fppd.cpp) - never again while running, and never in response to a "
-                       f"plugin install/upgrade/uninstall.\n"
-                       f"  - Each lifecycle point runs independently (a plugin-only update runs "
-                       f"fpp_upgrade.sh INSTEAD of fpp_install.sh when one exists; uninstall runs "
-                       f"fpp_uninstall.sh then unconditionally deletes the plugin directory, so that "
-                       f"script is the only code that ever runs before removal), so the flag has to be "
-                       f"set independently in each one this plugin actually has/needs - fixing it in "
-                       f"one script does not cover the others.\n"
-                       f"  - Add `source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to each "
-                       f"script listed above (creating fpp_install.sh/fpp_uninstall.sh if missing - "
-                       f"only fpp_upgrade.sh is optional, and only needs it if you already have one) so "
-                       f"the Plugin Manager's restart banner appears right after that step instead of "
-                       f"leaving the command silently unavailable/lingering as a ghost until fppd "
-                       f"happens to restart for an unrelated reason"))
+            if hotload_safe and spans_pre_hotload_major:
+                # This plugin's own CODE is fine for FPP HOTLOAD_INTRODUCED_MAJOR+ - the
+                # generic "fppd only reads commands/.so once, at startup" explanation below
+                # is actually FALSE for it there. The real reason it still needs the flag is
+                # entirely about pluginInfo.json's versions[]: this same branch/build is also
+                # served to FPP majors before HOTLOAD_INTRODUCED_MAJOR, which have no
+                # load/unload feature at all - so give that reason instead of the generic one.
+                out.append(Finding(BEST_PRACTICE, "no-restart-flag",
+                           f"{reason} but doesn't request an fppd restart at every lifecycle point "
+                           f"that needs one - {detail}.\n"
+                           f"  - This plugin's code itself looks fine for FPP {HOTLOAD_INTRODUCED_MAJOR} "
+                           f"- structurally safe to hot-load/unload without a restart there. The flag "
+                           f"is still needed because pluginInfo.json's versions[] serves this exact "
+                           f"branch/build to FPP majors before {HOTLOAD_INTRODUCED_MAJOR} too, which "
+                           f"have no plugin load/unload feature at all - those installs still need a "
+                           f"full fppd restart to pick up install/uninstall.\n"
+                           f"  - Add `source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to "
+                           f"each script listed above (creating fpp_install.sh/fpp_uninstall.sh if "
+                           f"missing - only fpp_upgrade.sh is optional, and only needs it if you "
+                           f"already have one); only drop it once you split off a separate FPP "
+                           f"{HOTLOAD_INTRODUCED_MAJOR}+-only branch/sha in versions[]"))
+            else:
+                out.append(Finding(BEST_PRACTICE, "no-restart-flag",
+                           f"{reason} but doesn't request an fppd restart at every lifecycle point that "
+                           f"needs one - {detail}.\n"
+                           f"  - fppd only reads commands/descriptions.json and loads a native plugin's "
+                           f".so once, at its own startup (PluginManager::loadUserPlugins(), called once "
+                           f"from fppd.cpp) - never again while running, and never in response to a "
+                           f"plugin install/upgrade/uninstall.\n"
+                           f"  - Each lifecycle point runs independently (a plugin-only update runs "
+                           f"fpp_upgrade.sh INSTEAD of fpp_install.sh when one exists; uninstall runs "
+                           f"fpp_uninstall.sh then unconditionally deletes the plugin directory, so that "
+                           f"script is the only code that ever runs before removal), so the flag has to "
+                           f"be set independently in each one this plugin actually has/needs - fixing it "
+                           f"in one script does not cover the others.\n"
+                           f"  - Add `source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to each "
+                           f"script listed above (creating fpp_install.sh/fpp_uninstall.sh if missing - "
+                           f"only fpp_upgrade.sh is optional, and only needs it if you already have one) "
+                           f"so the Plugin Manager's restart banner appears right after that step instead "
+                           f"of leaving the command silently unavailable/lingering as a ghost until fppd "
+                           f"happens to restart for an unrelated reason"))
         elif hotload_safe and spans_pre_hotload_major:
             # Only surface this standalone when the flag genuinely IS set everywhere it's
             # needed (no gaps above) - otherwise it just restates "you need the flag" a
