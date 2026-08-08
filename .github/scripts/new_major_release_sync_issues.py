@@ -8,9 +8,10 @@ Modes:
   --mode create     create a missing issue, or update an existing one's body.
                     (used by the manual new-major-release workflow)
   --mode reconcile  do NOT create anything; keeps each open issue's status:<...>
-                    label in sync with a fresh daily rescan, and for a plugin
-                    now compatible, comments on its open issue (a maintainer
-                    closes it by hand). (used by the daily workflow)
+                    label in sync with a fresh daily rescan (a maintainer
+                    filters/watches by that label - e.g. status:compatible - to
+                    find issues ready to close by hand; never auto-closes).
+                    (used by the daily workflow)
 
 By default, never @-mentions an author: bodies (from new_major_release_scan.issue_body)
 render the maintainer handle as plain text, so no one is notified. If the scan that
@@ -103,7 +104,7 @@ def main():
                 nm = body.split("<!-- plugin:", 1)[1].split()[0]
                 existing[nm] = iss
 
-    created = updated = commented = noop = 0
+    created = updated = relabeled = noop = 0
     for r in plugins:
         name = r["name"]
         title = f"[FPP {target}] {name} - compatibility & plugin check"
@@ -139,27 +140,16 @@ def main():
                                     pass  # already gone - fine
                         _req("POST", f"{API}/repos/{repo}/issues/{iss['number']}/labels", token,
                              {"labels": [new_status_label]})
-
-            # Only COMMENT when the plugin is now compatible with no outstanding
-            # blockers and an issue is open. certified alone isn't enough - it only
-            # means a versions[] entry declares the target major, not that blocker
-            # findings (schema errors, lint failures, etc) have been resolved.
-            #
-            # Does NOT close the issue automatically (2026-08-08 decision) - just
-            # comments so a maintainer can verify and close by hand. Avoids closing
-            # over a false-positive "ready" read.
-            if r["ready_to_close"] and iss and iss.get("state") == "open":
-                if args.dry_run:
-                    print(f"[dry-run] COMMENT #{iss['number']} {name} (now FPP {target} compatible, no blockers)")
+                    relabeled += 1
                 else:
-                    _req("POST", f"{API}/repos/{repo}/issues/{iss['number']}/comments", token,
-                         {"body": f"✅ Detected a `versions[]` entry declaring FPP {target} "
-                                  f"support with no outstanding blockers - thanks! A maintainer will "
-                                  f"review and close this issue. Comment `/recheck` any time later "
-                                  f"(e.g. after a regression) to get a fresh report against the current state."})
-                commented += 1
+                    noop += 1
             else:
                 noop += 1
+            # No separate "now compatible" comment (dropped 2026-08-08) - the
+            # status:compatible label swap above is the signal a maintainer
+            # filters/watches for; a standalone comment restating the same thing
+            # added no information the label change didn't already carry. Still
+            # never auto-closes either way - a maintainer closes by hand.
             continue
 
         # mode == create : upsert the tracking issue
@@ -179,7 +169,7 @@ def main():
             created += 1
 
     print(f"\nmode={args.mode} dry_run={args.dry_run} :: "
-          f"created {created}, updated {updated}, commented {commented}, noop {noop}")
+          f"created {created}, updated {updated}, relabeled {relabeled}, noop {noop}")
 
 
 if __name__ == "__main__":

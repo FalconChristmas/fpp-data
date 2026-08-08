@@ -161,19 +161,18 @@ def main():
             clone_repo(r["owner"], r["repo"], os.path.join(plugins_dir, name))
             fresh = scan_plugin(entry, target, plugins_dir, token, schema)
 
-        report = issue_body(fresh, target, draft=False)
+        # Unlike a human-triggered /recheck (where the triggering comment itself
+        # explains why a fresh report appeared), nothing else in the thread
+        # explains this one - so the trigger context is prepended to the SAME
+        # report comment instead of following it with a second, mostly-restating
+        # comment (dropped 2026-08-08, matching the manual /recheck cleanup): the
+        # report itself already carries the full findings and, when ready_to_close,
+        # its own "🎉 Congratulations ... A maintainer will review and close this
+        # issue" note - nothing left worth saying twice.
+        report = (f"🔄 Auto-rechecked after detecting new commits since the last check.\n\n"
+                  + issue_body(fresh, target, draft=False))
         _req("POST", f"{API}/repos/{repo}/issues/{issue['number']}/comments", token,
              {"body": report})
-
-        summary_line = f"B{fresh['num_blocker']} best-practice {fresh['num_best_practice']} optional {fresh['num_optional']}"
-        if fresh["ready_to_close"]:
-            note = (f"✅ Auto-rechecked after detecting new commits - now declares FPP {target} "
-                    f"compatibility with no outstanding blockers. A maintainer will review and "
-                    f"close this issue.")
-        else:
-            note = (f"🔄 Auto-rechecked after detecting new commits ({summary_line}) - see the "
-                    f"updated report above.")
-        _req("POST", f"{API}/repos/{repo}/issues/{issue['number']}/comments", token, {"body": note})
 
         # Swap only the status:<...> label, same as manual /recheck - a full
         # PATCH with an explicit "labels" list would silently drop unrelated

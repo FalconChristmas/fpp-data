@@ -660,18 +660,32 @@ def _missing_timeout_hits(root: str, exts=(".php", ".py", ".sh")):
 def _unverified_package_install_hits(root: str, exts=SCRIPT_EXT):
     """Yield (relpath, lineno, line) for a file that downloads a file over the network
     (curl/wget with an output flag - i.e. saving to disk, not piping to a shell, which
-    `remote-exec` above already covers) and separately installs it as a system package
-    (`dpkg -i` / `rpm -i`, including the JS array-argument idiom `['dpkg', '-i', path]`)
-    with no checksum or signature verification (sha256sum/sha1sum/md5sum, gpg --verify)
-    anywhere in the same file. File-level presence/absence, like _missing_timeout_hits -
-    a file legitimately mixing verified and unverified installs is rare, and multi-line/
-    JS-array argument lists make a single-line taint match between the download and the
-    install unreliable. HTTPS transport makes this lower-risk than a live MITM, but it's
-    still no defense-in-depth if the download URL/CDN/upstream repo is ever compromised,
-    and the install runs as root (dpkg -i almost always does)."""
+    `remote-exec` above already covers) and separately trusts/runs it with no checksum
+    or signature verification (sha256sum/sha1sum/md5sum, gpg --verify) anywhere in the
+    same file - either installed as a system package (`dpkg -i` / `rpm -i`, including
+    the JS array-argument idiom `['dpkg', '-i', path]`), or made directly executable
+    (`chmod +x $VAR`, no package manager involved at all - e.g. a native connector
+    binary fetched straight from the vendor's own update endpoint). The chmod
+    alternative is deliberately narrow - the ENTIRE chmod target must be a single bare
+    variable (`chmod +x $BINARY_PATH`, not `chmod +x "$PLUGIN_DIR/scripts"/*.sh`) -
+    since chmod +x'ing the plugin's own bundled, literal-path scripts for permissions
+    (completely normal, done everywhere) would otherwise co-occur with an unrelated
+    config-file download in the same install script and false-positive constantly; a
+    bare bareword variable holding a whole path is a much stronger signal of "the
+    thing we just computed/downloaded" than a literal repo-relative path ever is.
+    File-level presence/absence, like _missing_timeout_hits - a file legitimately
+    mixing verified and unverified installs is rare, and multi-line/JS-array argument
+    lists (or, for the chmod case, the download and the chmod living in different
+    functions with renamed parameters) make a single-line taint match between the
+    download and the install/chmod unreliable. HTTPS transport makes this lower-risk
+    than a live MITM, but it's still no defense-in-depth if the download URL/CDN/
+    upstream repo is ever compromised, and the install/execution almost always runs
+    as root or an always-on service."""
     download_rx = re.compile(
         r'\bcurl\b[^\n]*(-o\b|-O\b|--output\b)|\bwget\b[^\n]*(-O\b|--output-document\b)|\bwget\s+[\'"]?https?://')
-    install_rx = re.compile(r'''\bdpkg\s*[,'"\s]*-i\b|\brpm\s*[,'"\s]*-i\b''')
+    install_rx = re.compile(
+        r'''\bdpkg\s*[,'"\s]*-i\b|\brpm\s*[,'"\s]*-i\b'''
+        r'''|\bchmod\s+(?:-\w+\s+)?\+?x\s+"?\$\{?[A-Za-z_]\w*\}?"?\s*(?:$|[;&|])''', re.MULTILINE)
     verify_rx = re.compile(r'sha256sum|sha1sum|md5sum|gpg\s*[,\'"\s]*--verify|\bchecksum\b', re.I)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
@@ -1005,21 +1019,25 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"`/usr/local/lib/python3.x/dist-packages`, which isn't tracked by dpkg, so it "
                    f"can't conflict with anything apt manages"))
 
-    # Downloads a file, then separately installs it as a system package (dpkg -i /
-    # rpm -i) with no checksum/signature check anywhere in the file. Distinct from
-    # `remote-exec` above: that catches `curl | sh` (piped straight into a shell);
-    # this catches "download to disk, then dpkg -i it" - same lack of integrity
-    # verification, different shape, and dpkg -i almost always runs as root.
+    # Downloads a file, then separately trusts/runs it with no checksum/signature
+    # check anywhere in the file - installed as a system package (dpkg -i / rpm -i),
+    # or made directly executable (chmod +x $VAR, no package manager at all - e.g.
+    # a native binary self-update). Distinct from `remote-exec` above: that catches
+    # `curl | sh` (piped straight into a shell); this catches "download to disk,
+    # then install/run it later" - same lack of integrity verification, different
+    # shape, and the install/execution almost always runs as root or an always-on
+    # service.
     hit = next(iter(_unverified_package_install_hits(root)), None)
     if hit:
+        is_chmod = bool(re.search(r'\bchmod\b', hit[2]))
+        what = "makes a downloaded file executable (chmod +x)" if is_chmod else "installs a downloaded package"
+        fix_tail = "running it" if is_chmod else "installing it, e.g. `curl -fsSL <checksums-url> | grep <file> | sha256sum -c -` (or check the upstream project's published GPG signature) before `dpkg -i`"
         out.append(Finding(BEST_PRACTICE, "unverified-package-install",
-                   f"installs a downloaded package with no checksum/signature check "
-                   f"({hit[0]}:{hit[1]}: `{hit[2]}`) - HTTPS protects the transport, but there's no "
-                   f"defense-in-depth if the download URL, CDN, or upstream release is ever "
-                   f"compromised, and this install almost certainly runs as root.\n"
-                   f"  - Verify the download before installing it, e.g. `curl -fsSL <checksums-url> | "
-                   f"grep <file> | sha256sum -c -` (or check the upstream project's published GPG "
-                   f"signature) before `dpkg -i`"))
+                   f"{what} with no checksum/signature check ({hit[0]}:{hit[1]}: `{hit[2]}`) - HTTPS "
+                   f"protects the transport, but there's no defense-in-depth if the download URL, "
+                   f"CDN, or upstream release is ever compromised, and this "
+                   f"{'runs as an always-on service/binary' if is_chmod else 'install almost certainly runs as root'}.\n"
+                   f"  - Verify the download before {fix_tail}"))
 
     # Bootstrapping a second language/version-package-manager (uv, pipx, nvm,
     # rustup, conda/miniconda, asdf, volta, sdkman) is its own anti-pattern,
