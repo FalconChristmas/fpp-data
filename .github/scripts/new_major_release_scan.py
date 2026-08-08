@@ -349,6 +349,10 @@ def issue_body(r, target, draft=True, mention_owner=False):
             else:
                 L.append(f"{header} - {msg}")
         L.append("")
+    if r["ready_to_close"]:
+        L.append(f"🎉 Congratulations - `{r['name']}` seems all set for FPP {target}, with no "
+                 f"outstanding findings.")
+        L.append("")
     L.append(f"We know our automated checks don't always get it 100% right. Please fix whatever above "
              f"does apply first - then, for anything left that doesn't apply or you think deserves an "
              f"exception, comment `/submit` with an explanation and a maintainer will take a look.")

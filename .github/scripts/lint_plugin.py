@@ -652,6 +652,44 @@ def _unverified_package_install_hits(root: str, exts=SCRIPT_EXT):
                 break
 
 
+def _download_then_execute_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line) for a script that downloads a file to disk
+    (curl -o/-O/--output or wget -O/--output-document) and then separately
+    executes THAT SAME file (bash/sh/source/./) later in the same file - the
+    staged, two-command equivalent of `curl | sh` (remote-exec above only
+    catches the direct single-line pipe/process-substitution/eval shapes).
+    File-level presence/absence, like _unverified_package_install_hits: a file
+    legitimately mixing a verified and an unverified download is rare, and the
+    download/execute steps are often several lines apart (permissions set,
+    directories made, etc. in between), so a single-line taint match between
+    them would miss most real instances."""
+    download_rx = re.compile(
+        r'\bcurl\b[^\n]*(?:-o\s+|-O\s+|--output[= ])["\']?([\w./${}-]+\.(?:sh|py|pl|rb))\b'
+        r'|\bwget\b[^\n]*(?:-O\s+|--output-document[= ])["\']?([\w./${}-]+\.(?:sh|py|pl|rb))\b')
+    verify_rx = re.compile(r'sha256sum|sha1sum|md5sum|gpg\s*[,\'"\s]*--verify|\bchecksum\b', re.I)
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        if verify_rx.search(text):
+            continue
+        m = download_rx.search(text)
+        if not m:
+            continue
+        # Only the unambiguous "this IS the command being run" shapes - explicit
+        # interpreter, or `./fname` - not a bare mention of the filename (which
+        # would also match a harmless `chmod +x fname` or `rm fname` cleanup line).
+        fname = re.escape(os.path.basename(m.group(1) or m.group(2)))
+        exec_rx = re.compile(rf'\b(?:bash|sh|source)\s+\S*{fname}\b|\./\S*{fname}\b')
+        for i, line in enumerate(text.splitlines(), 1):
+            if _is_comment_line(line) or download_rx.search(line):
+                continue
+            if exec_rx.search(line):
+                yield rel, i, line.strip()
+                break
+
+
 def _device_path_no_allowlist_hits(root: str, exts=(".cpp", ".c", ".h", ".hpp", ".php", ".py"), window: int = 20):
     """Yield (relpath, lineno, line) for a device path built by concatenating a variable
     (`"/dev/" + var` in C++ or Python, `"/dev/".$var` in PHP, `f"/dev/{var}"` in Python)
@@ -820,7 +858,17 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         return None
 
     # --- dangerous host behaviour -------------------------------------------
-    hit = first(r'(curl|wget)\b[^|]*\|[^|]*(sudo\s+)?(bash|sh)\b')
+    # Three equivalent shapes for "run a downloaded remote script": a direct pipe
+    # into an interpreter (the classic `curl | sh`, but the interpreter doesn't
+    # have to be bash/sh - python3/perl/ruby/node install scripts do this too),
+    # process substitution (`bash <(curl ...)` - functionally identical to a pipe,
+    # just different shell syntax), and `eval` on a captured command substitution
+    # (`eval "$(curl ...)"` / `eval \`curl ...\`` - the output never touches disk
+    # or a pipe at all, but still executes unverified remote content).
+    hit = first(r'(curl|wget)\b[^|\n]*\|\s*(sudo\s+(?:-\S+\s+)*)?(bash|sh|python3?|perl|ruby|node)\b') \
+        or first(r'\b(bash|sh|python3?|perl|ruby|node)\s*<\(\s*(curl|wget)\b') \
+        or first(r'''\beval\s+["'`]?\$?\(\s*(curl|wget)\b''') \
+        or first(r'\beval\s+`\s*(curl|wget)\b')
     if hit:
         out.append(Finding(BLOCKER, "remote-exec",
                    f"pipes a remote script into a shell ({hit[0]}:{hit[1]}: `{hit[2]}`) - install the "
@@ -831,6 +879,22 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"file, verify its checksum, then run it, e.g. `curl -fsSLo installer.sh "
                    f"https://example.com/install.sh && echo \"<sha256>  installer.sh\" | sha256sum -c "
                    f"&& bash installer.sh`"))
+
+    # Same risk as remote-exec above, staged across two commands instead of one
+    # line: download a script to disk, then separately execute that same file
+    # with no checksum/signature check anywhere in between - functionally
+    # identical to `curl | sh`, just split up (and easy to miss on a quick read
+    # since the download and the execution aren't on the same line).
+    hit = next(iter(_download_then_execute_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "remote-exec",
+                   f"downloads a script and executes it with no checksum/signature check "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`) - this is the same risk as piping a remote script "
+                   f"straight into a shell, just staged across two commands instead of one.\n"
+                   f"  - Verify the download before running it, e.g. `curl -fsSLo installer.sh "
+                   f"https://example.com/install.sh && echo \"<sha256>  installer.sh\" | sha256sum -c "
+                   f"&& bash installer.sh`, or install the dependency through a package manager FPP "
+                   f"already has instead"))
 
     # Reboots/shutdowns are an error. A bare reboot/shutdown only counts as a
     # command (start of line / after ;&| / sudo / then|do, in a shell script, or
@@ -2171,20 +2235,39 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # .cpp/.cc/.cxx (never a header, so never a bare interface declaration) is
     # evidence enough that this plugin implements it - a plain call site would
     # be an unusual thing to find in a plugin's own repo, and even then this
-    # only feeds a BEST_PRACTICE suggestion gated on also having a direct
-    # drogon::app().registerHandler() call in the same repo. has_own_register_apis/
-    # direct_drogon_hit are computed earlier (hotload_safe/unsafe_direct_routes above),
-    # reused here rather than re-scanning the same files.
+    # only feeds a finding gated on also having a direct drogon::app().registerHandler()
+    # call in the same repo. has_own_register_apis/direct_drogon_hit are computed
+    # earlier (hotload_safe/unsafe_direct_routes above), reused here rather than
+    # re-scanning the same files.
+    #
+    # BLOCKER, not best-practice: FPP_PLUGIN_SUPPORTS_UNLOAD only gates whether the
+    # .so is dlclose()'d (unmapped) on unload - it does NOT gate whether the C++
+    # plugin OBJECT is destroyed. PluginManager::unloadPlugin() deletes the plugin
+    # instance unconditionally on every unload, opted in or not. A handler
+    # registered via raw drogon::app().registerHandler() almost always captures
+    # `this` (the plugin object) in its closure; once that object is deleted, the
+    # route calls into freed memory on its next request - the .so's code can stay
+    # mapped forever and this still crashes/corrupts. And this isn't hypothetical:
+    # FPP core's InstallPluginFromInfo()/UninstallPlugin() now call the load/unload
+    # lifecycle UNCONDITIONALLY for every plugin (not opt-in), so any currently
+    # listed plugin using this pattern is exposed to it on an ordinary
+    # uninstall/upgrade via the Plugin Manager on FPP 10.0 beta3+.
     if has_own_register_apis and direct_drogon_hit and not plugin_api_ready:
-        out.append(Finding(BEST_PRACTICE, "direct-drogon-registerhandler",
+        out.append(Finding(BLOCKER, "direct-drogon-registerhandler",
                    f"registers a route straight on drogon::app() instead of through "
                    f"FPPPlugins::registerPluginApi()/unregisterPluginApi() "
-                   f"({direct_drogon_hit[0]}:{direct_drogon_hit[1]}: `{direct_drogon_hit[2]}`) - Drogon "
-                   f"has no way to remove a route once registered, so a handler wired in directly "
-                   f"stays in the router for the process lifetime. That makes this plugin impossible "
-                   f"to unload or replace at runtime (FPP's plugin load/unload API, plugin API 6).\n"
-                   f"  - Route the registration/teardown through "
-                   f"registerPluginApi()/unregisterPluginApi() instead so FPP owns the route slot"))
+                   f"({direct_drogon_hit[0]}:{direct_drogon_hit[1]}: `{direct_drogon_hit[2]}`) - the "
+                   f"handler almost certainly captures `this` (the plugin object), and FPP now calls "
+                   f"the plugin load/unload lifecycle unconditionally on every install/uninstall/"
+                   f"upgrade (plugin API 6, FPP 10.0 beta3+) - not just for plugins that opt into it.\n"
+                   f"  - Unloading deletes the plugin object regardless of FPP_PLUGIN_SUPPORTS_UNLOAD "
+                   f"(that flag only controls whether the .so itself is unmapped) - Drogon has no way "
+                   f"to remove the route registered directly on it, so it stays wired into the router "
+                   f"pointing at a now-freed object. The next request to that route is a use-after-free, "
+                   f"not just a stuck/unremovable route.\n"
+                   f"  - Route the registration/teardown through registerPluginApi()/"
+                   f"unregisterPluginApi() instead so FPP owns the route slot and disarms it (waiting "
+                   f"for any in-flight request to finish) before the plugin object is destroyed"))
 
     # A plugin registering C++ Command objects (CommandManager::addCommand(),
     # not the commands/descriptions.json script mechanism) is expected to take
