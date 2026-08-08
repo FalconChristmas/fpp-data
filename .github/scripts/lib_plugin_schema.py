@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import urllib.error
 import urllib.request
@@ -193,6 +194,25 @@ def filter_by_owner(entries: list, only_owner: Optional[str]) -> list:
         if owner_repo and owner_repo[0].lower() == target:
             out.append(entry)
     return out
+
+
+def apply_limit(entries: list, limit: int, seed: Optional[str] = None) -> list:
+    """Cut `entries` down to `limit`, either the first N (default, unchanged
+    behavior) or a random N (when `seed` is given).
+
+    `seed` is a string (e.g. a GitHub Actions run ID) shared across every script
+    invoked in the same workflow run - clone_plugins.py and
+    new_major_release_scan.py both call this with the SAME entries (same
+    pluginList.json, same order) and the SAME seed, so `random.Random(seed)`
+    independently produces the identical subset in each process with no need to
+    pass the actual selection between steps. Falsy `limit` is a no-op (existing
+    behavior, unaffected either way).
+    """
+    if not limit:
+        return entries
+    if not seed:
+        return entries[:limit]
+    return random.Random(seed).sample(entries, min(limit, len(entries)))
 
 
 def schema_validation_error(info: dict, schema: dict) -> Optional[str]:

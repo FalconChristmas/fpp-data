@@ -27,9 +27,14 @@ on:
         required: true
         default: "10"
       limit:
-        description: "Scan only the first N plugins (0 = all; for testing)"
+        description: "Scan only N plugins (0 = all; for testing)"
         required: false
         default: "0"
+      random_sample:
+        description: "With limit set, pick a random N instead of always the same first N"
+        type: boolean
+        required: false
+        default: false
       only_account:
         description: "Only check plugins owned by this GitHub account (blank = all accounts)"
         required: false
@@ -64,10 +69,22 @@ jobs:
 
       - run: pip install jsonschema
 
+      - name: Compute random seed
+        if: ${{ inputs.random_sample }}
+        # Written to $GITHUB_ENV (not a step env:/output) so it's visible as $SEED
+        # to every later step in this job without re-computing it - clone_plugins.py
+        # and new_major_release_scan.py both need the IDENTICAL seed to
+        # independently pick the same random subset (lib_plugin_schema.apply_limit),
+        # so the scan step's --plugins-dir lookups still find what got cloned here.
+        # Nanosecond timestamp (not github.run_id) so even re-running this exact
+        # workflow run picks a fresh subset instead of repeating the same one.
+        run: echo "SEED=$(date +%s%N)" >> "$GITHUB_ENV"
+
       - name: Clone all listed plugins
         run: |
           python .github/scripts/clone_plugins.py \
             --plugin-list pluginList.json --out plugins --limit "${{ inputs.limit }}" \
+            --seed "$SEED" \
             --only-owner "${{ inputs.only_account }}"
 
       - name: Scan (lint + FPP-${{ inputs.target_major }} compatibility)
@@ -80,6 +97,7 @@ jobs:
             --plugins-dir plugins \
             --schema .github/schema/pluginInfo.schema.json \
             --limit "${{ inputs.limit }}" \
+            --seed "$SEED" \
             --only-owner "${{ inputs.only_account }}" \
             ${{ inputs.mention_owner && '--mention-owner' || '' }} \
             --out out

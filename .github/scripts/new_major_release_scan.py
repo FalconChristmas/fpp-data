@@ -423,7 +423,10 @@ def main():
     ap.add_argument("--plugins-dir", default=None, help="dir of cloned plugins (named by repoName)")
     ap.add_argument("--schema", default=None, help="pluginInfo.schema.json (omit to skip schema validation)")
     ap.add_argument("--out", default="out")
-    ap.add_argument("--limit", type=int, default=0, help="scan only first N (testing)")
+    ap.add_argument("--limit", type=int, default=0, help="scan only N plugins (first N unless --seed is given)")
+    ap.add_argument("--seed", default="", help="pick a random --limit instead of the first N "
+                                                "(shared with clone_plugins.py's --seed so both "
+                                                "processes select the identical subset)")
     ap.add_argument("--only-owner", default="", help="scan only plugins owned by this GitHub account (case-insensitive)")
     ap.add_argument("--mention-owner", action="store_true",
                      help="@-mention the repo owner in real (non-draft) tracking issues, notifying them")
@@ -436,8 +439,7 @@ def main():
             schema = json.load(f)
     entries = lib.load_pluginlist(args.plugin_list)
     entries = lib.filter_by_owner(entries, args.only_owner)
-    if args.limit:
-        entries = entries[: args.limit]
+    entries = lib.apply_limit(entries, args.limit, args.seed)
 
     os.makedirs(os.path.join(args.out, "issues"), exist_ok=True)
     results = []
