@@ -17,9 +17,6 @@ own rules and data format.
 
 ## Before you submit
 
-- **Announce your plugin** to the FPP community (via the
-  [FPP Facebook group](https://www.facebook.com/groups/1554782254796752)) and
-  consider feedback before submitting.
 - **Test it** on the latest released FPP **and** the current nightly build.
 - **Include a license** in your repository.
 - **Avoid subscription-locked features** - plugins that require a paid
