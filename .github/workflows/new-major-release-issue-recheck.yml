@@ -277,8 +277,8 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number,
                 body: `Rechecked - declares FPP ${target} compatibility, but still has ${r.num_blocker} ` +
                       `blocker issues that must be fixed. See the updated report above.` });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number,
-                body: `Rechecked (${summary}) - see the updated report above. Comment \`/recheck\` again ` +
-                      `after another push, or \`/submit\` if you believe a finding doesn't apply.` });
             }
+            // Otherwise (not ready, no /submit, no blockers to call out specifically): the
+            // fresh report comment posted above already covers it in full, right down to
+            // the same /submit-or-/recheck guidance in its own footer - a second comment
+            // here would just restate that, so skip it (2026-08-08 decision).

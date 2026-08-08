@@ -303,7 +303,7 @@ def issue_body(r, target, draft=True, mention_owner=False):
                  f"updating it, start at [Request Plugin Removal]({REMOVAL_GUIDED_PAGE}) and we'll "
                  f"remove it from the list, no update needed.")
         L.append("")
-    L.append(f"> ℹ️ FPP's plugin guidelines and submission process have been updated - see the "
+    L.append(f"> 📢 FPP's plugin guidelines and submission process have been updated - see the "
              f"[Plugin Guidelines]({GUIDELINES}) for what's expected of a listed plugin. Adding another "
              f"plugin? Start at [Submit a plugin]({SUBMISSION_GUIDED_PAGE}).")
     L.append("")
@@ -338,7 +338,16 @@ def issue_body(r, target, draft=True, mention_owner=False):
         badge = {BLOCKER: "🛑", BEST_PRACTICE: "⚠️", OPTIONAL: "💡"}
         label = {BLOCKER: "Blocker", BEST_PRACTICE: "Best practice", OPTIONAL: "Optional"}
         for sev, code, msg in sorted(r["findings"], key=lambda f: order.get(f[0], 3)):
-            L.append(f"- {badge.get(sev, '')} **{label.get(sev, sev)} - {code}** - {msg}")
+            header = f"- {badge.get(sev, '')} **{label.get(sev, sev)} - {code}**"
+            # Short messages read fine inline; a lengthy explanation (why, plus how to
+            # fix) reads as a wall of text glued to the header, so push it down one
+            # level as its own sub-bullet instead - keeps the top-level list skimmable
+            # by severity/code alone.
+            if len(msg) > 100:
+                L.append(header)
+                L.append(f"  - {msg}")
+            else:
+                L.append(f"{header} - {msg}")
         L.append("")
     L.append(f"We know our automated checks don't always get it 100% right. If something above doesn't "
              f"apply, or you think your plugin deserves an exception, comment `/submit` with an "
