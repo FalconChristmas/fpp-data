@@ -181,13 +181,30 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         for f in lint_plugin_dir(plugin_dir, name, info=info):
             findings.append((f.severity, f.code, f.message))
 
+    num_blocker = sum(1 for s, _, _ in findings if s == BLOCKER)
+    num_best_practice = sum(1 for s, _, _ in findings if s == BEST_PRACTICE)
+    num_optional = sum(1 for s, _, _ in findings if s == OPTIONAL)
+    # certified only means "declares a versions[] entry for the target major" - it
+    # says nothing about outstanding findings (schema errors, lint failures,
+    # best-practice nits, stale open issues/PRs, etc. - stale-issues-prs is itself
+    # a finding now, so num_best_practice == 0 already covers it). ready_to_close
+    # is computed here (moved up, was after the status block) so status itself can
+    # use it below - "compatible" needs to mean genuinely done, not just certified.
+    ready_to_close = (certified and num_blocker == 0
+                      and num_best_practice == 0 and num_optional == 0)
+
     # --- status --------------------------------------------------------------
     stale = months_since(meta.get("pushed_at"))
     needs_attention = stale_issue_pr_count >= lib.NEEDS_ATTENTION_MIN_STALE
     if removal_requested:
         status = "removal-requested"
-    elif certified:
+    elif certified and ready_to_close:
         status = "compatible"
+    elif certified:
+        # Declares support for the target major, but still has outstanding
+        # findings (blocker/best-practice/optional) - distinct from "compatible"
+        # (nothing left) and from "needs-update" (hasn't even declared support).
+        status = "needs-fixes"
     elif meta.get("archived") or (stale is not None and stale >= STALE_MONTHS):
         status = "unmaintained"
     elif needs_attention:
@@ -195,9 +212,6 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
     else:
         status = "needs-update"
 
-    num_blocker = sum(1 for s, _, _ in findings if s == BLOCKER)
-    num_best_practice = sum(1 for s, _, _ in findings if s == BEST_PRACTICE)
-    num_optional = sum(1 for s, _, _ in findings if s == OPTIONAL)
     return {
         "name": name,
         # pluginInfo.json's OWN "name" field - the human-readable title shown on the
@@ -218,16 +232,11 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         "status": status,
         "certified": certified,
         "last_major": last_major,
-        # certified only means "declares a versions[] entry for the target major" -
-        # it says nothing about outstanding findings (schema errors, lint failures,
-        # best-practice nits, stale open issues/PRs, etc). ready_to_close is the gate
-        # new_major_release_sync_issues.py's reconcile mode uses to decide whether to
-        # comment on a tracking issue (NOT auto-close, as of 2026-08-08 - a maintainer
-        # closes by hand after reviewing): declared compatible AND zero findings of
-        # ANY severity (not just blockers) - stale-issues-prs is itself a finding
-        # (BEST_PRACTICE) now, so num_best_practice == 0 already covers it.
-        "ready_to_close": (certified and num_blocker == 0
-                           and num_best_practice == 0 and num_optional == 0),
+        # ready_to_close (computed above, now also what "compatible" status means):
+        # the gate new_major_release_sync_issues.py's reconcile mode uses to decide
+        # whether to comment on a tracking issue (NOT auto-close, as of 2026-08-08 -
+        # a maintainer closes by hand after reviewing).
+        "ready_to_close": ready_to_close,
         "removal_requested": removal_requested,
         "issues_enabled": meta.get("has_issues"),
         "archived": meta.get("archived"),
@@ -244,7 +253,7 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
     }
 
 
-ICON = {"compatible": "✅", "needs-update": "🔧", "unmaintained": "💤",
+ICON = {"compatible": "✅", "needs-update": "🔧", "needs-fixes": "🔨", "unmaintained": "💤",
         "removal-requested": "🗑️", "needs-attention": "⚠️"}
 
 
@@ -378,8 +387,8 @@ def build_dashboard(results, target):
     L = [f"# FPP {target} plugin readiness - {datetime.now(timezone.utc):%Y-%m-%d}",
          "",
          f"{total} plugins · ✅ {by('compatible')} compatible · "
-         f"🔧 {by('needs-update')} need update · ⚠️ {by('needs-attention')} need attention · "
-         f"💤 {by('unmaintained')} unmaintained"
+         f"🔨 {by('needs-fixes')} need fixes · 🔧 {by('needs-update')} need update · "
+         f"⚠️ {by('needs-attention')} need attention · 💤 {by('unmaintained')} unmaintained"
          + (f" · 🚩 {len(no_maintainer)} no maintainer identified" if no_maintainer else ""),
          ""]
     if no_maintainer:

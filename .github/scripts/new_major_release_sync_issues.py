@@ -7,9 +7,10 @@ a hidden marker in the body, so re-runs update rather than duplicate.
 Modes:
   --mode create     create a missing issue, or update an existing one's body.
                     (used by the manual new-major-release workflow)
-  --mode reconcile  do NOT create anything; for a plugin now compatible, comment
-                    on its open issue (a maintainer closes it by hand).
-                    (used by the daily workflow)
+  --mode reconcile  do NOT create anything; keeps each open issue's status:<...>
+                    label in sync with a fresh daily rescan, and for a plugin
+                    now compatible, comments on its open issue (a maintainer
+                    closes it by hand). (used by the daily workflow)
 
 By default, never @-mentions an author: bodies (from new_major_release_scan.issue_body)
 render the maintainer handle as plain text, so no one is notified. If the scan that
@@ -110,10 +111,39 @@ def main():
         iss = existing.get(name)
 
         if args.mode == "reconcile":
-            # Only act when the plugin is now compatible with no outstanding blockers
-            # and an issue is open. certified alone isn't enough - it only means a
-            # versions[] entry declares the target major, not that blocker findings
-            # (schema errors, lint failures, etc) have been resolved.
+            # This mode re-derives r["status"] fresh for every plugin daily
+            # (metadata-only rescan, no clone/lint) - keep the issue's status:<...>
+            # label in sync with it even on days it doesn't otherwise comment.
+            # Without this, a plugin that changes status without a NEW commit (e.g.
+            # just edits pluginInfo.json's versions[]) never gets its label updated
+            # either here or by the commit-triggered auto-recheck, so it can go
+            # stale indefinitely. Surgical swap (remove stale status:* labels, add
+            # the current one) - same approach as the recheck workflow and
+            # new_major_release_auto_recheck.py - so it never touches any other
+            # label (needs-manual-review, etc.), unlike a full PATCH labels=[...]
+            # replace (see --mode create's own note on this below).
+            if iss:
+                new_status_label = f"status:{r['status']}"
+                current_status_labels = [
+                    l["name"] for l in (iss.get("labels") or [])
+                    if isinstance(l, dict) and (l.get("name") or "").startswith("status:")]
+                if current_status_labels != [new_status_label]:
+                    if args.dry_run:
+                        print(f"[dry-run] RELABEL #{iss['number']} {name} -> {new_status_label}")
+                    else:
+                        for old in current_status_labels:
+                            if old != new_status_label:
+                                try:
+                                    _req("DELETE", f"{API}/repos/{repo}/issues/{iss['number']}/labels/{old}", token)
+                                except urllib.error.HTTPError:
+                                    pass  # already gone - fine
+                        _req("POST", f"{API}/repos/{repo}/issues/{iss['number']}/labels", token,
+                             {"labels": [new_status_label]})
+
+            # Only COMMENT when the plugin is now compatible with no outstanding
+            # blockers and an issue is open. certified alone isn't enough - it only
+            # means a versions[] entry declares the target major, not that blocker
+            # findings (schema errors, lint failures, etc) have been resolved.
             #
             # Does NOT close the issue automatically (2026-08-08 decision) - just
             # comments so a maintainer can verify and close by hand. Avoids closing
