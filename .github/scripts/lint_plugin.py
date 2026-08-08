@@ -1264,6 +1264,26 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # Scoped to preStart.sh/postStart.sh specifically, not all 6 hooks - a
     # build in fpp_install.sh (a one-time, not every-boot, step) is normal and
     # NOT flagged.
+    #
+    # A build guarded by a "the binary is missing" test is the documented
+    # exception (see the advice text below) and is NOT flagged: it costs one
+    # stat() on a normal boot and only builds in the one case fppd cannot
+    # recover from by itself, e.g. an SD image cloned to a different CPU
+    # architecture. Both shapes are accepted:
+    #     if [ ! -f libfpp-x.so ]; then make; fi
+    #     [ -f libfpp-x.so ] || make
+    #
+    # `g++` can't take a trailing \b - `+` and the following space are both
+    # non-word characters, so \b never matches there and the old
+    # `\b(...|g\+\+|...)\b` silently never detected a g++ build at all.
+    _BUILD_RE = re.compile(r'\b(?:make|cmake|gcc|clang)\b|\bg\+\+')
+    # An existence test for a *missing* file, with the negation on either side
+    # of the test: `[ ! -f x ]`, `test ! -x x`, `! [ -f x ]`, `if ! test -f x`.
+    _MISSING_TEST_RE = re.compile(
+        r'(?:\[\[?|\btest\b)[^]]*!\s*-[efxs]\s'
+        r'|!\s*(?:\[\[?|\btest\b)[^]]*-[efxs]\s')
+    # `[ -f x ] ||` / `test -f x ||` - build only runs when the test fails.
+    _PRESENT_OR_RE = re.compile(r'(?:\[\[?|\btest\b)[^]]*-[efxs]\s[^]]*\]?\]?\s*\|\|')
     hit = None
     for dirpath, dirnames, filenames in os.walk(root):
         if ".git" in dirnames:
@@ -1271,12 +1291,32 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         for fn in filenames:
             if fn in ("preStart.sh", "postStart.sh"):
                 p = os.path.join(dirpath, fn)
+                depth = 0        # nesting level of open if-blocks
+                guard_depth = 0  # depth of the innermost missing-file guard, 0 = none
                 for i, line in enumerate(_read(p).splitlines(), 1):
                     if _is_comment_line(line):
                         continue
-                    if re.search(r'\b(make|cmake|g\+\+|gcc|clang)\b', line):
-                        hit = (os.path.relpath(p, root), i, line.strip())
-                        break
+                    s = line.strip()
+                    # Track if/fi nesting so we know when a guard stops applying.
+                    # Only `if` opens a block - `elif`/`else` continue the one
+                    # already counted, so counting them would inflate the depth
+                    # and leave guard_depth stuck set after the matching `fi`.
+                    if re.match(r'if\b', s):
+                        depth += 1
+                        if not guard_depth and _MISSING_TEST_RE.search(s):
+                            guard_depth = depth
+                    elif re.match(r'fi\b', s):
+                        if guard_depth == depth:
+                            guard_depth = 0
+                        depth = max(0, depth - 1)
+                    if not _BUILD_RE.search(s):
+                        continue
+                    # Inside an `if [ ! -f ... ]` guard, or a `[ -f ... ] ||`
+                    # short-circuit on this same line - the documented exception.
+                    if guard_depth or _PRESENT_OR_RE.search(s):
+                        continue
+                    hit = (os.path.relpath(p, root), i, s)
+                    break
                 if hit:
                     break
         if hit:
