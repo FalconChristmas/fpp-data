@@ -203,17 +203,13 @@ jobs:
             await github.rest.issues.addLabels({ owner, repo, issue_number, labels: [`status:${r.status}`] });
 
             const summary = `B${r.num_blocker} best-practice ${r.num_best_practice} optional ${r.num_optional}`;
-            if (r.ready_to_close) {
-              // Genuinely passes now, even if /submit was also used (nothing left to
-              // override) - but never auto-close (2026-08-08 decision, same as
-              // new_major_release_sync_issues.py's reconcile mode): just comment so a
-              // maintainer can verify and close by hand, avoiding a false-positive
-              // "ready" read closing the issue on its own.
-              await github.rest.issues.createComment({ owner, repo, issue_number,
-                body: `✅ Rechecked - now declares FPP ${target} compatibility with no outstanding findings. ` +
-                      `A maintainer will review and close this issue. Comment \`/recheck\` any time later ` +
-                      `(e.g. after a regression) to get a fresh report against the current state.` });
-            } else if (command === 'submit') {
+            // ready_to_close never auto-closes (2026-08-08 decision, same as
+            // new_major_release_sync_issues.py's reconcile mode) - a maintainer verifies
+            // and closes by hand. No separate comment for it either: issue_body() now
+            // renders its own "🎉 Congratulations ... seems all set" note plus the
+            // maintainer-review/recheck-anytime guidance directly in the fresh report
+            // comment posted above, so a second comment here would just restate it.
+            if (command === 'submit') {
               // /submit always means "flag for manual review", regardless of WHY it's
               // not ready_to_close (not certified at all, or certified but blockers
               // remain) - a prior version of this check ran the "certified but has

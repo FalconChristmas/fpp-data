@@ -350,16 +350,23 @@ def issue_body(r, target, draft=True, mention_owner=False):
                 L.append(f"{header} - {msg}")
         L.append("")
     if r["ready_to_close"]:
+        # Nothing left to fix and nothing to disagree with, so the /submit and
+        # "once you've updated" paragraphs below don't apply here - replace both
+        # with a single congratulations note instead.
         L.append(f"🎉 Congratulations - `{r['name']}` seems all set for FPP {target}, with no "
-                 f"outstanding findings.")
+                 f"outstanding findings. A maintainer will review and close this issue - comment "
+                 f"`/recheck` any time later (e.g. after a regression) to get a fresh report against "
+                 f"the current state.")
         L.append("")
-    L.append(f"We know our automated checks don't always get it 100% right. Please fix whatever above "
-             f"does apply first - then, for anything left that doesn't apply or you think deserves an "
-             f"exception, comment `/submit` with an explanation and a maintainer will take a look.")
-    L.append("")
-    L.append(f"Once you have updated your plugin, please comment `/recheck` on this issue and we will "
-             f"automatically scan your plugin and comment the new results here.")
-    L.append("")
+    else:
+        L.append(f"We know our automated checks don't always get it 100% right. Please fix whatever "
+                 f"above does apply first - then, for anything left that doesn't apply or you think "
+                 f"deserves an exception, comment `/submit` with an explanation and a maintainer will "
+                 f"take a look.")
+        L.append("")
+        L.append(f"Once you have updated your plugin, please comment `/recheck` on this issue and we "
+                 f"will automatically scan your plugin and comment the new results here.")
+        L.append("")
     L.append(f"Want to sunset this plugin? [Request Plugin Removal]({REMOVAL_GUIDED_PAGE})")
     return "\n".join(L)
 
