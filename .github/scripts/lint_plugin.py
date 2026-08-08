@@ -1509,16 +1509,14 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    "feature (plugin API 6+), install/uninstall should be picked up by fppd without a "
                    "restart - this plugin likely doesn't need to force one via restartFlag/rebootFlag at "
                    "those two lifecycle points.\n"
-                   "  - Verify with an actual install/uninstall before relying on it, since this only "
-                   "applies to FPP 10 beta3 and later"))
+                   "  - Verify with an actual install/uninstall before relying on it"))
     elif effective_hotload_safe:
         out.append(Finding(OPTIONAL, "restart-likely-not-required",
                    "ships a root callbacks script, so on an FPP build with the plugin load/unload feature "
                    "(plugin API 6+), PluginManager::loadPlugin() actually calls loadUserPlugin() (which "
                    "reads commands/descriptions.json) - install/uninstall should register/withdraw this "
                    "plugin's commands without a restart.\n"
-                   "  - Verify with an actual install/uninstall before relying on it, since this only "
-                   "applies to FPP 10 beta3 and later"))
+                   "  - Verify with an actual install/uninstall before relying on it"))
     if ships_commands or ships_native:
         # A reboot flag also satisfies this: a reboot restarts fppd along with
         # everything else, so a plugin that already asks for one (e.g. it also
