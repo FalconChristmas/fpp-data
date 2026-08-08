@@ -303,14 +303,14 @@ def issue_body(r, target, draft=True, mention_owner=False):
                  f"updating it, start at [Request Plugin Removal]({REMOVAL_GUIDED_PAGE}) and we'll "
                  f"remove it from the list, no update needed.")
         L.append("")
+    L.append(f"> ℹ️ FPP's plugin guidelines and submission process have been updated - see the "
+             f"[Plugin Guidelines]({GUIDELINES}) for what's expected of a listed plugin. Adding another "
+             f"plugin? Start at [Submit a plugin]({SUBMISSION_GUIDED_PAGE}).")
+    L.append("")
     L.append(f"> 🔄 As part of this new process, in the lead up to each new version release we will create "
              f"a GitHub issue like this one and ask that you review compatibility of your plugin with "
              f"the new version and outline any new best practices for plugins. Please review this "
              f"information and update your plugin accordingly.")
-    L.append("")
-    L.append(f"> ℹ️ FPP's plugin guidelines and submission process have been updated - see the "
-             f"[Plugin Guidelines]({GUIDELINES}) for what's expected of a listed plugin. Adding another "
-             f"plugin? Start at [Submit a plugin]({SUBMISSION_GUIDED_PAGE}).")
     L.append("")
     L.append(f"### 🧪 Get your plugin ready for FPP {target}")
     L.append(f"FPP 10.0 beta3 has been released - FPP 10 full release is due shortly. Please test and "

@@ -35,10 +35,14 @@ from dataclasses import dataclass
 # wherever jsonschema isn't installed.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
-    from lib_plugin_schema import schema_validation_error, parse_github_repo
+    from lib_plugin_schema import schema_validation_error, parse_github_repo, _major
 except ImportError:
     schema_validation_error = None
     parse_github_repo = None
+
+    def _major(v):
+        head = str(v).split(".")[0]
+        return int(head) if head.isdigit() else None
 
 BLOCKER, BEST_PRACTICE, OPTIONAL = "blocker", "best-practice", "optional"
 
@@ -1395,13 +1399,16 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # unloadPlugin(), driven by www/api/controllers/plugin.php calling fppd's
     # /api/fppd/plugin/<name>/load|unload after install/uninstall) - on FPP
     # builds that include it, install/uninstall CAN take effect without an fppd
-    # restart after all, narrowing the blanket claim below. Only trusted for a
-    # shared-library plugin (ships_native): a plugin that ships a .so is only
-    # ever discovered via a callbacks script declaring a "c++" type (see
-    # loadUserPlugin()), so it's guaranteed to have one and doesn't hit the
-    # separate, still-open gap where loadPlugin() skips command registration
-    # for a plugin with NO callbacks script at all (a risk for ships_commands
-    # without ships_native, which this deliberately does NOT relax).
+    # restart after all, narrowing the blanket claim below.
+    #
+    # loadPlugin() itself only calls loadUserPlugin() (which is what reads
+    # commands/descriptions.json AND dlopen()s a .so) when a root "callbacks"
+    # script exists (any of .sh/.pl/.php/.py, or extensionless) - otherwise it's
+    # a no-op. A ships_native plugin is guaranteed one (that's how FPP discovers
+    # the "c++" type in the first place), but a ships_commands-only (script)
+    # plugin isn't - it needs its OWN root callbacks script for the daemon_start/
+    # daemon_stop etc. lifecycle, separate from commands/descriptions.json, so
+    # this is checked explicitly below (has_callbacks_script) rather than assumed.
     #
     # plugin_api_ready means "actively uses registerPluginApi()/unregisterPluginApi()
     # for its own HTTP routes" - real signal for the separate no-api-docs check
@@ -1425,9 +1432,44 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # output is in use (PluginManager::unloadPlugin's mPluginsWithOutputs
     # check), independent of how it registers its API.
     channel_output_hit = ships_native and first(r'\bcreateChannelOutput\s*\(', exts=(".cpp", ".cc", ".cxx"))
-    hotload_safe = ships_native and not unsafe_direct_routes and not channel_output_hit
+    # Same file loadPlugin() itself checks (FPP_DIR_PLUGIN("/" + name + "/callbacks")
+    # plus each extension) - the precondition for it to call loadUserPlugin() at all
+    # for a script-only plugin.
+    has_callbacks_script = any(
+        os.path.isfile(os.path.join(root, "callbacks" + ext)) for ext in ("", ".sh", ".pl", ".php", ".py"))
+    hotload_safe = (
+        (ships_native and not unsafe_direct_routes and not channel_output_hit)
+        or (ships_commands and not ships_native and has_callbacks_script))
 
-    if hotload_safe:
+    # hotload_safe above only asks "is this CODE structurally safe to hot-load".
+    # It says nothing about which FPP majors actually run it: pluginInfo.json's
+    # versions[] can declare ONE branch/build (a single entry) across a CLOSED
+    # min..max range that starts before the FPP major that introduced plugin API 6
+    # (10 - see HOTLOAD_INTRODUCED_MAJOR) and still extends into or past it. An
+    # OPEN-ended entry can't do this - compatible_with_major()'s own semantics
+    # (lib_plugin_schema.py) mean an open maxFPPVersion certifies ONLY its own
+    # major, so spanning majors requires an explicit closed maxFPPVersion. If the
+    # plugin's own versions[] does this, the exact code being linted here also has
+    # to run correctly on those older, pre-hotload FPP installs - where none of
+    # the above applies at all - so hot-load safety on FPP {target} doesn't mean
+    # restartFlag/rebootFlag can be dropped; the plugin would need a SEPARATE
+    # FPP-10+-only branch/sha in versions[] to actually do that.
+    HOTLOAD_INTRODUCED_MAJOR = 10
+
+    def _spans_pre_hotload(v):
+        if not isinstance(v, dict):
+            return False
+        mn = _major(v.get("minFPPVersion")) if v.get("minFPPVersion") else None
+        mx_raw = v.get("maxFPPVersion")
+        if mn is None or mx_raw in (None, "", "0", "0.0"):
+            return False
+        mx = _major(mx_raw)
+        return mx is not None and mn < HOTLOAD_INTRODUCED_MAJOR <= mx
+
+    spans_pre_hotload_major = any(_spans_pre_hotload(v) for v in (info or {}).get("versions") or [])
+    effective_hotload_safe = hotload_safe and not spans_pre_hotload_major
+
+    if effective_hotload_safe and ships_native:
         out.append(Finding(OPTIONAL, "restart-likely-not-required",
                    "doesn't register HTTP routes directly on drogon::app() (outside registerPluginApi()) "
                    "and defines no createChannelOutput(), so on an FPP build with the plugin load/unload "
@@ -1435,6 +1477,23 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    "restart - this plugin likely doesn't need to force one via restartFlag/rebootFlag at "
                    "those two lifecycle points. Verify with an actual install/uninstall before relying on "
                    "it, since this only applies to FPP builds that include the load/unload feature"))
+    elif effective_hotload_safe:
+        out.append(Finding(OPTIONAL, "restart-likely-not-required",
+                   "ships a root callbacks script, so on an FPP build with the plugin load/unload feature "
+                   "(plugin API 6+), PluginManager::loadPlugin() actually calls loadUserPlugin() (which "
+                   "reads commands/descriptions.json) - install/uninstall should register/withdraw this "
+                   "plugin's commands without a restart. Verify with an actual install/uninstall before "
+                   "relying on it, since this only applies to FPP builds that include the load/unload "
+                   "feature"))
+    elif hotload_safe and spans_pre_hotload_major:
+        out.append(Finding(BEST_PRACTICE, "hotload-safe-but-spans-pre-hotload-fpp",
+                   "looks structurally safe to hot-load/unload on its own, but pluginInfo.json's versions[] "
+                   f"declares a single branch/build whose range starts before FPP {HOTLOAD_INTRODUCED_MAJOR} "
+                   f"(where the plugin load/unload feature doesn't exist at all) and extends into or past "
+                   f"it - so this same code also has to support install/uninstall via a full fppd restart "
+                   f"for those older FPP installs. Keep restartFlag/rebootFlag set here regardless; only "
+                   f"drop it if you split off a separate FPP {HOTLOAD_INTRODUCED_MAJOR}+-only branch/sha in "
+                   f"versions[]"))
     if ships_commands or ships_native:
         # A reboot flag also satisfies this: a reboot restarts fppd along with
         # everything else, so a plugin that already asks for one (e.g. it also
@@ -1481,9 +1540,12 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         # install/uninstall are exactly the two lifecycle points fppd's runtime
         # load/unload now covers (see plugin_api_ready/hotload_safe above) - only
         # skip requiring the flag there when this plugin looks safe to rely on
-        # that. fpp_upgrade.sh is untouched: nothing confirms InstallPluginFromInfo()'s
-        # hot-load call is reached on that path too, so it keeps the old requirement.
-        if not hotload_safe:
+        # that AND that reliance actually applies on every FPP major this exact
+        # branch/build declares support for (effective_hotload_safe - see
+        # spans_pre_hotload_major above). fpp_upgrade.sh is untouched: nothing
+        # confirms InstallPluginFromInfo()'s hot-load call is reached on that path
+        # too, so it keeps the old requirement.
+        if not effective_hotload_safe:
             install_gap = _restart_flag_gap(("scripts/fpp_install.sh", "fpp_install.sh"), required_if_absent=True)
             if install_gap:
                 gaps["install"] = install_gap
@@ -1493,7 +1555,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
             upgrade_gap = _restart_flag_gap(("scripts/fpp_upgrade.sh", "fpp_upgrade.sh"), required_if_absent=False)
             if upgrade_gap:
                 gaps["upgrade"] = upgrade_gap
-        if not hotload_safe:
+        if not effective_hotload_safe:
             uninstall_gap = _restart_flag_gap(("scripts/fpp_uninstall.sh", "fpp_uninstall.sh"), required_if_absent=True)
             if uninstall_gap:
                 gaps["uninstall"] = uninstall_gap
