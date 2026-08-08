@@ -3,12 +3,20 @@
 # WHAT THIS IS: the lightweight counterpart to new-major-release-scan.yml. It does NOT
 # clone or lint - it just re-fetches each pluginInfo.json and re-evaluates whether a
 # versions[] entry now declares FPP-<major> support. When a plugin has become
-# compatible, its open tracking issue is commented and CLOSED automatically (verified,
-# not self-reported). Authors are never @-mentioned; closing an issue notifies no one.
+# compatible, its open tracking issue is commented (verified, not self-reported) -
+# a maintainer reviews and closes it by hand; this workflow does not auto-close.
+# Authors are never @-mentioned.
 #
-# Runs the new-major-release scanner in metadata-only mode (no --plugins-dir), so
-# it's fast. TARGET_MAJOR comes from the repo variable
-# NEW_MAJOR_RELEASE_TARGET_MAJOR (default 10).
+# It also auto-recheck's each open tracking issue whose plugin has new commits
+# since its last verified state (new_major_release_auto_recheck.py) - the same
+# clone-and-lint scan a human's `/recheck` comment triggers, just fired by commit
+# activity instead of a comment. Like the reconcile step above, this NEVER
+# auto-closes even on a fully-passing result; only a human-triggered `/recheck`
+# (new-major-release-issue-recheck.yml) does that.
+#
+# The compatibility re-evaluation step below runs the new-major-release scanner in
+# metadata-only mode (no --plugins-dir), so it's fast. TARGET_MAJOR comes from the
+# repo variable NEW_MAJOR_RELEASE_TARGET_MAJOR (default 10).
 
 name: ZZ - Automation - Daily FPP compatibility check
 
@@ -51,12 +59,22 @@ jobs:
             --schema .github/schema/pluginInfo.schema.json \
             --out out
 
-      - name: Close issues for plugins that became compatible
+      - name: Comment on issues for plugins that became compatible
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python .github/scripts/new_major_release_sync_issues.py \
             --summary out/summary.json --mode reconcile
+
+      - name: Auto-recheck plugins with new commits since their last check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python .github/scripts/new_major_release_auto_recheck.py \
+            --summary out/summary.json \
+            --plugin-list pluginList.json \
+            --target-major "$TARGET_MAJOR" \
+            --schema .github/schema/pluginInfo.schema.json
 
       - name: Nudge, then escalate, stale tracking issues with no reply
         env:

@@ -8,7 +8,8 @@ Modes:
   --mode create     create a missing issue, or update an existing one's body.
                     (used by the manual new-major-release workflow)
   --mode reconcile  do NOT create anything; for a plugin now compatible, comment
-                    and CLOSE its open issue. (used by the daily workflow)
+                    on its open issue (a maintainer closes it by hand).
+                    (used by the daily workflow)
 
 By default, never @-mentions an author: bodies (from new_major_release_scan.issue_body)
 render the maintainer handle as plain text, so no one is notified. If the scan that
@@ -52,9 +53,9 @@ def list_new_major_release_issues(repo, token, label):
     """OPEN issues carrying the new-major-release label, matched later by marker.
 
     Closed issues are intentionally excluded: if a plugin's old tracking issue
-    was closed (e.g. reconcile mode auto-closing it once compatible), the next
-    scan should open a fresh, visible issue rather than silently
-    resurrecting/updating the closed one in place, where nobody would see it.
+    was closed (e.g. a maintainer closing it by hand, or the reminder-7 removal-PR
+    escalation), the next scan should open a fresh, visible issue rather than
+    silently resurrecting/updating the closed one in place, where nobody would see it.
     """
     out, page = [], 1
     while True:
@@ -101,7 +102,7 @@ def main():
                 nm = body.split("<!-- plugin:", 1)[1].split()[0]
                 existing[nm] = iss
 
-    created = updated = closed = noop = 0
+    created = updated = commented = noop = 0
     for r in plugins:
         name = r["name"]
         title = f"[FPP {target}] {name} - compatibility & plugin check"
@@ -113,19 +114,20 @@ def main():
             # and an issue is open. certified alone isn't enough - it only means a
             # versions[] entry declares the target major, not that blocker findings
             # (schema errors, lint failures, etc) have been resolved.
+            #
+            # Does NOT close the issue automatically (2026-08-08 decision) - just
+            # comments so a maintainer can verify and close by hand. Avoids closing
+            # over a false-positive "ready" read.
             if r["ready_to_close"] and iss and iss.get("state") == "open":
                 if args.dry_run:
-                    print(f"[dry-run] CLOSE #{iss['number']} {name} (now FPP {target} compatible, no blockers)")
+                    print(f"[dry-run] COMMENT #{iss['number']} {name} (now FPP {target} compatible, no blockers)")
                 else:
                     _req("POST", f"{API}/repos/{repo}/issues/{iss['number']}/comments", token,
                          {"body": f"✅ Detected a `versions[]` entry declaring FPP {target} "
-                                  f"support with no outstanding blockers - thanks! Closing automatically. "
-                                  f"This issue being closed doesn't stop `/recheck` from working - comment "
-                                  f"it any time later (e.g. after a regression) to get a fresh report "
-                                  f"against the current state."})
-                    _req("PATCH", f"{API}/repos/{repo}/issues/{iss['number']}", token,
-                         {"state": "closed", "state_reason": "completed"})
-                closed += 1
+                                  f"support with no outstanding blockers - thanks! A maintainer will "
+                                  f"review and close this issue. Comment `/recheck` any time later "
+                                  f"(e.g. after a regression) to get a fresh report against the current state."})
+                commented += 1
             else:
                 noop += 1
             continue
@@ -147,7 +149,7 @@ def main():
             created += 1
 
     print(f"\nmode={args.mode} dry_run={args.dry_run} :: "
-          f"created {created}, updated {updated}, closed {closed}, noop {noop}")
+          f"created {created}, updated {updated}, commented {commented}, noop {noop}")
 
 
 if __name__ == "__main__":

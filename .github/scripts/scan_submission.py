@@ -32,10 +32,12 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib_plugin_schema import (  # noqa: E402
+    branch_findings,
     compatible_with_major,
     fetch_json,
     field,
     gh_get_repo,
+    gh_list_branches,
     list_open_issues,
     load_pluginlist,
     parse_github_repo,
@@ -181,6 +183,8 @@ def main():
             meta, _ = gh_get_repo(owner, repo, token)
             if meta:
                 findings.extend(repo_metadata_findings(meta, (info or {}).get("bugURL", "")))
+            branches, _ = gh_list_branches(owner, repo, token)
+            findings.extend(branch_findings(info or {}, branches))
 
         # --- ownership: submitter must own the repo, or prove write access -----
         # Unlike removal (verify_remove_plugin.py), a submission had NO ownership check

@@ -252,6 +252,72 @@ def gh_get_repo(owner: str, repo: str, token: Optional[str]) -> tuple[Optional[d
         return None, str(e)
 
 
+def gh_list_branches(owner: str, repo: str, token: Optional[str],
+                      max_pages: int = 5) -> tuple[Optional[set[str]], Optional[str]]:
+    """All branch names on owner/repo, or (None, error) on failure.
+
+    Paginated (100/page, up to max_pages) - plenty for any real plugin repo,
+    which realistically has a handful of branches, not hundreds. Returning
+    None (not an empty set) on failure matters: callers must treat "couldn't
+    ask GitHub" differently from "asked, and there are truly zero branches" -
+    the former should skip the branch-exists check, the latter should never
+    happen for a repo that cloned successfully.
+    """
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    names: set[str] = set()
+    for page in range(1, max_pages + 1):
+        api = f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100&page={page}"
+        try:
+            req = urllib.request.Request(api, headers=headers)
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            return None, f"HTTP {e.code}"
+        except Exception as e:  # noqa: BLE001
+            return None, str(e)
+        if not isinstance(data, list) or not data:
+            break
+        names.update(b["name"] for b in data if isinstance(b, dict) and b.get("name"))
+        if len(data) < 100:
+            break
+    return names, None
+
+
+def branch_findings(info: dict, existing_branches: Optional[set[str]]) -> list[tuple[str, str, str]]:
+    """BLOCKER per versions[] entry whose declared `branch` doesn't exist on the repo.
+
+    A nonexistent branch isn't a style nit - it's the exact shape of bug that
+    passes review invisibly: the submission/major-release scanners clone the repo's
+    DEFAULT branch to lint it (see clone_repo() in scan_submission.py, clone_target()
+    in clone_plugins.py's fallback), so a stale/typo'd `branch` in a versions[] entry
+    still lints clean here. The failure only surfaces later, at real end-user install
+    time, as FPP's git clone erroring "Remote branch <x> not found in upstream origin" -
+    silent in CI, loud in production. `existing_branches=None` (GitHub API unreachable
+    or rate-limited) means "couldn't verify" - skip silently rather than false-positive
+    a plugin whose branch is actually fine.
+    """
+    if existing_branches is None:
+        return []
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for v in info.get("versions") or []:
+        if not isinstance(v, dict):
+            continue
+        branch = (v.get("branch") or "").strip()
+        if not branch or branch in seen or branch in existing_branches:
+            continue
+        seen.add(branch)
+        out.append(("blocker", "branch-not-found",
+                    f"pluginInfo.json declares branch `{branch}` (versions[] entry for FPP "
+                    f"{v.get('minFPPVersion', '?')}-{v.get('maxFPPVersion') or 'latest'}), but no such "
+                    f"branch exists on the repo - installs of this version will fail with "
+                    f"\"Remote branch {branch} not found in upstream origin\". Fix the `branch` value "
+                    f"or push the missing branch."))
+    return out
+
+
 def gh_get_pr_merged_by(owner: str, repo: str, token: Optional[str],
                          scan_limit: int = 100) -> tuple[dict[str, str], set[str]]:
     """(login -> most recent merged_at ISO date) for everyone who has ever clicked

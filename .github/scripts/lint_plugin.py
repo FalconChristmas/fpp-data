@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+import textwrap
 from dataclasses import dataclass
 
 # schema_validation_error needs the third-party jsonschema package (a hard
@@ -263,6 +264,36 @@ def _webhook_no_auth_hits(root: str, exts=(".php",)):
         for i, line in enumerate(text.splitlines(), 1):
             if field_rx.search(line):
                 yield rel, i, line.strip()
+                break
+
+
+def _mass_assignment_hits(root: str, exts=(".php",)):
+    """Yield (relpath, lineno, line, persisted) for `array_merge($config, $_POST)` /
+    `array_merge($config, $_REQUEST)` - the whole request body merged wholesale into
+    a config array, request values winning on key conflicts - with no
+    `array_intersect_key`/`array_filter` allow-list anywhere in the file to constrain
+    which keys can come through. `persisted` is True if a settings-write call
+    (`setPluginJSON`/`WriteSettingToFile`/`file_put_contents`) appears within a few
+    lines after the merge, i.e. the attacker-controlled keys actually reach disk
+    rather than just living in a local variable for the rest of the request."""
+    merge_rx = re.compile(r'array_merge\s*\(\s*\$\w+\s*,\s*\$_(?:POST|REQUEST)\b')
+    allowlist_rx = re.compile(r'array_intersect_key\s*\(|array_filter\s*\(', re.I)
+    persist_rx = re.compile(r'setPluginJSON\s*\(|WriteSettingToFile\s*\(|file_put_contents\s*\(', re.I)
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        if allowlist_rx.search(text):
+            continue
+        lines = text.splitlines()
+        for i, line in enumerate(lines, 1):
+            if _is_comment_line(line):
+                continue
+            if merge_rx.search(line):
+                window = lines[i - 1:i + 5]
+                persisted = any(persist_rx.search(w) for w in window)
+                yield rel, i, line.strip(), persisted
                 break
 
 
@@ -991,6 +1022,21 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"an arbitrary path instead of a serial device. Validate it against an allow-list "
                    f"pattern first, e.g. `^tty(USB|ACM|AMA)\\d+$`"))
 
+    # strcpy()/sprintf() (non-`snprintf`/`vsprintf`-safe forms, word-boundaried so
+    # `strcpy_s`/`snprintf`/`vsprintf` don't match) into a fixed-size stack/heap
+    # buffer - neither function takes a destination size, so any caller-influenced
+    # length overruns it. Essentially never legitimate in a modern C++ FPP plugin
+    # (use snprintf/std::string/std::format instead), so this is cheap and
+    # near-zero-false-positive: BLOCKER regardless of whether the immediate source
+    # is provably request-reachable, matching how `remote-exec` is unconditional too.
+    hit = first(r'\bstrcpy\s*\(|\bsprintf\s*\(', exts=(".cpp", ".c", ".h", ".hpp"))
+    if hit:
+        out.append(Finding(BLOCKER, "unsafe-buffer-copy",
+                   f"strcpy()/sprintf() into a fixed buffer with no length check ({hit[0]}:{hit[1]}: "
+                   f"`{hit[2]}`) - neither function bounds the write against the destination's actual "
+                   f"size, so a longer-than-expected source value overflows it. Use `snprintf()` (with "
+                   f"the real buffer size) or `std::string`/`std::format` instead"))
+
     # Secret/API-key value written straight into a log line, either directly
     # or via a URL/message variable it was concatenated into a few lines earlier
     # (e.g. `$url = "...key/".$apiKey; ... logEntry("URL: ".$url);`).
@@ -1213,6 +1259,25 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"signature header (e.g. `hash_hmac()` compared against `X-<Provider>-Signature`) "
                    f"before trusting any field in the body"))
 
+    # Mass assignment: the whole POST/REQUEST body merged into a config array with
+    # no allow-list, request values winning on key conflicts. Lets a caller (often
+    # an unauthenticated forged webhook) set config keys the plugin never intended
+    # to expose - including ones it later treats as trusted, like a command to run
+    # on the next event. BLOCKER when the merged result is then written to disk
+    # (setPluginJSON/WriteSettingToFile/file_put_contents nearby - the attacker's
+    # keys survive past this request); BEST_PRACTICE otherwise, since a merge that's
+    # never persisted is a narrower, request-scoped risk.
+    hit = next(iter(_mass_assignment_hits(root)), None)
+    if hit:
+        rel, lineno, line, persisted = hit
+        sev = BLOCKER if persisted else BEST_PRACTICE
+        out.append(Finding(sev, "mass-assignment",
+                   f"entire request body merged into config with no allow-list ({rel}:{lineno}: "
+                   f"`{line}`) - a caller can set any config key this way, not just the ones your "
+                   f"settings form offers, potentially including ones the plugin later trusts (a "
+                   f"command to run, a target host, a credential). Filter to known keys first, e.g. "
+                   f"`array_merge($config, array_intersect_key($_POST, $config))`"))
+
     # TLS certificate verification explicitly disabled - always a deliberate
     # opt-out, so this is low false-positive (contrast: `break-system-packages`).
     hit = first(r'CURLOPT_SSL_VERIFYPEER\s*,\s*(false|0)\b') \
@@ -1309,7 +1374,53 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # for its own reasons, but this specific, checkable trigger doesn't apply,
     # so nothing is flagged - not every plugin needs one, only this shape does.
     ships_commands = os.path.isfile(os.path.join(root, "commands", "descriptions.json"))
-    ships_native = os.path.isfile(os.path.join(root, "Makefile")) or os.path.isfile(os.path.join(root, "makefile"))
+    # A Makefile/CMakeLists.txt catches a plugin that builds its .so from source
+    # in this repo, but that's not the only way one ships: FPP itself discovers
+    # a native plugin by running the callbacks script with --list and checking
+    # whether the output starts with "c++" (PluginManager::loadUserPlugin() ->
+    # getOtherTypes(), Plugins.cpp) - that's true whether the .so is built here
+    # or fetched prebuilt from a GitHub release (e.g. fpp-FPPMon: no Makefile at
+    # all, callbacks.sh echoes "c++" and scripts/fetch-binary.sh downloads the
+    # matching release asset). Match that mechanism directly instead of assuming
+    # "no Makefile" means "not native". The callbacks script itself can be any of
+    # the 4 extensions loadUserPlugin() accepts (.sh/.pl/.php/.py), each with its
+    # own print statement - e.g. fpp-plugin-tplink's callbacks.py uses
+    # `print("c++")`, not `echo` - so the check has to cover all four, not just
+    # shell's echo.
+    ships_native = (
+        os.path.isfile(os.path.join(root, "Makefile")) or os.path.isfile(os.path.join(root, "makefile"))
+        or bool(first(r'''(echo|print|printf)\s*\(?\s*["']c\+\+''', exts=(".sh", ".pl", ".php", ".py"))))
+
+    # FPP's plugin API 6 added runtime load/unload (PluginManager::loadPlugin()/
+    # unloadPlugin(), driven by www/api/controllers/plugin.php calling fppd's
+    # /api/fppd/plugin/<name>/load|unload after install/uninstall) - on FPP
+    # builds that include it, install/uninstall CAN take effect without an fppd
+    # restart after all, narrowing the blanket claim below. Only trusted for a
+    # shared-library plugin (ships_native): a plugin that ships a .so is only
+    # ever discovered via a callbacks script declaring a "c++" type (see
+    # loadUserPlugin()), so it's guaranteed to have one and doesn't hit the
+    # separate, still-open gap where loadPlugin() skips command registration
+    # for a plugin with NO callbacks script at all (a risk for ships_commands
+    # without ships_native, which this deliberately does NOT relax).
+    plugin_api_ready = ships_native and bool(
+        first(r'\bregisterPluginApi\s*\(', exts=(".cpp", ".cc", ".cxx")) and
+        first(r'\bunregisterPluginApi\s*\(', exts=(".cpp", ".cc", ".cxx")))
+    # A plugin defining createChannelOutput() (the ChannelOutputPlugin factory -
+    # NOT merely inheriting the interface, which FPP's convenience base class
+    # does unconditionally) is always refused a runtime unload while that
+    # output is in use (PluginManager::unloadPlugin's mPluginsWithOutputs
+    # check), independent of how it registers its API.
+    channel_output_hit = ships_native and first(r'\bcreateChannelOutput\s*\(', exts=(".cpp", ".cc", ".cxx"))
+    hotload_safe = plugin_api_ready and not channel_output_hit
+
+    if hotload_safe:
+        out.append(Finding(OPTIONAL, "restart-likely-not-required",
+                   "uses registerPluginApi()/unregisterPluginApi() for its HTTP routes and defines no "
+                   "createChannelOutput(), so on an FPP build with the plugin load/unload feature (plugin "
+                   "API 6+), install/uninstall should be picked up by fppd without a restart - this plugin "
+                   "likely doesn't need to force one via restartFlag/rebootFlag at those two lifecycle "
+                   "points. Verify with an actual install/uninstall before relying on it, since this only "
+                   "applies to FPP builds that include the load/unload feature"))
     if ships_commands or ships_native:
         # A reboot flag also satisfies this: a reboot restarts fppd along with
         # everything else, so a plugin that already asks for one (e.g. it also
@@ -1353,22 +1464,35 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         # behalf at any of these points - it's entirely the plugin's own
         # responsibility, in whichever of these scripts it actually has.
         gaps = {}
-        install_gap = _restart_flag_gap(("scripts/fpp_install.sh", "fpp_install.sh"), required_if_absent=True)
-        if install_gap:
-            gaps["install"] = install_gap
+        # install/uninstall are exactly the two lifecycle points fppd's runtime
+        # load/unload now covers (see plugin_api_ready/hotload_safe above) - only
+        # skip requiring the flag there when this plugin looks safe to rely on
+        # that. fpp_upgrade.sh is untouched: nothing confirms InstallPluginFromInfo()'s
+        # hot-load call is reached on that path too, so it keeps the old requirement.
+        if not hotload_safe:
+            install_gap = _restart_flag_gap(("scripts/fpp_install.sh", "fpp_install.sh"), required_if_absent=True)
+            if install_gap:
+                gaps["install"] = install_gap
         upgrade_exists = any(os.path.isfile(os.path.join(root, c))
                               for c in ("scripts/fpp_upgrade.sh", "fpp_upgrade.sh"))
         if upgrade_exists:
             upgrade_gap = _restart_flag_gap(("scripts/fpp_upgrade.sh", "fpp_upgrade.sh"), required_if_absent=False)
             if upgrade_gap:
                 gaps["upgrade"] = upgrade_gap
-        uninstall_gap = _restart_flag_gap(("scripts/fpp_uninstall.sh", "fpp_uninstall.sh"), required_if_absent=True)
-        if uninstall_gap:
-            gaps["uninstall"] = uninstall_gap
+        if not hotload_safe:
+            uninstall_gap = _restart_flag_gap(("scripts/fpp_uninstall.sh", "fpp_uninstall.sh"), required_if_absent=True)
+            if uninstall_gap:
+                gaps["uninstall"] = uninstall_gap
 
         if gaps:
-            reason = ("registers command type(s) via commands/descriptions.json" if ships_commands
-                      else "builds a native plugin (root-level Makefile)")
+            if ships_commands:
+                reason = "registers command type(s) via commands/descriptions.json"
+            elif channel_output_hit:
+                reason = ("ships a native plugin (.so) that produces a channel output "
+                           "(defines createChannelOutput()) - FPP always refuses to hot-unload a plugin "
+                           "whose output is in use, regardless of registerPluginApi()/unregisterPluginApi() use,")
+            else:
+                reason = "ships a native plugin (.so)"
             detail = "; ".join(f"{stage}: {msg}" for stage, msg in gaps.items())
             out.append(Finding(BEST_PRACTICE, "no-restart-flag",
                        f"{reason} but doesn't request an fppd restart at every lifecycle point that "
@@ -1857,19 +1981,120 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    "underpowered devices instead of the user finding out the hard way"))
 
     # Still implementing the deprecated registerApis(httpserver::webserver*)
-    # overload instead of the modern no-arg registerApis(). FPP's HTTP layer
-    # migrated from libhttpserver to Drogon; the httpserver:: shims keep this
-    # compiling and working, so it's not a bug, just a docs/DEPRECATED.md nudge.
+    # overload instead of the modern no-arg registerApis(). FPP_PLUGIN_API_VERSION
+    # was bumped to 6 and the libhttpserver compat shims were REMOVED outright
+    # (not just deprecated) - a plugin still on this overload no longer compiles
+    # against current FPP headers at all, it's not a soft "borrowed time" nudge
+    # anymore.
     hit = first(r'(register|unregister)Apis\s*\(\s*httpserver::webserver',
                exts=(".cpp", ".c", ".h", ".hpp"))
     if hit:
-        out.append(Finding(BEST_PRACTICE, "deprecated-httpserver-api",
-                   f"implements the deprecated registerApis(httpserver::webserver*) overload "
+        out.append(Finding(BLOCKER, "deprecated-httpserver-api",
+                   f"implements the removed registerApis(httpserver::webserver*) overload "
                    f"({hit[0]}:{hit[1]}: `{hit[2]}`) instead of the modern no-arg registerApis() - "
-                   f"this still works via FPP's httpserver:: compat shims over Drogon, but those "
-                   f"shims are on borrowed time (see docs/DEPRECATED.md in the FPP repo). Port to "
-                   f"the no-arg registerApis()/unregisterApis() using drogon::app() or the fpphttp.h "
-                   f"helpers (makeStringResponse(), getRequestArg(), etc.) directly"))
+                   f"FPP's libhttpserver compat shims over Drogon have been removed (plugin API 6), "
+                   f"so this no longer compiles against current FPP headers. Port to the no-arg "
+                   f"registerApis()/unregisterApis() using drogon::app() or the fpphttp.h helpers "
+                   f"(makeStringResponse(), getRequestArg(), etc.) directly"))
+
+    # A plugin registering its HTTP routes straight on drogon::app() instead of
+    # through FPPPlugins::registerPluginApi()/unregisterPluginApi() (plugin API 6).
+    # It still compiles and serves requests fine - the problem only shows up at
+    # runtime: Drogon has no route-removal API, so a handler registered directly
+    # stays wired into the router for the life of the process. That makes the
+    # plugin impossible to unload or hot-swap for a rebuilt version - every other
+    # generation of the plugin is stuck fighting over the same path. Detection is
+    # a definition of ClassName::registerApis(), not just the interface being
+    # implemented, so an APIProviderPlugin that legitimately does nothing (no
+    # routes at all) isn't flagged.
+    # Just the call signature, not a full definition match: _grep is line-by-line
+    # (no cross-line regex), and real plugins split the signature and opening
+    # brace across two lines often enough (fpp-brightness: `void registerApis()
+    # override` then `{` on its own line, Allman style) that requiring the brace
+    # on the same line silently missed it, along with the out-of-line
+    # ClassName::registerApis() form. `registerApis()` appearing at all in a
+    # .cpp/.cc/.cxx (never a header, so never a bare interface declaration) is
+    # evidence enough that this plugin implements it - a plain call site would
+    # be an unusual thing to find in a plugin's own repo, and even then this
+    # only feeds a BEST_PRACTICE suggestion gated on also having a direct
+    # drogon::app().registerHandler() call in the same repo.
+    has_own_register_apis = first(r'\bregisterApis\s*\(\s*\)', exts=(".cpp", ".cc", ".cxx"))
+    direct_drogon_hit = first(r'drogon::app\(\)\s*\.\s*registerHandler\s*\(', exts=(".cpp", ".cc", ".cxx"))
+    if has_own_register_apis and direct_drogon_hit and not plugin_api_ready:
+        out.append(Finding(BEST_PRACTICE, "direct-drogon-registerhandler",
+                   f"registers a route straight on drogon::app() instead of through "
+                   f"FPPPlugins::registerPluginApi()/unregisterPluginApi() "
+                   f"({direct_drogon_hit[0]}:{direct_drogon_hit[1]}: `{direct_drogon_hit[2]}`) - Drogon has "
+                   f"no way to remove a route once registered, so a handler wired in directly stays in "
+                   f"the router for the process lifetime. That makes this plugin impossible to unload or "
+                   f"replace at runtime (FPP's plugin load/unload API, plugin API 6). Route the "
+                   f"registration/teardown through registerPluginApi()/unregisterPluginApi() instead so "
+                   f"FPP owns the route slot"))
+
+    # A plugin registering C++ Command objects (CommandManager::addCommand(),
+    # not the commands/descriptions.json script mechanism) is expected to take
+    # them back in shutdown() - FPP commit 48d30e226 made this the documented
+    # contract in Plugin.h: removeCommand() only UNREGISTERS, so a plugin that
+    # took a command back owns it again and must delete it too. Before that
+    # commit, an unloaded plugin's un-withdrawn commands stayed runnable and
+    # invoking one read freed memory through a dangling plugin pointer (silent
+    # corruption, not a crash - the specific hazard the contract closes).
+    # FPP now keeps a backstop (diffs the command registry around a plugin's
+    # load window and deletes anything still there at unload, logging a
+    # warning naming the plugin), so this is a best-practice nudge, not a
+    # blocker - a plugin skipping this doesn't crash fppd, it just leans on
+    # the net and gets a warning in fppd's log every unload/reload cycle.
+    has_add_command = first(r'\baddCommand\s*\(', exts=(".cpp", ".cc", ".cxx"))
+    has_remove_command = first(r'\bremoveCommand\s*\(', exts=(".cpp", ".cc", ".cxx", ".h", ".hpp"))
+    if has_add_command and not has_remove_command:
+        out.append(Finding(BEST_PRACTICE, "no-command-withdrawal",
+                   f"registers command(s) via CommandManager::addCommand() "
+                   f"({has_add_command[0]}:{has_add_command[1]}: `{has_add_command[2]}`) but never calls "
+                   f"removeCommand() - Plugin.h's unload contract (FPP plugin API 6+) expects a plugin to "
+                   f"withdraw AND delete its own commands in shutdown(), since removeCommand() only "
+                   f"unregisters and the plugin owns whatever it takes back. FPP keeps a backstop that "
+                   f"deletes leftover commands at unload and logs a warning naming this plugin, but that's "
+                   f"a net, not a substitute - add removeCommand()+delete for each addCommand() in "
+                   f"shutdown() so a reload doesn't depend on it"))
+
+    # A native plugin whose Makefile doesn't route through FPP's shared
+    # makefiles/common/setup.mk misses whatever that block applies on the
+    # plugin's behalf without the author having to know - most concretely,
+    # -fno-gnu-unique (FPP commit 24abe9828): without it, a single
+    # "static const std::string" inside an inline method (i.e. any method
+    # defined in the class body) can make glibc mark the whole .so NODELETE,
+    # so dlclose() silently unmaps nothing even though the unload otherwise
+    # reports success - FPP_PLUGIN_SUPPORTS_UNLOAD then means less than it
+    # says, with no diagnostic anywhere. Every native plugin in the public
+    # catalog already does `include $(SRCDIR)/makefiles/common/setup.mk` (or
+    # an absolute-path equivalent), so this only fires for a plugin with a
+    # genuinely custom build (hand-rolled compiler invocation, vendored
+    # build system) that never pulls in the shared flags at all.
+    if ships_native and os.path.isfile(os.path.join(root, "Makefile")):
+        makefile_text = _read(os.path.join(root, "Makefile"))
+        if "setup.mk" not in makefile_text:
+            out.append(Finding(BEST_PRACTICE, "no-shared-setup-mk",
+                       "ships a Makefile that doesn't include FPP's shared makefiles/common/setup.mk - "
+                       "every other native plugin in the catalog does `include $(SRCDIR)/makefiles/common/"
+                       "setup.mk`, and that block is what applies -fno-gnu-unique on the plugin's behalf "
+                       "(FPP commit 24abe9828). Without it, a single \"static const std::string\" inside an "
+                       "inline method (i.e. any method body in a class definition) can silently defeat "
+                       "dlclose() even on a plugin that declares FPP_PLUGIN_SUPPORTS_UNLOAD - the unload "
+                       "still reports success, only the memory is never returned. Verify with "
+                       "`nm -D lib<repoName>.so | awk '$2==\"u\"'` after a build; a non-empty result means "
+                       "this plugin needs the flag"))
+
+    # A plugin registering HTTP routes but shipping no apiDocs.json (FPP commit
+    # 006f389dc) - not wrong, but every route it serves shows up under "Undocumented
+    # - see plugin documentation" on the API page instead of describing what it does.
+    # OpenAPI "paths" fragment, keyed by the path registered with registerPluginApi() -
+    # mirrors the existing no-icon polish check (optional, not a hygiene problem).
+    if plugin_api_ready and not os.path.isfile(os.path.join(root, "apiDocs.json")):
+        out.append(Finding(OPTIONAL, "no-api-docs",
+                   "registers HTTP routes via registerPluginApi() but ships no apiDocs.json - its "
+                   "routes show up as \"Undocumented - see plugin documentation\" on the API page instead "
+                   "of describing what they do. Add an apiDocs.json at the plugin root (an OpenAPI "
+                   "\"paths\" fragment keyed by the registered path) so MergePluginApiDocs() picks it up"))
 
     # pluginInfo.json schema validation. Off by default (see the `schema` param
     # docstring above) - only runs when the caller explicitly passes a parsed
@@ -1910,10 +2135,39 @@ def main(argv):
         except (OSError, json.JSONDecodeError):
             schema = None
     findings = lint_plugin_dir(argv[1], argv[2] if len(argv) > 2 else None, info, schema)
-    for f in findings:
-        print(f"{f.severity.upper():5} [{f.code}] {f.message}")
-    print(f"\n{len(findings)} finding(s)")
+    print_report(findings)
     return 0
+
+
+# Section order/labels for print_report(), most-severe first - a reader should
+# hit blockers before scrolling past a wall of polish suggestions. Not reused
+# by scan_submission.py/new_major_release_scan.py, which consume Finding
+# objects directly and build their own issue-body/dashboard formatting - this
+# is purely the standalone `python lint_plugin.py <dir>` CLI report.
+_SEVERITY_SECTIONS = ((BLOCKER, "BLOCKERS"), (BEST_PRACTICE, "BEST PRACTICES"), (OPTIONAL, "OPTIONAL / POLISH"))
+
+
+def print_report(findings: list[Finding]) -> None:
+    if not findings:
+        print("No findings.")
+        return
+    counts = {sev: 0 for sev, _ in _SEVERITY_SECTIONS}
+    for f in findings:
+        counts[f.severity] = counts.get(f.severity, 0) + 1
+    summary = ", ".join(f"{counts[sev]} {label.lower()}" for sev, label in _SEVERITY_SECTIONS if counts.get(sev))
+    print(f"{len(findings)} finding(s) - {summary}\n")
+
+    for sev, label in _SEVERITY_SECTIONS:
+        section = [f for f in findings if f.severity == sev]
+        if not section:
+            continue
+        heading = f"-- {label} ({len(section)}) "
+        print(heading + "-" * max(0, 72 - len(heading)))
+        for f in section:
+            tag = f"  [{f.code}] "
+            print(textwrap.fill(f.message, width=96, initial_indent=tag,
+                                 subsequent_indent=" " * len(tag)))
+        print()
 
 
 if __name__ == "__main__":

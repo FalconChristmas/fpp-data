@@ -36,6 +36,11 @@ REMOVAL_FORM = "https://github.com/FalconChristmas/fpp-data/issues/new?template=
 REMOVAL_GUIDED_PAGE = "https://falconchristmas.github.io/fpp-data/submit_remove_plugin/"
 SUBMISSION_GUIDED_PAGE = "https://falconchristmas.github.io/fpp-data/submit_new_plugin/"
 STALE_MONTHS = 18
+# Fallback @-mention when an org-owned plugin has no individual maintainer
+# candidate (gh_get_maintainer_candidates() found nobody with provable write
+# access) - otherwise the tracking issue notifies nobody at all, since an
+# @-mention to the org login itself doesn't reliably reach anyone.
+FALLBACK_MAINTAINER = "darylc"
 
 
 def highest_supported_major(versions) -> int | None:
@@ -138,6 +143,8 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         if data:
             meta = data
             findings.extend(lib.repo_metadata_findings(meta, info.get("bugURL", "")))
+            branches, _ = lib.gh_list_branches(owner, repo, token)
+            findings.extend(lib.branch_findings(info, branches))
             # An org login isn't a person - nobody gets notified by mentioning it (an
             # org member has to already be watching the repo). Surface the repo's own
             # top contributors instead, as the individuals actually likely to see this.
@@ -190,16 +197,23 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         "repo": repo,
         "owner_is_org": owner_is_org,
         "maintainer_candidates": maintainer_candidates,
+        # Org-owned repo where gh_get_maintainer_candidates() found nobody with
+        # provable write access - an @-mention to the org login itself doesn't
+        # reliably notify anyone (see the docstring on issue_body's org branch),
+        # so without a fallback this plugin's tracking issue goes out to nobody.
+        "no_maintainer_found": owner_is_org and not maintainer_candidates,
         "status": status,
         "certified": certified,
         "last_major": last_major,
         # certified only means "declares a versions[] entry for the target major" -
         # it says nothing about outstanding findings (schema errors, lint failures,
         # best-practice nits, etc) or unaddressed community activity. ready_to_close
-        # is the actual gate for auto-closing a tracking issue: declared compatible,
-        # zero findings of ANY severity (not just blockers), AND no stale open
-        # issues/PRs - a plugin that's technically compatible but ignoring its own
-        # issue tracker still has something for the maintainer to see.
+        # is the gate new_major_release_sync_issues.py's reconcile mode uses to decide
+        # whether to comment on a tracking issue (NOT auto-close, as of 2026-08-08 -
+        # a maintainer closes by hand after reviewing): declared compatible, zero
+        # findings of ANY severity (not just blockers), AND no stale open issues/PRs -
+        # a plugin that's technically compatible but ignoring its own issue tracker
+        # still has something for the maintainer to see.
         "ready_to_close": (certified and num_blocker == 0
                            and num_best_practice == 0 and num_optional == 0
                            and stale_issue_pr_count == 0),
@@ -261,9 +275,12 @@ def issue_body(r, target, draft=True, mention_owner=False):
                     names = ", ".join(f"`{c}`" for c in r["maintainer_candidates"])
                     L.append(f"Maintainer: `{r['owner']}` org (org mentions don't reliably notify anyone). "
                              f"Confirmed committers: {names} *({mention})*")
+            elif do_mention:
+                L.append(f"Maintainer: `{r['owner']}` org (no individual maintainer could be identified) - "
+                         f"@{FALLBACK_MAINTAINER}, this one needs a human to find the right person to notify")
             else:
-                L.append(f"Maintainer: `{r['owner']}` org (no individual maintainer could be identified) "
-                         f"*({mention})*")
+                L.append(f"Maintainer: `{r['owner']}` org (no individual maintainer could be identified, "
+                         f"would fall back to @{FALLBACK_MAINTAINER}) *({mention})*")
         elif do_mention:
             L.append(f"Maintainer: @{r['owner']}")
         else:
@@ -332,19 +349,34 @@ def issue_body(r, target, draft=True, mention_owner=False):
 def build_dashboard(results, target):
     total = len(results)
     by = lambda s: sum(1 for r in results if r["status"] == s)
+    no_maintainer = [r for r in results if r.get("no_maintainer_found")]
     L = [f"# FPP {target} plugin readiness - {datetime.now(timezone.utc):%Y-%m-%d}",
          "",
          f"{total} plugins · ✅ {by('compatible')} compatible · "
          f"🔧 {by('needs-update')} need update · ⚠️ {by('needs-attention')} need attention · "
-         f"💤 {by('unmaintained')} unmaintained",
-         "",
-         "| Plugin | Status | FPP-compat | Issues | Last push | ⚠️ Stale issues/PRs | 🛑 Blocker | ⚠️ Best practice | 💡 Optional |",
-         "|---|---|---|---|---|--:|--:|--:|--:|"]
+         f"💤 {by('unmaintained')} unmaintained"
+         + (f" · 🚩 {len(no_maintainer)} no maintainer identified" if no_maintainer else ""),
+         ""]
+    if no_maintainer:
+        # These are the plugins whose tracking issue notifies nobody without a
+        # human stepping in - gh_get_maintainer_candidates() found no individual
+        # with provable write access on an org-owned repo, and an @-mention to
+        # the org login itself doesn't reliably reach anyone. Surfaced up top,
+        # not buried in the table, since it needs a person to act on it
+        # (find the real maintainer, or accept the @FALLBACK_MAINTAINER default
+        # issue_body() already falls back to).
+        names = ", ".join(f"[{r['name']}](https://github.com/{r['owner']}/{r['repo']})" for r in no_maintainer)
+        L.append(f"> 🚩 **No maintainer identified** for: {names} — org-owned, no individual with provable "
+                 f"write access found. Tracking issues for these fall back to @{FALLBACK_MAINTAINER}.")
+        L.append("")
+    L.append("| Plugin | Status | FPP-compat | Issues | Last push | ⚠️ Stale issues/PRs | 🛑 Blocker | ⚠️ Best practice | 💡 Optional |")
+    L.append("|---|---|---|---|---|--:|--:|--:|--:|")
     for r in sorted(results, key=lambda r: (r["status"] != "needs-update", r["name"].lower())):
         issues = {True: "on", False: "**off**", None: "?"}[r["issues_enabled"]]
         push = f"{r['months_since_push']}mo" if r["months_since_push"] is not None else "?"
         stale_total = r["stale_issues"] + r["stale_prs"]
-        L.append(f"| {r['name']} | {ICON.get(r['status'], '')} {r['status']} | "
+        name_cell = r["name"] + (" 🚩" if r.get("no_maintainer_found") else "")
+        L.append(f"| {name_cell} | {ICON.get(r['status'], '')} {r['status']} | "
                  f"{'yes' if r['certified'] else 'no'} | {issues} | {push} | {stale_total or ''} | "
                  f"{r['num_blocker'] or ''} | {r['num_best_practice'] or ''} | {r['num_optional'] or ''} |")
     return "\n".join(L)
