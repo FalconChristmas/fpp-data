@@ -4,11 +4,11 @@ scan (same scan_plugin() manual /recheck uses) and post the updated report.
 
 Comment-only, like --mode reconcile: NEVER closes the issue automatically, even
 when the result comes back ready_to_close - a maintainer reviews and closes by
-hand (2026-08-08 decision, see .wolf/cerebrum.md). This is deliberately
-different from the manual /recheck workflow (new-major-release-issue-recheck.yml),
-which DOES auto-close on ready_to_close - that path only fires when a human
-(the plugin owner) explicitly asked for it, so a close there reflects a person's
-request. Nothing unattended closes a compatibility issue here.
+hand (2026-08-08 decision, see .wolf/cerebrum.md). As of the same decision this
+also matches the manual /recheck workflow (new-major-release-issue-recheck.yml),
+which used to auto-close on ready_to_close but no longer does either - nothing
+in this pipeline closes a tracking issue unattended; a maintainer always closes
+by hand.
 
 "Since the last check" is derived from issue activity, not a separate marker
 comment: the posted report (both this script's and manual /recheck's) always

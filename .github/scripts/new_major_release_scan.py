@@ -159,6 +159,20 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
     issue_pr_stats = lib.gh_get_stale_issue_pr_stats(owner, repo, token) if (owner and repo) else None
     issue_pr_stats = issue_pr_stats or {"open_issues": None, "open_prs": None,
                                          "stale_issues": 0, "stale_prs": 0}
+    stale_issue_pr_count = issue_pr_stats["stale_issues"] + issue_pr_stats["stale_prs"]
+    if stale_issue_pr_count > 0:
+        parts = []
+        if issue_pr_stats["stale_issues"]:
+            parts.append(f"{issue_pr_stats['stale_issues']} open issue"
+                         + ("" if issue_pr_stats["stale_issues"] == 1 else "s"))
+        if issue_pr_stats["stale_prs"]:
+            parts.append(f"{issue_pr_stats['stale_prs']} open pull request"
+                         + ("" if issue_pr_stats["stale_prs"] == 1 else "s"))
+        findings.append((BEST_PRACTICE, "stale-issues-prs",
+                         f"{' and '.join(parts)} have been open for {lib.STALE_ISSUE_PR_AGE_MONTHS}+ months with "
+                         f"no resolution ({stale_issue_pr_count} total) - if you're still active on this plugin, "
+                         f"please take a look at {'them' if stale_issue_pr_count != 1 else 'it'}: "
+                         f"https://github.com/{owner}/{repo}/issues"))
 
     # --- static plugin lint (needs a clone) -----------------------------
     linted = False
@@ -169,7 +183,6 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
 
     # --- status --------------------------------------------------------------
     stale = months_since(meta.get("pushed_at"))
-    stale_issue_pr_count = issue_pr_stats["stale_issues"] + issue_pr_stats["stale_prs"]
     needs_attention = stale_issue_pr_count >= lib.NEEDS_ATTENTION_MIN_STALE
     if removal_requested:
         status = "removal-requested"
@@ -207,16 +220,14 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         "last_major": last_major,
         # certified only means "declares a versions[] entry for the target major" -
         # it says nothing about outstanding findings (schema errors, lint failures,
-        # best-practice nits, etc) or unaddressed community activity. ready_to_close
-        # is the gate new_major_release_sync_issues.py's reconcile mode uses to decide
-        # whether to comment on a tracking issue (NOT auto-close, as of 2026-08-08 -
-        # a maintainer closes by hand after reviewing): declared compatible, zero
-        # findings of ANY severity (not just blockers), AND no stale open issues/PRs -
-        # a plugin that's technically compatible but ignoring its own issue tracker
-        # still has something for the maintainer to see.
+        # best-practice nits, stale open issues/PRs, etc). ready_to_close is the gate
+        # new_major_release_sync_issues.py's reconcile mode uses to decide whether to
+        # comment on a tracking issue (NOT auto-close, as of 2026-08-08 - a maintainer
+        # closes by hand after reviewing): declared compatible AND zero findings of
+        # ANY severity (not just blockers) - stale-issues-prs is itself a finding
+        # (BEST_PRACTICE) now, so num_best_practice == 0 already covers it.
         "ready_to_close": (certified and num_blocker == 0
-                           and num_best_practice == 0 and num_optional == 0
-                           and stale_issue_pr_count == 0),
+                           and num_best_practice == 0 and num_optional == 0),
         "removal_requested": removal_requested,
         "issues_enabled": meta.get("has_issues"),
         "archived": meta.get("archived"),
@@ -286,32 +297,25 @@ def issue_body(r, target, draft=True, mention_owner=False):
         else:
             L.append(f"Maintainer: `{r['owner']}` (https://github.com/{r['owner']}) *({mention})*")
     L.append("")
-    L.append(f"> ℹ️ FPP's plugin **submission** and **removal** process has been streamlined - see the "
-             f"[Plugin Guidelines]({GUIDELINES}) for what's expected of a listed plugin. Adding another "
-             f"plugin? Start at [Submit a plugin]({SUBMISSION_GUIDED_PAGE}).")
-    L.append("")
     if r["status"] == "unmaintained":
         push = f"{r['months_since_push']} months" if r["months_since_push"] is not None else "a long time"
         L.append(f"> 💤 No activity in {push} - if you'd like to remove this plugin instead of "
                  f"updating it, start at [Request Plugin Removal]({REMOVAL_GUIDED_PAGE}) and we'll "
                  f"remove it from the list, no update needed.")
         L.append("")
-    if r["status"] == "needs-attention" or (r["stale_issues"] + r["stale_prs"]) > 0:
-        stale_total = r["stale_issues"] + r["stale_prs"]
-        parts = []
-        if r["stale_issues"]:
-            parts.append(f"{r['stale_issues']} open issue" + ("" if r["stale_issues"] == 1 else "s"))
-        if r["stale_prs"]:
-            parts.append(f"{r['stale_prs']} open pull request" + ("" if r["stale_prs"] == 1 else "s"))
-        age = lib.STALE_ISSUE_PR_AGE_MONTHS
-        L.append(f"> ⚠️ {' and '.join(parts)} have been open for {age}+ months with no resolution "
-                 f"({stale_total} total) - if you're still active on this plugin, please take a look at "
-                 f"{'them' if stale_total != 1 else 'it'}: https://github.com/{r['owner']}/{r['repo']}/issues")
-        L.append("")
-    L.append(f"As part of this new process, in the lead up to each new version release we will create "
+    L.append(f"> 🔄 As part of this new process, in the lead up to each new version release we will create "
              f"a GitHub issue like this one and ask that you review compatibility of your plugin with "
              f"the new version and outline any new best practices for plugins. Please review this "
              f"information and update your plugin accordingly.")
+    L.append("")
+    L.append(f"> ℹ️ FPP's plugin guidelines and submission process have been updated - see the "
+             f"[Plugin Guidelines]({GUIDELINES}) for what's expected of a listed plugin. Adding another "
+             f"plugin? Start at [Submit a plugin]({SUBMISSION_GUIDED_PAGE}).")
+    L.append("")
+    L.append(f"### 🧪 Get your plugin ready for FPP {target}")
+    L.append(f"FPP 10.0 beta3 has been released - FPP 10 full release is due shortly. Please test and "
+             f"update your plugin against beta3, available at "
+             f"https://github.com/FalconChristmas/fpp/releases/tag/10.0-beta3.")
     L.append("")
     # compatibility
     if r["certified"]:
@@ -336,8 +340,9 @@ def issue_body(r, target, draft=True, mention_owner=False):
         for sev, code, msg in sorted(r["findings"], key=lambda f: order.get(f[0], 3)):
             L.append(f"- {badge.get(sev, '')} **{label.get(sev, sev)} - {code}** - {msg}")
         L.append("")
-    L.append(f"If you disagree with the assessment, please comment `/submit` and explain why you "
-             f"disagree or believe your plugin deserves an exception, for the FPP maintainers to evaluate.")
+    L.append(f"We know our automated checks don't always get it 100% right. If something above doesn't "
+             f"apply, or you think your plugin deserves an exception, comment `/submit` with an "
+             f"explanation and a maintainer will take a look.")
     L.append("")
     L.append(f"Once you have updated your plugin, please comment `/recheck` on this issue and we will "
              f"automatically scan your plugin and comment the new results here.")

@@ -1402,25 +1402,39 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # separate, still-open gap where loadPlugin() skips command registration
     # for a plugin with NO callbacks script at all (a risk for ships_commands
     # without ships_native, which this deliberately does NOT relax).
+    #
+    # plugin_api_ready means "actively uses registerPluginApi()/unregisterPluginApi()
+    # for its own HTTP routes" - real signal for the separate no-api-docs check
+    # below (there's something to document), but NOT the right gate for hotload
+    # safety: a plugin with no HTTP API at all has nothing to disarm either, so
+    # requiring it to have adopted an API it doesn't need wrongly denies it credit.
+    # The actual unsafe pattern is registering routes directly on drogon::app()
+    # instead of through registerPluginApi() - Drogon has no route-removal API, so
+    # a handler wired in directly stays in the router forever and can't be
+    # unloaded/replaced (see the direct-drogon-registerhandler finding below,
+    # which shares these same has_own_register_apis/direct_drogon_hit reads).
     plugin_api_ready = ships_native and bool(
         first(r'\bregisterPluginApi\s*\(', exts=(".cpp", ".cc", ".cxx")) and
         first(r'\bunregisterPluginApi\s*\(', exts=(".cpp", ".cc", ".cxx")))
+    has_own_register_apis = first(r'\bregisterApis\s*\(\s*\)', exts=(".cpp", ".cc", ".cxx"))
+    direct_drogon_hit = first(r'drogon::app\(\)\s*\.\s*registerHandler\s*\(', exts=(".cpp", ".cc", ".cxx"))
+    unsafe_direct_routes = ships_native and bool(has_own_register_apis and direct_drogon_hit)
     # A plugin defining createChannelOutput() (the ChannelOutputPlugin factory -
     # NOT merely inheriting the interface, which FPP's convenience base class
     # does unconditionally) is always refused a runtime unload while that
     # output is in use (PluginManager::unloadPlugin's mPluginsWithOutputs
     # check), independent of how it registers its API.
     channel_output_hit = ships_native and first(r'\bcreateChannelOutput\s*\(', exts=(".cpp", ".cc", ".cxx"))
-    hotload_safe = plugin_api_ready and not channel_output_hit
+    hotload_safe = ships_native and not unsafe_direct_routes and not channel_output_hit
 
     if hotload_safe:
         out.append(Finding(OPTIONAL, "restart-likely-not-required",
-                   "uses registerPluginApi()/unregisterPluginApi() for its HTTP routes and defines no "
-                   "createChannelOutput(), so on an FPP build with the plugin load/unload feature (plugin "
-                   "API 6+), install/uninstall should be picked up by fppd without a restart - this plugin "
-                   "likely doesn't need to force one via restartFlag/rebootFlag at those two lifecycle "
-                   "points. Verify with an actual install/uninstall before relying on it, since this only "
-                   "applies to FPP builds that include the load/unload feature"))
+                   "doesn't register HTTP routes directly on drogon::app() (outside registerPluginApi()) "
+                   "and defines no createChannelOutput(), so on an FPP build with the plugin load/unload "
+                   "feature (plugin API 6+), install/uninstall should be picked up by fppd without a "
+                   "restart - this plugin likely doesn't need to force one via restartFlag/rebootFlag at "
+                   "those two lifecycle points. Verify with an actual install/uninstall before relying on "
+                   "it, since this only applies to FPP builds that include the load/unload feature"))
     if ships_commands or ships_native:
         # A reboot flag also satisfies this: a reboot restarts fppd along with
         # everything else, so a plugin that already asks for one (e.g. it also
@@ -2017,9 +2031,9 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # evidence enough that this plugin implements it - a plain call site would
     # be an unusual thing to find in a plugin's own repo, and even then this
     # only feeds a BEST_PRACTICE suggestion gated on also having a direct
-    # drogon::app().registerHandler() call in the same repo.
-    has_own_register_apis = first(r'\bregisterApis\s*\(\s*\)', exts=(".cpp", ".cc", ".cxx"))
-    direct_drogon_hit = first(r'drogon::app\(\)\s*\.\s*registerHandler\s*\(', exts=(".cpp", ".cc", ".cxx"))
+    # drogon::app().registerHandler() call in the same repo. has_own_register_apis/
+    # direct_drogon_hit are computed earlier (hotload_safe/unsafe_direct_routes above),
+    # reused here rather than re-scanning the same files.
     if has_own_register_apis and direct_drogon_hit and not plugin_api_ready:
         out.append(Finding(BEST_PRACTICE, "direct-drogon-registerhandler",
                    f"registers a route straight on drogon::app() instead of through "

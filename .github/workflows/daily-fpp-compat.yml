@@ -11,8 +11,10 @@
 # since its last verified state (new_major_release_auto_recheck.py) - the same
 # clone-and-lint scan a human's `/recheck` comment triggers, just fired by commit
 # activity instead of a comment. Like the reconcile step above, this NEVER
-# auto-closes even on a fully-passing result; only a human-triggered `/recheck`
-# (new-major-release-issue-recheck.yml) does that.
+# auto-closes even on a fully-passing result - as of 2026-08-08 nothing in this
+# pipeline auto-closes a tracking issue anymore, including a human-triggered
+# `/recheck` (new-major-release-issue-recheck.yml); a maintainer always closes
+# by hand after reviewing.
 #
 # The compatibility re-evaluation step below runs the new-major-release scanner in
 # metadata-only mode (no --plugins-dir), so it's fast. TARGET_MAJOR comes from the

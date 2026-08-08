@@ -105,8 +105,8 @@ jobs:
 
             // Same allow-list regardless of open/closed - re-using a closed tracking
             // issue's thread (rather than opening a new one) doesn't need a tighter
-            // gate here, since /recheck never reopens the issue on its own (see the
-            // "Update the tracking issue" step: it only re-closes when ready_to_close).
+            // gate here, since /recheck never closes or reopens the issue itself (see
+            // the "Update the tracking issue" step: it only ever comments).
             if (owner && commenter.toLowerCase() === owner.toLowerCase()) {
               core.setOutput('ok', 'true');
               return;
@@ -204,13 +204,15 @@ jobs:
 
             const summary = `B${r.num_blocker} best-practice ${r.num_best_practice} optional ${r.num_optional}`;
             if (r.ready_to_close) {
-              // Genuinely passes now - close it even if /submit was also used (nothing
-              // left to override).
+              // Genuinely passes now, even if /submit was also used (nothing left to
+              // override) - but never auto-close (2026-08-08 decision, same as
+              // new_major_release_sync_issues.py's reconcile mode): just comment so a
+              // maintainer can verify and close by hand, avoiding a false-positive
+              // "ready" read closing the issue on its own.
               await github.rest.issues.createComment({ owner, repo, issue_number,
-                body: `✅ Rechecked - now declares FPP ${target} compatibility with no outstanding blockers. ` +
-                      `Closing. This issue being closed doesn't stop \`/recheck\` from working - comment it ` +
-                      `any time later (e.g. after a regression) to get a fresh report against the current state.` });
-              await github.rest.issues.update({ owner, repo, issue_number, state: 'closed', state_reason: 'completed' });
+                body: `✅ Rechecked - now declares FPP ${target} compatibility with no outstanding findings. ` +
+                      `A maintainer will review and close this issue. Comment \`/recheck\` any time later ` +
+                      `(e.g. after a regression) to get a fresh report against the current state.` });
             } else if (command === 'submit') {
               // /submit always means "flag for manual review", regardless of WHY it's
               // not ready_to_close (not certified at all, or certified but blockers
