@@ -349,9 +349,9 @@ def issue_body(r, target, draft=True, mention_owner=False):
             else:
                 L.append(f"{header} - {msg}")
         L.append("")
-    L.append(f"We know our automated checks don't always get it 100% right. If something above doesn't "
-             f"apply, or you think your plugin deserves an exception, comment `/submit` with an "
-             f"explanation and a maintainer will take a look.")
+    L.append(f"We know our automated checks don't always get it 100% right. Please fix whatever above "
+             f"does apply first - then, for anything left that doesn't apply or you think deserves an "
+             f"exception, comment `/submit` with an explanation and a maintainer will take a look.")
     L.append("")
     L.append(f"Once you have updated your plugin, please comment `/recheck` on this issue and we will "
              f"automatically scan your plugin and comment the new results here.")

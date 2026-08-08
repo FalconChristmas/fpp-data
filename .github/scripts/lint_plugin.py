@@ -1519,15 +1519,6 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    "plugin's commands without a restart.\n"
                    "  - Verify with an actual install/uninstall before relying on it, since this only "
                    "applies to FPP 10 beta3 and later"))
-    elif hotload_safe and spans_pre_hotload_major:
-        out.append(Finding(BEST_PRACTICE, "hotload-safe-but-spans-pre-hotload-fpp",
-                   "looks structurally safe to hot-load/unload on its own, but pluginInfo.json's versions[] "
-                   f"declares a single branch/build whose range starts before FPP {HOTLOAD_INTRODUCED_MAJOR} "
-                   f"(where the plugin load/unload feature doesn't exist at all) and extends into or past "
-                   f"it - so this same code also has to support install/uninstall via a full fppd restart "
-                   f"for those older FPP installs.\n"
-                   f"  - Keep restartFlag/rebootFlag set here regardless; only drop it if you split off a "
-                   f"separate FPP {HOTLOAD_INTRODUCED_MAJOR}+-only branch/sha in versions[]"))
     if ships_commands or ships_native:
         # A reboot flag also satisfies this: a reboot restarts fppd along with
         # everything else, so a plugin that already asks for one (e.g. it also
@@ -1623,6 +1614,24 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"the Plugin Manager's restart banner appears right after that step instead of "
                        f"leaving the command silently unavailable/lingering as a ghost until fppd "
                        f"happens to restart for an unrelated reason"))
+        elif hotload_safe and spans_pre_hotload_major:
+            # Only surface this standalone when the flag genuinely IS set everywhere it's
+            # needed (no gaps above) - otherwise it just restates "you need the flag" a
+            # second time alongside no-restart-flag's own concrete gap, reading as two
+            # different problems instead of one (fpp-data#136: this used to fire even
+            # when no-restart-flag ALSO fired for the same plugin, which read as
+            # contradictory - "looks safe" immediately followed by an unrelated-sounding
+            # restart-flag complaint).
+            out.append(Finding(BEST_PRACTICE, "hotload-safe-but-spans-pre-hotload-fpp",
+                       "looks structurally safe to hot-load/unload on its own, but pluginInfo.json's "
+                       f"versions[] declares a single branch/build whose range starts before FPP "
+                       f"{HOTLOAD_INTRODUCED_MAJOR} (where the plugin load/unload feature doesn't "
+                       f"exist at all) and extends into or past it - so this same code also has to "
+                       f"support install/uninstall via a full fppd restart for those older FPP "
+                       f"installs.\n"
+                       f"  - Keep restartFlag/rebootFlag set here regardless; only drop it if you "
+                       f"split off a separate FPP {HOTLOAD_INTRODUCED_MAJOR}+-only branch/sha in "
+                       f"versions[]"))
 
     # --- logging conventions -------------------------------------------------
     log_hit = first(r'''(['"][^'"]*\.log['"])|>>?\s*\S*\.log''')
