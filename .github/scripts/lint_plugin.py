@@ -2345,8 +2345,14 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # Synchronous busy-wait poll loop (a sleep() inside a while/do loop) in a
     # PHP file - if that file is directly reachable as a page (not just a CLI
     # script), it ties up an Apache/PHP-FPM worker for the whole poll duration.
-    # OPTIONAL: genuinely needs real parsing to tell a page from a CLI-only
-    # script reliably; this is a coarse presence check, not a proven defect.
+    # BEST_PRACTICE, not OPTIONAL: genuinely needs real parsing to tell a page
+    # from a CLI-only script reliably, so this can't prove reachability - same
+    # "flag for a human to check reachability rather than treat as proven"
+    # reasoning as destructive-no-csrf/device-path-no-allowlist above (both
+    # BEST_PRACTICE), not a cosmetic/polish item like the true OPTIONAL findings
+    # (no-icon, no-readme, no-resource-hints) - the underlying concern here is a
+    # real reliability issue (worker exhaustion), same class as
+    # blocking-sleep-in-hook, if the precondition holds.
     hit = None
     for path in _iter_files(root, (".php",)):
         rel = os.path.relpath(path, root)
@@ -2363,7 +2369,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         if hit:
             break
     if hit:
-        out.append(Finding(OPTIONAL, "busy-wait-poll",
+        out.append(Finding(BEST_PRACTICE, "busy-wait-poll",
                    f"busy-wait poll loop with sleep() ({hit[0]}:{hit[1]}: `{hit[2]}`) - if this file "
                    f"is reachable directly as a page (not just invoked from a hook/cron), the loop "
                    f"ties up a web server worker for its entire duration.\n"
