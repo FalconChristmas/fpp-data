@@ -117,7 +117,11 @@ def _skippable(rel: str) -> bool:
 def _assign_then_sink(root: str, taint_pattern: str, sink_pattern_tpl: str, window: int = 6, exts=SCRIPT_EXT):
     """Yield (relpath, lineno, line) where a variable assigned from something matching
     `taint_pattern` is passed into a sink matching `sink_pattern_tpl % varname` within
-    `window` lines after the assignment. Cheap stand-in for real taint tracking."""
+    `window` lines after the assignment. Cheap stand-in for real taint tracking. Skips
+    commented-out lines on BOTH sides (assignment and sink) - confirmed real false
+    positive without this: a fully commented-out `// exec($x);//$x = ReadSettingFromFile(...)`
+    line matched before this check existed, since disabled/dead code containing a
+    setting-read call turns out to be common (FPP-Plugin-BetaBrite)."""
     assign_rx = re.compile(r'\$(\w+)\s*=.*' + taint_pattern, re.I)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
@@ -125,12 +129,16 @@ def _assign_then_sink(root: str, taint_pattern: str, sink_pattern_tpl: str, wind
             continue
         lines = _read(path).splitlines()
         for i, line in enumerate(lines):
+            if _is_comment_line(line):
+                continue
             m = assign_rx.search(line)
             if not m:
                 continue
             var = re.escape(m.group(1))
             sink_rx = re.compile(sink_pattern_tpl % var, re.I)
             for j in range(i, min(i + window, len(lines))):
+                if _is_comment_line(lines[j]):
+                    continue
                 if sink_rx.search(lines[j]):
                     yield rel, j + 1, lines[j].strip()
                     break
@@ -740,6 +748,49 @@ def _download_then_execute_hits(root: str, exts=SCRIPT_EXT):
                 break
 
 
+def _unpinned_third_party_clone_hits(root: str, own_owner: str | None, own_repo: str | None, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line) for a `git clone` of a THIRD-PARTY GitHub repo
+    (not the plugin's own srcURL) with no pinned commit anywhere in the file - i.e.
+    tracking a floating branch (a plain clone, or a later `git fetch && git reset
+    --hard origin/<branch>` on reinstall) rather than a specific reviewed commit.
+    Same trust model as `curl | bash` (remote-exec) - the code that actually runs is
+    whatever's currently on that branch at pull time, not what was reviewed at
+    submission time - just done through git instead of a pipe. BEST_PRACTICE, not
+    BLOCKER like remote-exec: harder to prove statically that the cloned code is
+    actually imported/executed (vs. e.g. used only as data/assets), so this flags
+    for a human to confirm reachability rather than asserting it. Confirmed real
+    (catalog-wide audit, 2026-08): fpp-live-follow clones
+    pgianotto/animatronic-motion-system fresh on install and does `git fetch &&
+    git reset --hard origin/master` on every reinstall, with no commit pin anywhere
+    and the cloned code then imported by the daemon."""
+    clone_rx = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?clone\b[^\n]*?(https?://github\.com/\S+)')
+    # A real commit SHA (hex only) pins the checkout to a specific reviewed state;
+    # a branch name like "origin/master" isn't hex-only and won't match this, so
+    # that shape is correctly still treated as floating/unpinned.
+    pin_rx = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?(?:checkout|reset\s+--hard)\s+(?:origin/)?([0-9a-f]{7,40})\b', re.I)
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        if pin_rx.search(text):
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = clone_rx.search(line)
+            if not m:
+                continue
+            repo_info = parse_github_repo(m.group(1)) if parse_github_repo else None
+            if repo_info is None:
+                continue
+            owner, repo_name_hit = repo_info
+            if (own_owner and own_repo
+                    and owner.lower() == own_owner.lower() and repo_name_hit.lower() == own_repo.lower()):
+                continue  # cloning its own repo (e.g. a self-reference) - not third-party
+            yield rel, i, line.strip()
+
+
 def _device_path_no_allowlist_hits(root: str, exts=(".cpp", ".c", ".h", ".hpp", ".php", ".py"), window: int = 20):
     """Yield (relpath, lineno, line) for a device path built by concatenating a variable
     (`"/dev/" + var` in C++ or Python, `"/dev/".$var` in PHP, `f"/dev/{var}"` in Python)
@@ -945,6 +996,27 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"https://example.com/install.sh && echo \"<sha256>  installer.sh\" | sha256sum -c "
                    f"&& bash installer.sh`, or install the dependency through a package manager FPP "
                    f"already has instead"))
+
+    # Same trust model as remote-exec, via git instead of a pipe: a `git clone` of
+    # a THIRD-PARTY repo (not the plugin's own srcURL) with no commit pin anywhere,
+    # so a reinstall/update tracks whatever's currently on that branch rather than
+    # a specific reviewed commit.
+    own_owner = own_repo = None
+    if info is not None and parse_github_repo is not None:
+        own_src = parse_github_repo(info.get("srcURL", "") or "")
+        if own_src:
+            own_owner, own_repo = own_src
+    hit = next(iter(_unpinned_third_party_clone_hits(root, own_owner, own_repo)), None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "unpinned-third-party-clone",
+                   f"clones a third-party repo with no commit pin anywhere in the file "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`) - if that cloned code is imported or executed (verify "
+                   f"this by hand; a static check can't prove it either way), a reinstall or update "
+                   f"silently picks up whatever is currently on that branch, not what was reviewed at "
+                   f"submission time - the same trust problem as `curl | bash`, just via git.\n"
+                   f"  - Pin to a specific commit (`git checkout <sha>` or `git reset --hard <sha>`) and "
+                   f"update that sha deliberately when you've reviewed the new code, instead of tracking "
+                   f"a floating branch"))
 
     # Reboots/shutdowns are an error. A bare reboot/shutdown only counts as a
     # command (start of line / after ;&| / sudo / then|do, in a shell script, or
@@ -1311,16 +1383,43 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
 
     # --- untrusted request data reaching a dangerous sink --------------------
 
-    # Direct case: $_GET/$_POST/$_REQUEST inside the same exec-family call.
-    hit = first(r'(exec|system|passthru|shell_exec|popen)\s*\([^)]*\$_(GET|POST|REQUEST)\b')
+    # Direct case: $_GET/$_POST/$_REQUEST inside the same exec-family call. `.*`
+    # rather than `[^)]*` so a nested call before the tainted var (e.g.
+    # `exec(dirname(__FILE__)."...$var...")`) doesn't break the match on its own
+    # closing paren - confirmed real gap (fpp-tirprog: three separately-tainted
+    # vars interpolated into a string built on top of a dirname() call).
+    hit = first(r'(exec|system|passthru|shell_exec|popen)\s*\(.*\$_(GET|POST|REQUEST)\b')
     if hit is None:
         # Indirect case: a variable assigned from $_GET/$_POST/$_REQUEST on one
-        # line, then that same variable passed into an exec-family call within
-        # the next few lines - catches the common "$cmd = ...$_POST...; ...
-        # exec($cmd);" two-step shape without needing real taint tracking.
+        # line, then that same variable reaches an exec-family call within the
+        # next few lines - catches the common "$cmd = ...$_POST...; ... exec($cmd);"
+        # two-step shape without needing real taint tracking. `.*` (not anchored
+        # to right after the opening paren) so the tainted var can be interpolated
+        # ANYWHERE inside a larger string/call, not just be the sink's sole/first
+        # argument - confirmed real gap (fpp-tirprog again: exec()'s first token is
+        # dirname(__FILE__), with three tainted vars interpolated further into the
+        # string). Window widened from the function's own default (6) to 10 for
+        # the same case: 3 separate one-var-per-line assignments before a single
+        # combined exec() a few lines later needs more slack than a typical
+        # single-assignment-then-sink pair.
         hit = next(iter(_assign_then_sink(
             root, r'\$_(?:GET|POST|REQUEST)\b',
-            r'(exec|system|passthru|shell_exec|popen)\s*\(\s*\$%s\b')), None)
+            r'(exec|system|passthru|shell_exec|popen)\s*\(.*\$%s\b', window=10)), None)
+    if hit is None:
+        # Setting-mediated case: a plugin setting (ReadSettingFromFile()/
+        # $pluginSettings[...], FPP's own persisted-config-read APIs) assigned to a
+        # variable that then reaches the same sink. Functionally just as
+        # attacker-controlled as $_POST (nothing validates it server-side beyond
+        # whatever the save form offers), but invisible to a check that only
+        # recognizes the request superglobals - confirmed real gap (catalog-wide
+        # audit, 2026-08: silent on FPP-Plugin-RDS-To-Matrix, FPP-Plugin-Switcher).
+        # Same single-hop limit as the two cases above: a setting read into one
+        # variable that then flows through a SECOND intermediate variable (e.g.
+        # explode() into a loop variable) before reaching the sink still isn't
+        # traced - real taint tracking would be needed for that, not a regex.
+        hit = next(iter(_assign_then_sink(
+            root, r'(?:ReadSettingFromFile\s*\(|\$pluginSettings\s*\[)',
+            r'(exec|system|passthru|shell_exec|popen)\s*\(.*\$%s\b', window=10)), None)
     # Node/Express case: exec/execSync fed by req.query/req.body/req.params/... .
     if hit is None:
         hit = next(iter(_js_exec_injection_hits(root)), None)
@@ -1360,6 +1459,12 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         or first(r'file_get_contents\s*\([^;\n]*https?://[^;\n]*\$_(GET|POST|REQUEST)\b') \
         or first(r'file_get_contents\s*\([^;\n]*\$_(GET|POST|REQUEST)[^;\n]*https?://') \
         or next(iter(_js_ssrf_hits(root)), None)
+    if hit is None:
+        # Setting-mediated case, same reasoning as exec-injection's addition above -
+        # a plugin setting assigned to a variable that later builds a curl target.
+        hit = next(iter(_assign_then_sink(
+            root, r'(?:ReadSettingFromFile\s*\(|\$pluginSettings\s*\[)',
+            r'(?:CURLOPT_URL\s*,|curl_init\s*\()[^\n]*\$%s\b', window=10)), None)
     if hit:
         out.append(Finding(BLOCKER, "ssrf",
                    f"outbound request URL/host built from request data ({hit[0]}:{hit[1]}: "
