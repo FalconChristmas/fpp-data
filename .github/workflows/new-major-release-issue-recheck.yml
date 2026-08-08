@@ -273,12 +273,9 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number,
                 body: `Rechecked (${summary}) - flagged for manual review at the owner's request via ` +
                       `\`/submit\`. Reason given:${quoted}${committerNote}${stillNotCompatNote}` });
-            } else if (r.certified && r.num_blocker > 0) {
-              await github.rest.issues.createComment({ owner, repo, issue_number,
-                body: `Rechecked - declares FPP ${target} compatibility, but still has ${r.num_blocker} ` +
-                      `blocker issues that must be fixed. See the updated report above.` });
             }
-            // Otherwise (not ready, no /submit, no blockers to call out specifically): the
-            // fresh report comment posted above already covers it in full, right down to
-            // the same /submit-or-/recheck guidance in its own footer - a second comment
-            // here would just restate that, so skip it (2026-08-08 decision).
+            // Otherwise (not ready, no /submit): the fresh report comment posted above
+            // already covers it in full - compatibility status, the 🛑-badged blocker
+            // findings themselves (if any), and the same /submit-or-/recheck guidance in
+            // its own footer - a second comment here would just restate what's already
+            // one comment up, so skip it (2026-08-08 decision).
