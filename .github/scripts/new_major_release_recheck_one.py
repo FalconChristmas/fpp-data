@@ -64,7 +64,8 @@ def main():
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump({"found": True, "result": r, "body": issue_body(r, args.target_major, draft=False)}, f, indent=2)
 
-    print(f"{r['status']}: B{r['num_blocker']} P{r['num_best_practice']} O{r['num_optional']}"
+    print(f"{r['status']}: {r['num_blocker']} blockers, {r['num_best_practice']} best-practice, "
+          f"{r['num_optional']} optional"
           f"{'' if r['linted'] else '  (no clone - metadata only)'}")
     return 0
 

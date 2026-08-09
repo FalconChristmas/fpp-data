@@ -224,10 +224,12 @@ jobs:
 
               // No verified way yet to identify this repo's actual maintainers (see
               // the earlier discussion on getCollaboratorPermissionLevel vs a full
-              // collaborators list) - mention, NOT @-mention, the last 5 unique
-              // committers to fpp-data-ci itself as a stand-in until that's resolved.
-              // This is the repo the workflow runs in, so listCommits needs no
-              // special access beyond the default GITHUB_TOKEN.
+              // collaborators list) - @-mention the last 5 unique committers to
+              // fpp-data-ci itself as a stand-in until that's resolved. This does
+              // send them a real GitHub notification (2026-08-09 decision, traded
+              // off against the risk of pinging a recent committer who isn't
+              // actually a maintainer). This is the repo the workflow runs in, so
+              // listCommits needs no special access beyond the default GITHUB_TOKEN.
               let committerNote = '';
               try {
                 const { data: commits } = await github.rest.repos.listCommits({ owner, repo, per_page: 30 });
@@ -239,7 +241,7 @@ jobs:
                   if (seen.length >= 5) break;
                 }
                 if (seen.length) {
-                  const names = seen.map(l => `\`${l}\``).join(', ');
+                  const names = seen.map(l => `@${l}`).join(', ');
                   committerNote = `\n\n${names} - please take a look.`;
                 }
               } catch (e) { /* best-effort only - don't fail the recheck over this */ }

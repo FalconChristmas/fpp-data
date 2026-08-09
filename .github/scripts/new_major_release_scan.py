@@ -456,7 +456,8 @@ def main():
         with open(os.path.join(args.out, "issues", f"{r['name']}.md"), "w", encoding="utf-8") as f:
             f.write(issue_body(r, args.target_major))
         print(f"{ICON.get(r['status'],'')} {r['name']:34} {r['status']:13} "
-              f"B{r['num_blocker']} P{r['num_best_practice']} O{r['num_optional']}"
+              f"{r['num_blocker']} blockers, {r['num_best_practice']} best-practice, "
+              f"{r['num_optional']} optional"
               f"{'' if r['linted'] else '  (no clone - metadata only)'}")
 
     with open(os.path.join(args.out, "dashboard.md"), "w", encoding="utf-8") as f:
