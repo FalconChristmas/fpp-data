@@ -106,6 +106,14 @@ def main():
     ap.add_argument("--schema", required=True)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--force", action="store_true",
+                     help="Recheck every open tracking issue regardless of new commits. "
+                          "One-off remediation tool: use after a bug in reconcile mode let "
+                          "status:compatible get set from a metadata-only pass without a real "
+                          "lint (see .wolf/cerebrum.md 2026-08-10) - re-verifies every open "
+                          "issue with a genuine clone+lint pass and corrects labels/comments "
+                          "that were wrong. Not for routine use; the commit-gated path above "
+                          "is what the daily workflow runs.")
     args = ap.parse_args()
 
     repo = os.environ.get("GITHUB_REPOSITORY")
@@ -143,7 +151,7 @@ def main():
                                 f"?per_page=100", token)
         since = last_checkpoint(issue, comments, name, target)
 
-        if not has_new_commits(r["owner"], r["repo"], since, token):
+        if not args.force and not has_new_commits(r["owner"], r["repo"], since, token):
             noop += 1
             continue
 
@@ -169,8 +177,11 @@ def main():
         # report itself already carries the full findings and, when ready_to_close,
         # its own "🎉 Congratulations ... A maintainer will review and close this
         # issue" note - nothing left worth saying twice.
-        report = (f"🔄 Auto-rechecked after detecting new commits since the last check.\n\n"
-                  + issue_body(fresh, target, draft=False))
+        trigger_note = ("🔄 Forced recheck (remediation sweep) - re-verifying with a real "
+                         "clone+lint pass after a bug let status be set from a metadata-only "
+                         "scan without one." if args.force else
+                         "🔄 Auto-rechecked after detecting new commits since the last check.")
+        report = trigger_note + "\n\n" + issue_body(fresh, target, draft=False)
         _req("POST", f"{API}/repos/{repo}/issues/{issue['number']}/comments", token,
              {"body": report})
 

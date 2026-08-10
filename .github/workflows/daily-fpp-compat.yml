@@ -19,13 +19,26 @@
 # The compatibility re-evaluation step below runs the new-major-release scanner in
 # metadata-only mode (no --plugins-dir), so it's fast. TARGET_MAJOR comes from the
 # repo variable NEW_MAJOR_RELEASE_TARGET_MAJOR (default 10).
-
+#
+# force_recheck (manual workflow_dispatch input only, default false): passes --force
+# to new_major_release_auto_recheck.py so it clone+lints and reports on EVERY open
+# tracking issue, not just ones with new commits since their last check - a one-off
+# remediation sweep, not something the schedule ever sets. Added 2026-08-10 after a
+# reconcile-mode bug (fixed same day, see new_major_release_sync_issues.py) let
+# status:compatible get set from a metadata-only pass without ever confirming lint
+# findings were resolved; this input is how a maintainer re-verifies the backlog of
+# issues that bug mislabeled, via `gh workflow run` with force_recheck=true.
 name: ZZ - Automation - Daily FPP compatibility check
 
 on:
   schedule:
     - cron: "17 6 * * *"   # 06:17 UTC daily
   workflow_dispatch:
+    inputs:
+      force_recheck:
+        description: "Force clone+lint recheck of every open tracking issue (one-off remediation, not for routine use)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -76,7 +89,8 @@ jobs:
             --summary out/summary.json \
             --plugin-list pluginList.json \
             --target-major "$TARGET_MAJOR" \
-            --schema .github/schema/pluginInfo.schema.json
+            --schema .github/schema/pluginInfo.schema.json \
+            ${{ github.event.inputs.force_recheck == 'true' && '--force' || '' }}
 
       - name: Nudge, then escalate, stale tracking issues with no reply
         env:

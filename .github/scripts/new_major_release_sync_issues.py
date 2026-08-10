@@ -125,6 +125,18 @@ def main():
             # replace (see --mode create's own note on this below).
             if iss:
                 new_status_label = f"status:{r['status']}"
+                # "compatible" means ready_to_close, which requires num_best_practice==0
+                # - but best-practice findings mostly come from the static lint pass
+                # (lint_plugin_dir), which needs a clone. This reconcile scan is
+                # metadata-only (r["linted"] is False), so it never sees those findings
+                # and would rubber-stamp "compatible" just because versions[] still
+                # declares the target major - even if real lint findings (e.g.
+                # no-restart-flag) were never actually fixed. Only a genuine clone+lint
+                # pass (auto_recheck, or a human's /recheck) may grant "compatible";
+                # this metadata-only pass leaves the existing label alone instead.
+                if new_status_label == "status:compatible" and not r.get("linted"):
+                    noop += 1
+                    continue
                 current_status_labels = [
                     l["name"] for l in (iss.get("labels") or [])
                     if isinstance(l, dict) and (l.get("name") or "").startswith("status:")]
