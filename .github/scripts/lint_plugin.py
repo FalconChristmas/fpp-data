@@ -85,6 +85,15 @@ def _read(path: str) -> str:
 
 _VENDOR_DIRS = ("/vendor/", "/vendored/", "/node_modules/", "/third_party/", "/thirdparty/")
 
+# Matches creating or activating a Python virtualenv, under any directory
+# name (venv, .venv, env, ...) and via either stdlib venv or uv's venv
+# subcommand - used to exempt pip installs that are scoped to a plugin's own
+# venv (not the system interpreter) from the PEP 668 --break-system-packages
+# check below, which only applies to the externally-managed system pip.
+_VENV_MARKER_RX = re.compile(
+    r'\bpython3?\s+-m\s+venv\b|\bvirtualenv\b|\buv\s+venv\b|/bin/activate\b|\bVIRTUAL_ENV\b',
+    re.I)
+
 
 def _grep(root, pattern, exts=SCRIPT_EXT, flags=re.I):
     """Yield (relpath, lineno, line) for a regex over code files, skipping docs and
@@ -1075,13 +1084,26 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # pip install --system` hits the identical PEP 668 refusal and needs the
     # same flag, confirmed directly against a real system.)
     #
+    # PEP 668 only guards the system-managed interpreter - a pip running
+    # inside a venv the plugin created itself isn't "externally managed" and
+    # doesn't need (or accept) the flag at all. Confirmed real, not
+    # hypothetical: fpp-plugin-tplink (`python3 -m venv env` + `source
+    # env/bin/activate` + `env/bin/pip install python-kasa`) and
+    # fpp-performance-capture (`python3 -m venv "$PLUGIN_DIR/venv"` /
+    # `uv venv` + `uv pip install --python .../venv/bin/python`) both got
+    # blocked here despite never touching the system interpreter. Detected
+    # file-wide (like the escapeString check above) rather than by a nearby-
+    # line window, since venv setup commonly happens far earlier in the
+    # script than the actual install call.
+    #
     # Checks each `pip install` hit individually, not just the first one in
     # the tree (`first()` alone would miss a bare `pip install` anywhere after
     # an earlier, compliant `pip install --break-system-packages` line - a
     # real false-negative gap, not hypothetical, worth closing now that this
     # is a BLOCKER rather than a BEST_PRACTICE).
     hit = next((h for h in _grep(root, r'\bpip3?\s+install\b')
-                if "--break-system-packages" not in h[2]), None)
+                if "--break-system-packages" not in h[2]
+                and not _VENV_MARKER_RX.search(_read(os.path.join(root, h[0])))), None)
     if hit:
         out.append(Finding(BLOCKER, "pip-install",
                    f"installs Python packages with pip but no --break-system-packages "
