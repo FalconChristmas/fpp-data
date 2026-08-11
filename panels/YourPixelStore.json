@@ -82,6 +82,10 @@
                 "panelOutputOrder": false,
                 "panelOutputBlankRow": false,
                 "panelInterleave": "4z"
+            },
+            "BBShiftPanel-v10": {
+                "panelType": 3,
+                "panelAddressing": 0
             }
         }
     }
