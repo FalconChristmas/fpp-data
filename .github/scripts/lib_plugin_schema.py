@@ -272,6 +272,66 @@ def gh_get_repo(owner: str, repo: str, token: Optional[str]) -> tuple[Optional[d
         return None, str(e)
 
 
+# Hidden marker new_major_release_scan.issue_body() puts atop every tracking issue
+# (and every recheck report comment), identifying which plugin it's for:
+#   <!-- plugin:<name> repo:<owner>/<repo> new_major_release:fpp<major> -->
+# `repo:` is optional for backward compat with markers written before it existed.
+PLUGIN_MARKER_RE = re.compile(
+    r"<!--\s*plugin:(\S+?)(?:\s+repo:([^/\s]+)/(\S+?))?\s+new_major_release:fpp(\d+)\s*-->")
+
+
+def parse_plugin_marker(body: str) -> Optional[tuple[str, Optional[str], Optional[str], int]]:
+    """Parse the first `<!-- plugin:... -->` marker in `body`.
+
+    Returns (name, owner, repo, target_major) - owner/repo are None for an
+    old-format marker with no `repo:` token - or None if no marker is present.
+    """
+    m = PLUGIN_MARKER_RE.search(body or "")
+    if not m:
+        return None
+    name, owner, repo, target = m.groups()
+    return name, owner, repo, int(target)
+
+
+def resolve_renamed_repo(owner: str, repo: str, token: Optional[str]) -> Optional[tuple[str, str]]:
+    """Follow GitHub's repo-rename redirect for `owner/repo` and return the CURRENT
+    (owner, repo), or None if the lookup fails (deleted, private, rate-limited, ...).
+
+    Used to re-identify a tracking issue's plugin after its repo was renamed on
+    GitHub (owner and/or repo name changed) out from under a marker recorded at
+    issue-creation time - `GET /repos/{owner}/{repo}` transparently redirects to
+    the repo's current location even for its old name.
+    """
+    info, _ = gh_get_repo(owner, repo, token)
+    full_name = (info or {}).get("full_name") or ""
+    if "/" not in full_name:
+        return None
+    cur_owner, _, cur_repo = full_name.partition("/")
+    return (cur_owner, cur_repo) if cur_owner and cur_repo else None
+
+
+def adopt_renamed_issue(req, api_base: str, repo: str, issue: dict, old_name: str,
+                         new_name: str, new_owner: str, new_repo: str, target: int) -> None:
+    """Retitle and re-marker a tracking issue whose plugin was renamed, so the
+    existing thread/history is picked back up under its new pluginList.json name
+    instead of sitting orphaned (see resolve_renamed_repo). `req` is the caller's
+    own `req(method, url, body=None)` HTTP helper, already bound to its token -
+    each of the three consumers (sync_issues, auto_recheck, recheck_one) defines
+    one with the same shape, so it's passed in rather than duplicated here.
+
+    Mutates `issue["body"]` in place so the caller can keep using the same dict
+    for the rest of its own processing without re-fetching.
+    """
+    new_marker = f"<!-- plugin:{new_name} repo:{new_owner}/{new_repo} new_major_release:fpp{target} -->"
+    new_body = PLUGIN_MARKER_RE.sub(new_marker, issue.get("body") or "", count=1)
+    new_title = f"[FPP {target}] {new_name} - compatibility & plugin check"
+    req("PATCH", f"{api_base}/repos/{repo}/issues/{issue['number']}", {"title": new_title, "body": new_body})
+    req("POST", f"{api_base}/repos/{repo}/issues/{issue['number']}/comments",
+        {"body": f"🔁 Renamed `{old_name}` → `{new_name}` "
+                 f"(https://github.com/{new_owner}/{new_repo}) - continuing here."})
+    issue["body"] = new_body
+
+
 def gh_list_branches(owner: str, repo: str, token: Optional[str],
                       max_pages: int = 5) -> tuple[Optional[set[str]], Optional[str]]:
     """All branch names on owner/repo, or (None, error) on failure.

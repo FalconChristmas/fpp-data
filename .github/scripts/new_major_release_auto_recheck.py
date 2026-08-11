@@ -19,6 +19,10 @@ is the last known-good checkpoint. Only commits pushed after that checkpoint
 count as "new". This piggybacks on an existing signal instead of adding a
 second kind of marker to track and keep in sync.
 
+If a plugin's pluginList.json name no longer matches its issue's marker (renamed
+since the issue was created), the marker's repo: field is used to re-identify and
+adopt the issue under its new name - see lib_plugin_schema.resolve_renamed_repo.
+
 Usage:
   new_major_release_auto_recheck.py --summary out/summary.json \
       --plugin-list pluginList.json --target-major <n> \
@@ -30,14 +34,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import tempfile
 import urllib.parse
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lib_plugin_schema import load_pluginlist  # noqa: E402
+from lib_plugin_schema import (  # noqa: E402
+    adopt_renamed_issue, load_pluginlist, parse_plugin_marker, resolve_renamed_repo,
+)
 from new_major_release_scan import scan_plugin, issue_body  # noqa: E402
 from scan_submission import clone_repo  # noqa: E402
 
@@ -72,19 +77,21 @@ def list_tracking_issues(repo, token, label):
     return out
 
 
-def marker_re(name, target):
-    return re.compile(rf"<!--\s*plugin:{re.escape(name)}\s+new_major_release:fpp{target}\s*-->")
-
-
 def last_checkpoint(issue, comments, name, target):
     """ISO timestamp of the newest report (comment or the issue body itself)
     carrying this plugin's marker - the last time we know its actual state was
-    verified fresh."""
-    pat = marker_re(name, target)
+    verified fresh.
+
+    Matched by name only (not repo:) - a comment posted before a rename-adoption
+    still carries the pre-rename name, which is fine here since it's still the
+    same plugin's history; adoption itself rewrites the issue body's own marker
+    to the new name going forward.
+    """
     checkpoint = issue["created_at"]  # issue body always carries the marker
     for c in comments:
-        body = c.get("body") or ""
-        if pat.search(body) and c["created_at"] > checkpoint:
+        parsed = parse_plugin_marker(c.get("body") or "")
+        if (parsed and parsed[0] == name and parsed[3] == target
+                and c["created_at"] > checkpoint):
             checkpoint = c["created_at"]
     return checkpoint
 
@@ -125,6 +132,8 @@ def main():
         summary = json.load(f)
     target = args.target_major
     by_name = {p["name"]: p for p in summary["plugins"]}
+    by_repo = {(p["owner"].lower(), p["repo"].lower()): p
+               for p in summary["plugins"] if p.get("owner") and p.get("repo")}
 
     with open(args.schema, encoding="utf-8") as f:
         schema = json.load(f)
@@ -135,14 +144,31 @@ def main():
     if args.limit:
         issues = issues[: args.limit]
 
-    rechecked = skipped = noop = 0
+    rechecked = skipped = noop = adopted = 0
     for issue in issues:
-        body = issue.get("body") or ""
-        m = re.search(r"<!--\s*plugin:(\S+)\s+new_major_release:fpp(\d+)\s*-->", body)
-        if not m:
+        parsed = parse_plugin_marker(issue.get("body") or "")
+        if not parsed:
             continue
-        name = m.group(1)
+        name, m_owner, m_repo, _ = parsed
         r = by_name.get(name)
+        if not r and m_owner and m_repo:
+            # Plugin's listing name no longer matches this issue's marker - likely
+            # renamed (e.g. a reponame-mismatch fix) since the issue was created.
+            # Follow GitHub's rename redirect and re-match by current repo instead
+            # of leaving this issue to dead-end forever (see sync_issues.py's
+            # adoption block - same approach, done here too since auto-recheck can
+            # run standalone).
+            resolved = resolve_renamed_repo(m_owner, m_repo, token)
+            if resolved:
+                r = by_repo.get((resolved[0].lower(), resolved[1].lower()))
+                if r and r["name"] != name:
+                    if args.dry_run:
+                        print(f"[dry-run] ADOPT #{issue['number']} {name} -> {r['name']}")
+                    else:
+                        adopt_renamed_issue(lambda m, u, b=None: _req(m, u, token, b), API, repo,
+                                             issue, name, r["name"], resolved[0], resolved[1], target)
+                    name = r["name"]
+                    adopted += 1
         if not r or not r.get("owner") or not r.get("repo"):
             skipped += 1
             continue
@@ -201,7 +227,7 @@ def main():
         rechecked += 1
 
     print(f"\nauto-recheck target=fpp{target} dry_run={args.dry_run} :: "
-          f"rechecked {rechecked}, skipped {skipped}, noop {noop}")
+          f"rechecked {rechecked}, skipped {skipped}, noop {noop}, adopted {adopted}")
 
 
 if __name__ == "__main__":

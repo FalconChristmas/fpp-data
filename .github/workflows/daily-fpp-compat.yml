@@ -156,7 +156,12 @@ jobs:
               const dueDay = nextN * REMINDER_INTERVAL_DAYS;
               if (ageDays < dueDay) continue;
 
-              const m = (issue.body || '').match(/<!--\s*plugin:(\S+)\s+new_major_release:fpp(\d+)\s*-->/);
+              // repo: is optional (added so a renamed plugin's tracking issue can be
+              // re-identified - see lib_plugin_schema.resolve_renamed_repo). By the
+              // time this step runs, the earlier reconcile/auto-recheck steps above
+              // have already adopted (retitled + re-marked) any renamed plugin's
+              // issue for real, so pluginName here is always current.
+              const m = (issue.body || '').match(/<!--\s*plugin:(\S+?)(?:\s+repo:[^/\s]+\/\S+?)?\s+new_major_release:fpp(\d+)\s*-->/);
               const pluginName = m ? m[1] : null;
               const plugin = pluginName ? byName.get(pluginName.toLowerCase()) : null;
 

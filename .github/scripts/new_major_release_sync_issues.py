@@ -2,7 +2,10 @@
 
 Reads summary.json (produced by new_major_release_scan.py) and, for the current
 repo, keeps one tracking issue per plugin in sync. Idempotent: issues are matched by
-a hidden marker in the body, so re-runs update rather than duplicate.
+a hidden marker in the body, so re-runs update rather than duplicate. If a plugin's
+listing name changed (e.g. following a reponame-mismatch rename) since its issue was
+created, the marker's repo: field is used to re-identify and adopt that issue under
+its new name instead of orphaning it - see the adoption block in main().
 
 Modes:
   --mode create     create a missing issue, or update an existing one's body.
@@ -32,6 +35,7 @@ import os
 import urllib.error
 import urllib.request
 
+from lib_plugin_schema import adopt_renamed_issue, parse_plugin_marker, resolve_renamed_repo
 from new_major_release_scan import issue_body
 
 API = "https://api.github.com"
@@ -97,12 +101,46 @@ def main():
     existing = {} if args.dry_run else {}
     if not args.dry_run:
         for iss in list_new_major_release_issues(repo, token, label):
-            marker = f"<!-- plugin:"
-            body = iss.get("body") or ""
-            if marker in body:
-                # marker line is: <!-- plugin:<name> new_major_release:fpp<major> -->
-                nm = body.split("<!-- plugin:", 1)[1].split()[0]
-                existing[nm] = iss
+            parsed = parse_plugin_marker(iss.get("body") or "")
+            if parsed:
+                existing[parsed[0]] = iss
+
+    # Adopt renamed plugins: an issue whose marker name is no longer in
+    # pluginList.json (e.g. the maintainer renamed the repo following a
+    # reponame-mismatch lint finding) would otherwise sit orphaned forever -
+    # /recheck dead-ends, reconcile can't find it to relabel, and the next
+    # --mode create run opens a duplicate. If the marker recorded a repo: (added
+    # alongside this adoption logic - older markers predate it and can't be
+    # resolved this way), follow GitHub's rename redirect for that owner/repo and
+    # match it against each current plugin's own owner/repo. On a hit, retitle
+    # the issue, rewrite its marker to the new name, and comment - same thread,
+    # same history, just re-pointed - so it's picked up under its new name by the
+    # per-plugin loop below in this same run.
+    adopted = 0
+    if not args.dry_run:
+        current_names = {r["name"].lower() for r in plugins}
+        current_by_repo = {(r["owner"].lower(), r["repo"].lower()): r
+                            for r in plugins if r.get("owner") and r.get("repo")}
+        for old_name in [n for n in list(existing) if n.lower() not in current_names]:
+            iss = existing[old_name]
+            parsed = parse_plugin_marker(iss.get("body") or "")
+            if not parsed:
+                continue
+            _, m_owner, m_repo, _ = parsed
+            if not m_owner or not m_repo:
+                continue
+            resolved = resolve_renamed_repo(m_owner, m_repo, token)
+            if not resolved:
+                continue
+            target_r = current_by_repo.get((resolved[0].lower(), resolved[1].lower()))
+            if not target_r or target_r["name"].lower() == old_name.lower():
+                continue
+            new_name = target_r["name"]
+            adopt_renamed_issue(lambda m, u, b=None: _req(m, u, token, b), API, repo, iss,
+                                 old_name, new_name, resolved[0], resolved[1], target)
+            del existing[old_name]
+            existing[new_name] = iss
+            adopted += 1
 
     created = updated = relabeled = noop = 0
     for r in plugins:
@@ -181,7 +219,7 @@ def main():
             created += 1
 
     print(f"\nmode={args.mode} dry_run={args.dry_run} :: "
-          f"created {created}, updated {updated}, relabeled {relabeled}, noop {noop}")
+          f"created {created}, updated {updated}, relabeled {relabeled}, noop {noop}, adopted {adopted}")
 
 
 if __name__ == "__main__":

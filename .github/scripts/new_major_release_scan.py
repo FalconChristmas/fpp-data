@@ -259,7 +259,11 @@ ICON = {"compatible": "✅", "needs-update": "🔧", "needs-fixes": "🔨", "unm
 
 def issue_body(r, target, draft=True, mention_owner=False):
     L = []
-    L.append(f"<!-- plugin:{r['name']} new_major_release:fpp{target} -->")
+    # repo: lets a renamed plugin's tracking issue be re-identified later even
+    # after its pluginList.json listing name changes - see
+    # lib_plugin_schema.resolve_renamed_repo() and its callers.
+    repo_tag = f" repo:{r['owner']}/{r['repo']}" if r.get("owner") and r.get("repo") else ""
+    L.append(f"<!-- plugin:{r['name']}{repo_tag} new_major_release:fpp{target} -->")
     if draft:
         L.append(f"> **DRY RUN - draft only. The maintainer has NOT been notified.**")
         L.append("")

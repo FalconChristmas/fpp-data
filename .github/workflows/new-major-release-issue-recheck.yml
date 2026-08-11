@@ -56,9 +56,14 @@ jobs:
         with:
           script: |
             const body = context.payload.issue.body || '';
-            const m = body.match(/<!--\s*plugin:(\S+)\s+new_major_release:fpp(\d+)\s*-->/);
+            // repo: is optional (absent on markers written before it existed) - used to
+            // re-identify this plugin if it's since been renamed (see
+            // lib_plugin_schema.resolve_renamed_repo in the fpp-data-ci scripts).
+            const m = body.match(/<!--\s*plugin:(\S+?)(?:\s+repo:([^/\s]+)\/(\S+?))?\s+new_major_release:fpp(\d+)\s*-->/);
             core.setOutput('name', m ? m[1] : '');
-            core.setOutput('target', m ? m[2] : '');
+            core.setOutput('marker_owner', m && m[2] ? m[2] : '');
+            core.setOutput('marker_repo', m && m[3] ? m[3] : '');
+            core.setOutput('target', m ? m[4] : '');
 
             // Word-boundary match, not substring - the job-level `if:` above is only a
             // coarse pre-filter that also matches e.g. "/recheck_dont_actually_check".
@@ -76,11 +81,14 @@ jobs:
           # since ${{ }} splices raw text before bash parses it (see
           # bug-fpp-data-ci-actions-script-injection-repo-name in .wolf/buglog.json).
           REPO_NAME: ${{ steps.extract.outputs.name }}
+          MARKER_OWNER: ${{ steps.extract.outputs.marker_owner }}
+          MARKER_REPO: ${{ steps.extract.outputs.marker_repo }}
           # Lifts gh_get_contributors()'s rate limit from 60/hr (anonymous) to 5000/hr.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python .github/scripts/resolve_plugin_owner.py \
-            --plugin-list pluginList.json --repo-name "$REPO_NAME"
+            --plugin-list pluginList.json --repo-name "$REPO_NAME" \
+            --marker-owner "$MARKER_OWNER" --marker-repo "$MARKER_REPO"
 
       - name: Restrict /recheck and /submit to that owner
         id: authz
@@ -150,11 +158,14 @@ jobs:
           # REPO_NAME/TARGET_MAJOR trace back to attacker-influenceable issue-body text --
           # pass via env/$VAR rather than ${{ }}-interpolated directly into the script.
           REPO_NAME: ${{ steps.extract.outputs.name }}
+          MARKER_OWNER: ${{ steps.extract.outputs.marker_owner }}
+          MARKER_REPO: ${{ steps.extract.outputs.marker_repo }}
           TARGET_MAJOR: ${{ steps.extract.outputs.target }}
         run: |
           python .github/scripts/new_major_release_recheck_one.py \
             --plugin-list pluginList.json \
             --repo-name "$REPO_NAME" \
+            --marker-owner "$MARKER_OWNER" --marker-repo "$MARKER_REPO" \
             --target-major "$TARGET_MAJOR" \
             --schema .github/schema/pluginInfo.schema.json \
             --out recheck-result.json
@@ -180,11 +191,36 @@ jobs:
             const command = process.env.COMMAND;
 
             if (!data.found) {
+              // new_major_release_recheck_one.py already tried resolving a possible
+              // rename via the marker's repo: field before giving up - a genuine miss
+              // here means the plugin is actually gone from pluginList.json, not just
+              // renamed, so point at the removal flow instead of a dead end.
               await github.rest.issues.createComment({ owner, repo, issue_number,
-                body: `⚠️ \`${pluginName}\` is no longer in \`pluginList.json\` - nothing to recheck.` });
+                body: `⚠️ \`${pluginName}\` is no longer in \`pluginList.json\` and its repo could not be ` +
+                      `re-resolved to a current listing - if it was removed, see ` +
+                      `https://falconchristmas.github.io/fpp-data/submit_remove_plugin/ for the removal flow; ` +
+                      `if it was renamed, a maintainer will need to update this issue's marker by hand.` });
               return;
             }
             const r = data.result;
+
+            if (data.resolved_name && data.resolved_name !== pluginName) {
+              // Renamed since this issue's marker was written (e.g. following a
+              // reponame-mismatch lint fix) - retitle + rewrite the marker so this
+              // same thread keeps working under the new name, instead of leaving the
+              // issue orphaned under a name pluginList.json no longer has.
+              const newMarker = `<!-- plugin:${data.resolved_name} repo:${r.owner}/${r.repo} ` +
+                                 `new_major_release:fpp${target} -->`;
+              const newBody = (context.payload.issue.body || '').replace(
+                /<!--\s*plugin:\S+?(?:\s+repo:[^/\s]+\/\S+?)?\s+new_major_release:fpp\d+\s*-->/,
+                newMarker);
+              await github.rest.issues.update({ owner, repo, issue_number,
+                title: `[FPP ${target}] ${data.resolved_name} - compatibility & plugin check`,
+                body: newBody });
+              await github.rest.issues.createComment({ owner, repo, issue_number,
+                body: `🔁 Renamed \`${pluginName}\` → \`${data.resolved_name}\` ` +
+                      `(https://github.com/${r.owner}/${r.repo}) - continuing here.` });
+            }
 
             // Post the up-to-date report as a FRESH comment on every /recheck, rather
             // than editing the original issue body in place - so each recheck visibly

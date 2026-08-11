@@ -13,7 +13,15 @@ maintainer_candidates: fpp-data-ci's token has no standing to query real collabo
 permissions on a repo it doesn't own, so this is strong evidence, not a literal
 permissions check.
 
+If --repo-name isn't in pluginList.json (e.g. the plugin was renamed since the
+tracking issue was created) and --marker-owner/--marker-repo are given (from the
+issue marker's `repo:` field), falls back to resolving the rename via GitHub's
+redirect and matching pluginList.json by current repo instead of giving up -
+otherwise a renamed plugin's own maintainer could never pass authz on its own
+tracking issue again.
+
 Usage: resolve_plugin_owner.py --plugin-list pluginList.json --repo-name <name>
+  [--marker-owner <owner> --marker-repo <repo>]
 Writes `owner` (empty if unresolvable) and `contributors` (comma-separated logins,
 empty if none) to $GITHUB_OUTPUT.
 """
@@ -27,20 +35,39 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib_plugin_schema import (  # noqa: E402
     fetch_json, gh_get_maintainer_candidates, load_pluginlist, parse_github_repo,
+    resolve_renamed_repo,
 )
+
+
+def find_entry(entries, repo_name, marker_owner, marker_repo, token):
+    entry = next((e for e in entries if e and e[0].lower() == repo_name.lower()), None)
+    if entry or not (marker_owner and marker_repo):
+        return entry
+    resolved = resolve_renamed_repo(marker_owner, marker_repo, token)
+    if not resolved:
+        return None
+    for e in entries:
+        info_url = e[1] if len(e) > 1 else None
+        info, _ = fetch_json(info_url) if info_url else (None, None)
+        src = parse_github_repo((info or {}).get("srcURL", "") or "")
+        if src and src[0].lower() == resolved[0].lower() and src[1].lower() == resolved[1].lower():
+            return e
+    return None
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--plugin-list", required=True)
     ap.add_argument("--repo-name", required=True)
+    ap.add_argument("--marker-owner", default="")
+    ap.add_argument("--marker-repo", default="")
     args = ap.parse_args()
 
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     owner = ""
     contributors: list[str] = []
-    entry = next((e for e in load_pluginlist(args.plugin_list)
-                  if e and e[0].lower() == args.repo_name.lower()), None)
+    entry = find_entry(load_pluginlist(args.plugin_list), args.repo_name,
+                        args.marker_owner, args.marker_repo, token)
     if entry:
         info_url = entry[1] if len(entry) > 1 else None
         info, _ = fetch_json(info_url) if info_url else (None, None)
