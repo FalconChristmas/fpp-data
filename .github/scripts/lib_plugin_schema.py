@@ -8,6 +8,8 @@ slow/dead host can't hang the CI job.
 from __future__ import annotations
 
 import json
+import os
+import random
 import re
 import urllib.error
 import urllib.request
@@ -18,6 +20,22 @@ import jsonschema
 
 USER_AGENT = "fpp-data-plugin-ci"
 HTTP_TIMEOUT = 15  # seconds - generous for CI, still bounded
+
+
+def safe_plugin_name(name: str) -> bool:
+    """True iff `name` (a pluginList.json entry name, from external-author PRs) is
+    safe to use as a single path segment - no separators, no ".."/".", not absolute.
+
+    Every script that turns an entry name into a filesystem path (clone_plugins.py's
+    clone destination, new_major_release_scan.py's per-plugin issue file) must gate
+    on this first - the name never gets a second sanitization pass once it's in hand,
+    so this is the one place that decides.
+    """
+    return bool(
+        name and name not in (".", "..")
+        and "/" not in name and "\\" not in name
+        and not os.path.isabs(name)
+    )
 
 # This CI NEVER @-mentions an author (see new_major_release_sync_issues.py,
 # new_major_release_scan.py) -- bulk scans pinging authors would be spam. verify_remove_plugin.py's
@@ -178,6 +196,25 @@ def filter_by_owner(entries: list, only_owner: Optional[str]) -> list:
     return out
 
 
+def apply_limit(entries: list, limit: int, seed: Optional[str] = None) -> list:
+    """Cut `entries` down to `limit`, either the first N (default, unchanged
+    behavior) or a random N (when `seed` is given).
+
+    `seed` is a string (e.g. a GitHub Actions run ID) shared across every script
+    invoked in the same workflow run - clone_plugins.py and
+    new_major_release_scan.py both call this with the SAME entries (same
+    pluginList.json, same order) and the SAME seed, so `random.Random(seed)`
+    independently produces the identical subset in each process with no need to
+    pass the actual selection between steps. Falsy `limit` is a no-op (existing
+    behavior, unaffected either way).
+    """
+    if not limit:
+        return entries
+    if not seed:
+        return entries[:limit]
+    return random.Random(seed).sample(entries, min(limit, len(entries)))
+
+
 def schema_validation_error(info: dict, schema: dict) -> Optional[str]:
     """Validate pluginInfo.json against the schema. Returns a message, or None if valid.
 
@@ -233,6 +270,132 @@ def gh_get_repo(owner: str, repo: str, token: Optional[str]) -> tuple[Optional[d
         return None, f"HTTP {e.code}"
     except Exception as e:  # noqa: BLE001
         return None, str(e)
+
+
+# Hidden marker new_major_release_scan.issue_body() puts atop every tracking issue
+# (and every recheck report comment), identifying which plugin it's for:
+#   <!-- plugin:<name> repo:<owner>/<repo> new_major_release:fpp<major> -->
+# `repo:` is optional for backward compat with markers written before it existed.
+PLUGIN_MARKER_RE = re.compile(
+    r"<!--\s*plugin:(\S+?)(?:\s+repo:([^/\s]+)/(\S+?))?\s+new_major_release:fpp(\d+)\s*-->")
+
+
+def parse_plugin_marker(body: str) -> Optional[tuple[str, Optional[str], Optional[str], int]]:
+    """Parse the first `<!-- plugin:... -->` marker in `body`.
+
+    Returns (name, owner, repo, target_major) - owner/repo are None for an
+    old-format marker with no `repo:` token - or None if no marker is present.
+    """
+    m = PLUGIN_MARKER_RE.search(body or "")
+    if not m:
+        return None
+    name, owner, repo, target = m.groups()
+    return name, owner, repo, int(target)
+
+
+def resolve_renamed_repo(owner: str, repo: str, token: Optional[str]) -> Optional[tuple[str, str]]:
+    """Follow GitHub's repo-rename redirect for `owner/repo` and return the CURRENT
+    (owner, repo), or None if the lookup fails (deleted, private, rate-limited, ...).
+
+    Used to re-identify a tracking issue's plugin after its repo was renamed on
+    GitHub (owner and/or repo name changed) out from under a marker recorded at
+    issue-creation time - `GET /repos/{owner}/{repo}` transparently redirects to
+    the repo's current location even for its old name.
+    """
+    info, _ = gh_get_repo(owner, repo, token)
+    full_name = (info or {}).get("full_name") or ""
+    if "/" not in full_name:
+        return None
+    cur_owner, _, cur_repo = full_name.partition("/")
+    return (cur_owner, cur_repo) if cur_owner and cur_repo else None
+
+
+def adopt_renamed_issue(req, api_base: str, repo: str, issue: dict, old_name: str,
+                         new_name: str, new_owner: str, new_repo: str, target: int) -> None:
+    """Retitle and re-marker a tracking issue whose plugin was renamed, so the
+    existing thread/history is picked back up under its new pluginList.json name
+    instead of sitting orphaned (see resolve_renamed_repo). `req` is the caller's
+    own `req(method, url, body=None)` HTTP helper, already bound to its token -
+    each of the three consumers (sync_issues, auto_recheck, recheck_one) defines
+    one with the same shape, so it's passed in rather than duplicated here.
+
+    Mutates `issue["body"]` in place so the caller can keep using the same dict
+    for the rest of its own processing without re-fetching.
+    """
+    new_marker = f"<!-- plugin:{new_name} repo:{new_owner}/{new_repo} new_major_release:fpp{target} -->"
+    new_body = PLUGIN_MARKER_RE.sub(new_marker, issue.get("body") or "", count=1)
+    new_title = f"[FPP {target}] {new_name} - compatibility & plugin check"
+    req("PATCH", f"{api_base}/repos/{repo}/issues/{issue['number']}", {"title": new_title, "body": new_body})
+    req("POST", f"{api_base}/repos/{repo}/issues/{issue['number']}/comments",
+        {"body": f"🔁 Renamed `{old_name}` → `{new_name}` "
+                 f"(https://github.com/{new_owner}/{new_repo}) - continuing here."})
+    issue["body"] = new_body
+
+
+def gh_list_branches(owner: str, repo: str, token: Optional[str],
+                      max_pages: int = 5) -> tuple[Optional[set[str]], Optional[str]]:
+    """All branch names on owner/repo, or (None, error) on failure.
+
+    Paginated (100/page, up to max_pages) - plenty for any real plugin repo,
+    which realistically has a handful of branches, not hundreds. Returning
+    None (not an empty set) on failure matters: callers must treat "couldn't
+    ask GitHub" differently from "asked, and there are truly zero branches" -
+    the former should skip the branch-exists check, the latter should never
+    happen for a repo that cloned successfully.
+    """
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    names: set[str] = set()
+    for page in range(1, max_pages + 1):
+        api = f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100&page={page}"
+        try:
+            req = urllib.request.Request(api, headers=headers)
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            return None, f"HTTP {e.code}"
+        except Exception as e:  # noqa: BLE001
+            return None, str(e)
+        if not isinstance(data, list) or not data:
+            break
+        names.update(b["name"] for b in data if isinstance(b, dict) and b.get("name"))
+        if len(data) < 100:
+            break
+    return names, None
+
+
+def branch_findings(info: dict, existing_branches: Optional[set[str]]) -> list[tuple[str, str, str]]:
+    """BLOCKER per versions[] entry whose declared `branch` doesn't exist on the repo.
+
+    A nonexistent branch isn't a style nit - it's the exact shape of bug that
+    passes review invisibly: the submission/major-release scanners clone the repo's
+    DEFAULT branch to lint it (see clone_repo() in scan_submission.py, clone_target()
+    in clone_plugins.py's fallback), so a stale/typo'd `branch` in a versions[] entry
+    still lints clean here. The failure only surfaces later, at real end-user install
+    time, as FPP's git clone erroring "Remote branch <x> not found in upstream origin" -
+    silent in CI, loud in production. `existing_branches=None` (GitHub API unreachable
+    or rate-limited) means "couldn't verify" - skip silently rather than false-positive
+    a plugin whose branch is actually fine.
+    """
+    if existing_branches is None:
+        return []
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for v in info.get("versions") or []:
+        if not isinstance(v, dict):
+            continue
+        branch = (v.get("branch") or "").strip()
+        if not branch or branch in seen or branch in existing_branches:
+            continue
+        seen.add(branch)
+        out.append(("blocker", "branch-not-found",
+                    f"pluginInfo.json declares branch `{branch}` (versions[] entry for FPP "
+                    f"{v.get('minFPPVersion', '?')}-{v.get('maxFPPVersion') or 'latest'}), but no such "
+                    f"branch exists on the repo - installs of this version will fail with "
+                    f"\"Remote branch {branch} not found in upstream origin\". Fix the `branch` value "
+                    f"or push the missing branch."))
+    return out
 
 
 def gh_get_pr_merged_by(owner: str, repo: str, token: Optional[str],
@@ -371,6 +534,58 @@ def gh_get_maintainer_candidates(owner: str, repo: str, token: Optional[str],
     recent = [c for c in ordered if c[1][:10] >= cutoff]
     chosen = recent if len(recent) >= min_names else ordered[:max(min_names, len(recent))]
     return [login for login, _ in chosen[:max_names]]
+
+
+STALE_ISSUE_PR_AGE_MONTHS = 2   # age at which an open issue/PR counts as "stale"
+NEEDS_ATTENTION_MIN_STALE = 1   # stale issues+PRs needed to flag needs-attention (tune after real data)
+
+
+def gh_get_stale_issue_pr_stats(owner: str, repo: str, token: Optional[str]) -> Optional[dict]:
+    """Open issue/PR counts for owner/repo, split by staleness (open >=
+    STALE_ISSUE_PR_AGE_MONTHS). Returns
+    {"open_issues": int, "open_prs": int, "stale_issues": int, "stale_prs": int}
+    or None on failure (best-effort - caller treats None like "no signal").
+    Flagging itself (NEEDS_ATTENTION_MIN_STALE) is deliberately low: even a
+    single issue/PR sitting untouched for STALE_ISSUE_PR_AGE_MONTHS is treated
+    as a real signal, not noise - a healthy repo triages fast, so it's a
+    stronger indicator than counting raw open issues.
+
+    GitHub's /issues endpoint returns PRs too (each carries a "pull_request"
+    key); fetched separately from /pulls to split the two counts. One page
+    (100, sorted oldest-first) each - plenty for this repo's issue volume, and
+    sorting oldest-first means a repo with more than 100 open items still gets
+    an accurate stale count (the stale ones are the oldest, so they're on the
+    first page even if some non-stale ones get cut off).
+    """
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=STALE_ISSUE_PR_AGE_MONTHS * 30)).isoformat()
+
+    def _get(url):
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+
+    try:
+        issues = _get(f"https://api.github.com/repos/{owner}/{repo}/issues"
+                       f"?state=open&sort=created&direction=asc&per_page=100")
+        prs = _get(f"https://api.github.com/repos/{owner}/{repo}/pulls"
+                   f"?state=open&sort=created&direction=asc&per_page=100")
+    except Exception:  # noqa: BLE001 - best-effort; caller treats this like no data
+        return None
+    if not isinstance(issues, list) or not isinstance(prs, list):
+        return None
+
+    real_issues = [i for i in issues if isinstance(i, dict) and "pull_request" not in i]
+    stale_issues = sum(1 for i in real_issues if (i.get("created_at") or "") < cutoff)
+    stale_prs = sum(1 for p in prs if isinstance(p, dict) and (p.get("created_at") or "") < cutoff)
+    return {
+        "open_issues": len(real_issues),
+        "open_prs": len(prs),
+        "stale_issues": stale_issues,
+        "stale_prs": stale_prs,
+    }
 
 
 def list_open_issues(gh_repo: str, label: str, token: Optional[str]) -> list[dict]:

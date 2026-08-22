@@ -33,10 +33,11 @@ jobs:
     # - the extract step's word-boundary regex is the real, precise command parse. See
     # scan-new-submission.yml / remove-plugin-verify.yml, which had the exact same bug.
     #
-    # `state == 'open'` blocks /recheck and /submit once the tracking issue is closed
-    # (certified compatible) - nothing left to recheck once that's happened.
+    # Runs on closed tracking issues too (e.g. certified-compatible ones someone wants
+    # to re-verify) so there's a way to re-use that issue's thread instead of opening a
+    # new one - same allow-list as an open issue (see the authz step below); /recheck
+    # doesn't reopen the issue on its own either way.
     if: >-
-      github.event.issue.state == 'open' &&
       contains(github.event.issue.body, '<!-- plugin:') &&
       (contains(github.event.comment.body, '/recheck') || contains(github.event.comment.body, '/submit'))
     runs-on: ubuntu-latest
@@ -55,9 +56,14 @@ jobs:
         with:
           script: |
             const body = context.payload.issue.body || '';
-            const m = body.match(/<!--\s*plugin:(\S+)\s+new_major_release:fpp(\d+)\s*-->/);
+            // repo: is optional (absent on markers written before it existed) - used to
+            // re-identify this plugin if it's since been renamed (see
+            // lib_plugin_schema.resolve_renamed_repo in the fpp-data-ci scripts).
+            const m = body.match(/<!--\s*plugin:(\S+?)(?:\s+repo:([^/\s]+)\/(\S+?))?\s+new_major_release:fpp(\d+)\s*-->/);
             core.setOutput('name', m ? m[1] : '');
-            core.setOutput('target', m ? m[2] : '');
+            core.setOutput('marker_owner', m && m[2] ? m[2] : '');
+            core.setOutput('marker_repo', m && m[3] ? m[3] : '');
+            core.setOutput('target', m ? m[4] : '');
 
             // Word-boundary match, not substring - the job-level `if:` above is only a
             // coarse pre-filter that also matches e.g. "/recheck_dont_actually_check".
@@ -75,11 +81,14 @@ jobs:
           # since ${{ }} splices raw text before bash parses it (see
           # bug-fpp-data-ci-actions-script-injection-repo-name in .wolf/buglog.json).
           REPO_NAME: ${{ steps.extract.outputs.name }}
+          MARKER_OWNER: ${{ steps.extract.outputs.marker_owner }}
+          MARKER_REPO: ${{ steps.extract.outputs.marker_repo }}
           # Lifts gh_get_contributors()'s rate limit from 60/hr (anonymous) to 5000/hr.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python .github/scripts/resolve_plugin_owner.py \
-            --plugin-list pluginList.json --repo-name "$REPO_NAME"
+            --plugin-list pluginList.json --repo-name "$REPO_NAME" \
+            --marker-owner "$MARKER_OWNER" --marker-repo "$MARKER_REPO"
 
       - name: Restrict /recheck and /submit to that owner
         id: authz
@@ -102,6 +111,10 @@ jobs:
             const pluginName = process.env.PLUGIN_NAME;
             const { owner: repoOwner, repo } = context.repo;
 
+            // Same allow-list regardless of open/closed - re-using a closed tracking
+            // issue's thread (rather than opening a new one) doesn't need a tighter
+            // gate here, since /recheck never closes or reopens the issue itself (see
+            // the "Update the tracking issue" step: it only ever comments).
             if (owner && commenter.toLowerCase() === owner.toLowerCase()) {
               core.setOutput('ok', 'true');
               return;
@@ -145,11 +158,14 @@ jobs:
           # REPO_NAME/TARGET_MAJOR trace back to attacker-influenceable issue-body text --
           # pass via env/$VAR rather than ${{ }}-interpolated directly into the script.
           REPO_NAME: ${{ steps.extract.outputs.name }}
+          MARKER_OWNER: ${{ steps.extract.outputs.marker_owner }}
+          MARKER_REPO: ${{ steps.extract.outputs.marker_repo }}
           TARGET_MAJOR: ${{ steps.extract.outputs.target }}
         run: |
           python .github/scripts/new_major_release_recheck_one.py \
             --plugin-list pluginList.json \
             --repo-name "$REPO_NAME" \
+            --marker-owner "$MARKER_OWNER" --marker-repo "$MARKER_REPO" \
             --target-major "$TARGET_MAJOR" \
             --schema .github/schema/pluginInfo.schema.json \
             --out recheck-result.json
@@ -175,11 +191,36 @@ jobs:
             const command = process.env.COMMAND;
 
             if (!data.found) {
+              // new_major_release_recheck_one.py already tried resolving a possible
+              // rename via the marker's repo: field before giving up - a genuine miss
+              // here means the plugin is actually gone from pluginList.json, not just
+              // renamed, so point at the removal flow instead of a dead end.
               await github.rest.issues.createComment({ owner, repo, issue_number,
-                body: `⚠️ \`${pluginName}\` is no longer in \`pluginList.json\` - nothing to recheck.` });
+                body: `⚠️ \`${pluginName}\` is no longer in \`pluginList.json\` and its repo could not be ` +
+                      `re-resolved to a current listing - if it was removed, see ` +
+                      `https://falconchristmas.github.io/fpp-data/submit_remove_plugin/ for the removal flow; ` +
+                      `if it was renamed, a maintainer will need to update this issue's marker by hand.` });
               return;
             }
             const r = data.result;
+
+            if (data.resolved_name && data.resolved_name !== pluginName) {
+              // Renamed since this issue's marker was written (e.g. following a
+              // reponame-mismatch lint fix) - retitle + rewrite the marker so this
+              // same thread keeps working under the new name, instead of leaving the
+              // issue orphaned under a name pluginList.json no longer has.
+              const newMarker = `<!-- plugin:${data.resolved_name} repo:${r.owner}/${r.repo} ` +
+                                 `new_major_release:fpp${target} -->`;
+              const newBody = (context.payload.issue.body || '').replace(
+                /<!--\s*plugin:\S+?(?:\s+repo:[^/\s]+\/\S+?)?\s+new_major_release:fpp\d+\s*-->/,
+                newMarker);
+              await github.rest.issues.update({ owner, repo, issue_number,
+                title: `[FPP ${target}] ${data.resolved_name} - compatibility & plugin check`,
+                body: newBody });
+              await github.rest.issues.createComment({ owner, repo, issue_number,
+                body: `🔁 Renamed \`${pluginName}\` → \`${data.resolved_name}\` ` +
+                      `(https://github.com/${r.owner}/${r.repo}) - continuing here.` });
+            }
 
             // Post the up-to-date report as a FRESH comment on every /recheck, rather
             // than editing the original issue body in place - so each recheck visibly
@@ -198,13 +239,13 @@ jobs:
             await github.rest.issues.addLabels({ owner, repo, issue_number, labels: [`status:${r.status}`] });
 
             const summary = `B${r.num_blocker} best-practice ${r.num_best_practice} optional ${r.num_optional}`;
-            if (r.ready_to_close) {
-              // Genuinely passes now - close it even if /submit was also used (nothing
-              // left to override).
-              await github.rest.issues.createComment({ owner, repo, issue_number,
-                body: `✅ Rechecked - now declares FPP ${target} compatibility with no outstanding blockers. Closing.` });
-              await github.rest.issues.update({ owner, repo, issue_number, state: 'closed', state_reason: 'completed' });
-            } else if (command === 'submit') {
+            // ready_to_close never auto-closes (2026-08-08 decision, same as
+            // new_major_release_sync_issues.py's reconcile mode) - a maintainer verifies
+            // and closes by hand. No separate comment for it either: issue_body() now
+            // renders its own "🎉 Congratulations ... seems all set" note plus the
+            // maintainer-review/recheck-anytime guidance directly in the fresh report
+            // comment posted above, so a second comment here would just restate it.
+            if (command === 'submit') {
               // /submit always means "flag for manual review", regardless of WHY it's
               // not ready_to_close (not certified at all, or certified but blockers
               // remain) - a prior version of this check ran the "certified but has
@@ -219,10 +260,12 @@ jobs:
 
               // No verified way yet to identify this repo's actual maintainers (see
               // the earlier discussion on getCollaboratorPermissionLevel vs a full
-              // collaborators list) - mention, NOT @-mention, the last 5 unique
-              // committers to fpp-data-ci itself as a stand-in until that's resolved.
-              // This is the repo the workflow runs in, so listCommits needs no
-              // special access beyond the default GITHUB_TOKEN.
+              // collaborators list) - @-mention the last 5 unique committers to
+              // fpp-data-ci itself as a stand-in until that's resolved. This does
+              // send them a real GitHub notification (2026-08-09 decision, traded
+              // off against the risk of pinging a recent committer who isn't
+              // actually a maintainer). This is the repo the workflow runs in, so
+              // listCommits needs no special access beyond the default GITHUB_TOKEN.
               let committerNote = '';
               try {
                 const { data: commits } = await github.rest.repos.listCommits({ owner, repo, per_page: 30 });
@@ -234,7 +277,7 @@ jobs:
                   if (seen.length >= 5) break;
                 }
                 if (seen.length) {
-                  const names = seen.map(l => `\`${l}\``).join(', ');
+                  const names = seen.map(l => `@${l}`).join(', ');
                   committerNote = `\n\n${names} - please take a look.`;
                 }
               } catch (e) { /* best-effort only - don't fail the recheck over this */ }
@@ -264,12 +307,9 @@ jobs:
               await github.rest.issues.createComment({ owner, repo, issue_number,
                 body: `Rechecked (${summary}) - flagged for manual review at the owner's request via ` +
                       `\`/submit\`. Reason given:${quoted}${committerNote}${stillNotCompatNote}` });
-            } else if (r.certified && r.num_blocker > 0) {
-              await github.rest.issues.createComment({ owner, repo, issue_number,
-                body: `Rechecked - declares FPP ${target} compatibility, but still has ${r.num_blocker} ` +
-                      `blocker issues that must be fixed. See the updated report above.` });
-            } else {
-              await github.rest.issues.createComment({ owner, repo, issue_number,
-                body: `Rechecked (${summary}) - see the updated report above. Comment \`/recheck\` again ` +
-                      `after another push, or \`/submit\` if you believe a finding doesn't apply.` });
             }
+            // Otherwise (not ready, no /submit): the fresh report comment posted above
+            // already covers it in full - compatibility status, the 🛑-badged blocker
+            // findings themselves (if any), and the same /submit-or-/recheck guidance in
+            // its own footer - a second comment here would just restate what's already
+            // one comment up, so skip it (2026-08-08 decision).

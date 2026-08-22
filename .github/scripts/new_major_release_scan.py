@@ -36,6 +36,11 @@ REMOVAL_FORM = "https://github.com/FalconChristmas/fpp-data/issues/new?template=
 REMOVAL_GUIDED_PAGE = "https://falconchristmas.github.io/fpp-data/submit_remove_plugin/"
 SUBMISSION_GUIDED_PAGE = "https://falconchristmas.github.io/fpp-data/submit_new_plugin/"
 STALE_MONTHS = 18
+# Fallback @-mention when an org-owned plugin has no individual maintainer
+# candidate (gh_get_maintainer_candidates() found nobody with provable write
+# access) - otherwise the tracking issue notifies nobody at all, since an
+# @-mention to the org login itself doesn't reliably reach anyone.
+FALLBACK_MAINTAINER = "darylc"
 
 
 def highest_supported_major(versions) -> int | None:
@@ -138,12 +143,36 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         if data:
             meta = data
             findings.extend(lib.repo_metadata_findings(meta, info.get("bugURL", "")))
+            branches, _ = lib.gh_list_branches(owner, repo, token)
+            findings.extend(lib.branch_findings(info, branches))
             # An org login isn't a person - nobody gets notified by mentioning it (an
             # org member has to already be watching the repo). Surface the repo's own
             # top contributors instead, as the individuals actually likely to see this.
             owner_is_org = (meta.get("owner") or {}).get("type") == "Organization"
             if owner_is_org:
                 maintainer_candidates = lib.gh_get_maintainer_candidates(owner, repo, token)
+
+    # --- open issue/PR staleness (best-effort, independent of push staleness) -
+    # A repo can look "active" by push date while its owner ignores the
+    # community entirely - stale open issues/PRs catch that case separately
+    # from the archived/pushed_at signal below.
+    issue_pr_stats = lib.gh_get_stale_issue_pr_stats(owner, repo, token) if (owner and repo) else None
+    issue_pr_stats = issue_pr_stats or {"open_issues": None, "open_prs": None,
+                                         "stale_issues": 0, "stale_prs": 0}
+    stale_issue_pr_count = issue_pr_stats["stale_issues"] + issue_pr_stats["stale_prs"]
+    if stale_issue_pr_count > 0:
+        parts = []
+        if issue_pr_stats["stale_issues"]:
+            parts.append(f"{issue_pr_stats['stale_issues']} open issue"
+                         + ("" if issue_pr_stats["stale_issues"] == 1 else "s"))
+        if issue_pr_stats["stale_prs"]:
+            parts.append(f"{issue_pr_stats['stale_prs']} open pull request"
+                         + ("" if issue_pr_stats["stale_prs"] == 1 else "s"))
+        findings.append((BEST_PRACTICE, "stale-issues-prs",
+                         f"{' and '.join(parts)} have been open for {lib.STALE_ISSUE_PR_AGE_MONTHS}+ months with "
+                         f"no resolution ({stale_issue_pr_count} total) - if you're still active on this plugin, "
+                         f"please take a look at {'them' if stale_issue_pr_count != 1 else 'it'}: "
+                         f"https://github.com/{owner}/{repo}/issues"))
 
     # --- static plugin lint (needs a clone) -----------------------------
     linted = False
@@ -152,20 +181,37 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         for f in lint_plugin_dir(plugin_dir, name, info=info):
             findings.append((f.severity, f.code, f.message))
 
-    # --- status --------------------------------------------------------------
-    stale = months_since(meta.get("pushed_at"))
-    if removal_requested:
-        status = "removal-requested"
-    elif certified:
-        status = "compatible"
-    elif meta.get("archived") or (stale is not None and stale >= STALE_MONTHS):
-        status = "unmaintained"
-    else:
-        status = "needs-update"
-
     num_blocker = sum(1 for s, _, _ in findings if s == BLOCKER)
     num_best_practice = sum(1 for s, _, _ in findings if s == BEST_PRACTICE)
     num_optional = sum(1 for s, _, _ in findings if s == OPTIONAL)
+    # certified only means "declares a versions[] entry for the target major" - it
+    # says nothing about outstanding findings (schema errors, lint failures,
+    # best-practice nits, stale open issues/PRs, etc. - stale-issues-prs is itself
+    # a finding now, so num_best_practice == 0 already covers it). ready_to_close
+    # is computed here (moved up, was after the status block) so status itself can
+    # use it below - "compatible" needs to mean genuinely done, not just certified.
+    ready_to_close = (certified and num_blocker == 0
+                      and num_best_practice == 0 and num_optional == 0)
+
+    # --- status --------------------------------------------------------------
+    stale = months_since(meta.get("pushed_at"))
+    needs_attention = stale_issue_pr_count >= lib.NEEDS_ATTENTION_MIN_STALE
+    if removal_requested:
+        status = "removal-requested"
+    elif certified and ready_to_close:
+        status = "compatible"
+    elif certified:
+        # Declares support for the target major, but still has outstanding
+        # findings (blocker/best-practice/optional) - distinct from "compatible"
+        # (nothing left) and from "needs-update" (hasn't even declared support).
+        status = "needs-fixes"
+    elif meta.get("archived") or (stale is not None and stale >= STALE_MONTHS):
+        status = "unmaintained"
+    elif needs_attention:
+        status = "needs-attention"
+    else:
+        status = "needs-update"
+
     return {
         "name": name,
         # pluginInfo.json's OWN "name" field - the human-readable title shown on the
@@ -178,21 +224,27 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
         "repo": repo,
         "owner_is_org": owner_is_org,
         "maintainer_candidates": maintainer_candidates,
+        # Org-owned repo where gh_get_maintainer_candidates() found nobody with
+        # provable write access - an @-mention to the org login itself doesn't
+        # reliably notify anyone (see the docstring on issue_body's org branch),
+        # so without a fallback this plugin's tracking issue goes out to nobody.
+        "no_maintainer_found": owner_is_org and not maintainer_candidates,
         "status": status,
         "certified": certified,
         "last_major": last_major,
-        # certified only means "declares a versions[] entry for the target major" -
-        # it says nothing about outstanding findings (schema errors, lint failures,
-        # best-practice nits, etc). ready_to_close is the actual gate for auto-closing
-        # a tracking issue: declared compatible AND zero findings of ANY severity, not
-        # just blockers - a plugin with open best-practice/optional items still has
-        # something for the maintainer to see, so the issue should stay open.
-        "ready_to_close": (certified and num_blocker == 0
-                           and num_best_practice == 0 and num_optional == 0),
+        # ready_to_close (computed above, now also what "compatible" status means):
+        # the gate new_major_release_sync_issues.py's reconcile mode uses to decide
+        # whether to comment on a tracking issue (NOT auto-close, as of 2026-08-08 -
+        # a maintainer closes by hand after reviewing).
+        "ready_to_close": ready_to_close,
         "removal_requested": removal_requested,
         "issues_enabled": meta.get("has_issues"),
         "archived": meta.get("archived"),
         "months_since_push": stale,
+        "open_issues": issue_pr_stats["open_issues"],
+        "open_prs": issue_pr_stats["open_prs"],
+        "stale_issues": issue_pr_stats["stale_issues"],
+        "stale_prs": issue_pr_stats["stale_prs"],
         "linted": linted,
         "findings": findings,
         "num_blocker": num_blocker,
@@ -201,13 +253,17 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
     }
 
 
-ICON = {"compatible": "✅", "needs-update": "🔧", "unmaintained": "💤",
-        "removal-requested": "🗑️"}
+ICON = {"compatible": "✅", "needs-update": "🔧", "needs-fixes": "🔨", "unmaintained": "💤",
+        "removal-requested": "🗑️", "needs-attention": "⚠️"}
 
 
 def issue_body(r, target, draft=True, mention_owner=False):
     L = []
-    L.append(f"<!-- plugin:{r['name']} new_major_release:fpp{target} -->")
+    # repo: lets a renamed plugin's tracking issue be re-identified later even
+    # after its pluginList.json listing name changes - see
+    # lib_plugin_schema.resolve_renamed_repo() and its callers.
+    repo_tag = f" repo:{r['owner']}/{r['repo']}" if r.get("owner") and r.get("repo") else ""
+    L.append(f"<!-- plugin:{r['name']}{repo_tag} new_major_release:fpp{target} -->")
     if draft:
         L.append(f"> **DRY RUN - draft only. The maintainer has NOT been notified.**")
         L.append("")
@@ -243,17 +299,16 @@ def issue_body(r, target, draft=True, mention_owner=False):
                     names = ", ".join(f"`{c}`" for c in r["maintainer_candidates"])
                     L.append(f"Maintainer: `{r['owner']}` org (org mentions don't reliably notify anyone). "
                              f"Confirmed committers: {names} *({mention})*")
+            elif do_mention:
+                L.append(f"Maintainer: `{r['owner']}` org (no individual maintainer could be identified) - "
+                         f"@{FALLBACK_MAINTAINER}, this one needs a human to find the right person to notify")
             else:
-                L.append(f"Maintainer: `{r['owner']}` org (no individual maintainer could be identified) "
-                         f"*({mention})*")
+                L.append(f"Maintainer: `{r['owner']}` org (no individual maintainer could be identified, "
+                         f"would fall back to @{FALLBACK_MAINTAINER}) *({mention})*")
         elif do_mention:
             L.append(f"Maintainer: @{r['owner']}")
         else:
             L.append(f"Maintainer: `{r['owner']}` (https://github.com/{r['owner']}) *({mention})*")
-    L.append("")
-    L.append(f"> ℹ️ FPP's plugin **submission** and **removal** process has been streamlined - see the "
-             f"[Plugin Guidelines]({GUIDELINES}) for what's expected of a listed plugin. Adding another "
-             f"plugin? Start at [Submit a plugin]({SUBMISSION_GUIDED_PAGE}).")
     L.append("")
     if r["status"] == "unmaintained":
         push = f"{r['months_since_push']} months" if r["months_since_push"] is not None else "a long time"
@@ -261,10 +316,19 @@ def issue_body(r, target, draft=True, mention_owner=False):
                  f"updating it, start at [Request Plugin Removal]({REMOVAL_GUIDED_PAGE}) and we'll "
                  f"remove it from the list, no update needed.")
         L.append("")
-    L.append(f"As part of this new process, in the lead up to each new version release we will create "
+    L.append(f"> 📢 FPP's plugin guidelines and submission process have been updated - see the "
+             f"[Plugin Guidelines]({GUIDELINES}) for what's expected of a listed plugin. Adding another "
+             f"plugin? Start at [Submit a plugin]({SUBMISSION_GUIDED_PAGE}).")
+    L.append("")
+    L.append(f"> 🔄 As part of this new process, in the lead up to each new version release we will create "
              f"a GitHub issue like this one and ask that you review compatibility of your plugin with "
              f"the new version and outline any new best practices for plugins. Please review this "
              f"information and update your plugin accordingly.")
+    L.append("")
+    L.append(f"### 🧪 Get your plugin ready for FPP {target}")
+    L.append(f"FPP 10.0 beta3 has been released - FPP 10 full release is due shortly. Please test and "
+             f"update your plugin against beta3, available at "
+             f"https://github.com/FalconChristmas/fpp/releases/tag/10.0-beta3.")
     L.append("")
     # compatibility
     if r["certified"]:
@@ -287,14 +351,35 @@ def issue_body(r, target, draft=True, mention_owner=False):
         badge = {BLOCKER: "🛑", BEST_PRACTICE: "⚠️", OPTIONAL: "💡"}
         label = {BLOCKER: "Blocker", BEST_PRACTICE: "Best practice", OPTIONAL: "Optional"}
         for sev, code, msg in sorted(r["findings"], key=lambda f: order.get(f[0], 3)):
-            L.append(f"- {badge.get(sev, '')} **{label.get(sev, sev)} - {code}** - {msg}")
+            header = f"- {badge.get(sev, '')} **{label.get(sev, sev)} - {code}**"
+            # Short messages read fine inline; a lengthy explanation (why, plus how to
+            # fix) reads as a wall of text glued to the header, so push it down one
+            # level as its own sub-bullet instead - keeps the top-level list skimmable
+            # by severity/code alone.
+            if len(msg) > 100:
+                L.append(header)
+                L.append(f"  - {msg}")
+            else:
+                L.append(f"{header} - {msg}")
         L.append("")
-    L.append(f"If you disagree with the assessment, please comment `/submit` and explain why you "
-             f"disagree or believe your plugin deserves an exception, for the FPP maintainers to evaluate.")
-    L.append("")
-    L.append(f"Once you have updated your plugin, please comment `/recheck` on this issue and we will "
-             f"automatically scan your plugin and comment the new results here.")
-    L.append("")
+    if r["ready_to_close"]:
+        # Nothing left to fix and nothing to disagree with, so the /submit and
+        # "once you've updated" paragraphs below don't apply here - replace both
+        # with a single congratulations note instead.
+        L.append(f"🎉 Congratulations - `{r['name']}` seems all set for FPP {target}, with no "
+                 f"outstanding findings. A maintainer will review and close this issue - comment "
+                 f"`/recheck` any time later (e.g. after a regression) to get a fresh report against "
+                 f"the current state.")
+        L.append("")
+    else:
+        L.append(f"We know our automated checks don't always get it 100% right. Please fix whatever "
+                 f"above does apply first - then, for anything left that doesn't apply or you think "
+                 f"deserves an exception, comment `/submit` with an explanation and a maintainer will "
+                 f"take a look.")
+        L.append("")
+        L.append(f"Once you have updated your plugin, please comment `/recheck` on this issue and we "
+                 f"will automatically scan your plugin and comment the new results here.")
+        L.append("")
     L.append(f"Want to sunset this plugin? [Request Plugin Removal]({REMOVAL_GUIDED_PAGE})")
     return "\n".join(L)
 
@@ -302,18 +387,35 @@ def issue_body(r, target, draft=True, mention_owner=False):
 def build_dashboard(results, target):
     total = len(results)
     by = lambda s: sum(1 for r in results if r["status"] == s)
+    no_maintainer = [r for r in results if r.get("no_maintainer_found")]
     L = [f"# FPP {target} plugin readiness - {datetime.now(timezone.utc):%Y-%m-%d}",
          "",
          f"{total} plugins · ✅ {by('compatible')} compatible · "
-         f"🔧 {by('needs-update')} need update · 💤 {by('unmaintained')} unmaintained",
-         "",
-         "| Plugin | Status | FPP-compat | Issues | Last push | 🛑 Blocker | ⚠️ Best practice | 💡 Optional |",
-         "|---|---|---|---|---|--:|--:|--:|"]
+         f"🔨 {by('needs-fixes')} need fixes · 🔧 {by('needs-update')} need update · "
+         f"⚠️ {by('needs-attention')} need attention · 💤 {by('unmaintained')} unmaintained"
+         + (f" · 🚩 {len(no_maintainer)} no maintainer identified" if no_maintainer else ""),
+         ""]
+    if no_maintainer:
+        # These are the plugins whose tracking issue notifies nobody without a
+        # human stepping in - gh_get_maintainer_candidates() found no individual
+        # with provable write access on an org-owned repo, and an @-mention to
+        # the org login itself doesn't reliably reach anyone. Surfaced up top,
+        # not buried in the table, since it needs a person to act on it
+        # (find the real maintainer, or accept the @FALLBACK_MAINTAINER default
+        # issue_body() already falls back to).
+        names = ", ".join(f"[{r['name']}](https://github.com/{r['owner']}/{r['repo']})" for r in no_maintainer)
+        L.append(f"> 🚩 **No maintainer identified** for: {names} — org-owned, no individual with provable "
+                 f"write access found. Tracking issues for these fall back to @{FALLBACK_MAINTAINER}.")
+        L.append("")
+    L.append("| Plugin | Status | FPP-compat | Issues | Last push | ⚠️ Stale issues/PRs | 🛑 Blocker | ⚠️ Best practice | 💡 Optional |")
+    L.append("|---|---|---|---|---|--:|--:|--:|--:|")
     for r in sorted(results, key=lambda r: (r["status"] != "needs-update", r["name"].lower())):
         issues = {True: "on", False: "**off**", None: "?"}[r["issues_enabled"]]
         push = f"{r['months_since_push']}mo" if r["months_since_push"] is not None else "?"
-        L.append(f"| {r['name']} | {ICON.get(r['status'], '')} {r['status']} | "
-                 f"{'yes' if r['certified'] else 'no'} | {issues} | {push} | "
+        stale_total = r["stale_issues"] + r["stale_prs"]
+        name_cell = r["name"] + (" 🚩" if r.get("no_maintainer_found") else "")
+        L.append(f"| {name_cell} | {ICON.get(r['status'], '')} {r['status']} | "
+                 f"{'yes' if r['certified'] else 'no'} | {issues} | {push} | {stale_total or ''} | "
                  f"{r['num_blocker'] or ''} | {r['num_best_practice'] or ''} | {r['num_optional'] or ''} |")
     return "\n".join(L)
 
@@ -325,7 +427,10 @@ def main():
     ap.add_argument("--plugins-dir", default=None, help="dir of cloned plugins (named by repoName)")
     ap.add_argument("--schema", default=None, help="pluginInfo.schema.json (omit to skip schema validation)")
     ap.add_argument("--out", default="out")
-    ap.add_argument("--limit", type=int, default=0, help="scan only first N (testing)")
+    ap.add_argument("--limit", type=int, default=0, help="scan only N plugins (first N unless --seed is given)")
+    ap.add_argument("--seed", default="", help="pick a random --limit instead of the first N "
+                                                "(shared with clone_plugins.py's --seed so both "
+                                                "processes select the identical subset)")
     ap.add_argument("--only-owner", default="", help="scan only plugins owned by this GitHub account (case-insensitive)")
     ap.add_argument("--mention-owner", action="store_true",
                      help="@-mention the repo owner in real (non-draft) tracking issues, notifying them")
@@ -338,18 +443,25 @@ def main():
             schema = json.load(f)
     entries = lib.load_pluginlist(args.plugin_list)
     entries = lib.filter_by_owner(entries, args.only_owner)
-    if args.limit:
-        entries = entries[: args.limit]
+    entries = lib.apply_limit(entries, args.limit, args.seed)
 
     os.makedirs(os.path.join(args.out, "issues"), exist_ok=True)
     results = []
     for entry in entries:
+        name = entry[0]
+        # Same untrusted, PR-submitted entry name clone_plugins.py guards before
+        # cloning - it lands in a filesystem path again here (out/issues/<name>.md),
+        # so it needs the same gate rather than trusting the earlier clone step ran.
+        if not lib.safe_plugin_name(name):
+            print(f"SKIP {name!r}: unsafe plugin name")
+            continue
         r = scan_plugin(entry, args.target_major, args.plugins_dir, token, schema)
         results.append(r)
         with open(os.path.join(args.out, "issues", f"{r['name']}.md"), "w", encoding="utf-8") as f:
             f.write(issue_body(r, args.target_major))
         print(f"{ICON.get(r['status'],'')} {r['name']:34} {r['status']:13} "
-              f"B{r['num_blocker']} P{r['num_best_practice']} O{r['num_optional']}"
+              f"{r['num_blocker']} blockers, {r['num_best_practice']} best-practice, "
+              f"{r['num_optional']} optional"
               f"{'' if r['linted'] else '  (no clone - metadata only)'}")
 
     with open(os.path.join(args.out, "dashboard.md"), "w", encoding="utf-8") as f:

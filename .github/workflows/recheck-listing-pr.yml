@@ -151,20 +151,38 @@ jobs:
           EOF
 
       - name: Run plugin check
+        id: runcheck
         if: steps.authz.outputs.ok == 'true' && steps.lookup.outputs.plugininfo_url != ''
+        # continue-on-error so a scan_submission.py crash (bad args, an unhandled
+        # exception, whatever) doesn't skip straight past the two comment steps below
+        # to nothing at all - a silent /recheck is the bug we're fixing here (see the
+        # TARGET_MAJOR comment above: exactly this happened, invisibly, for over a
+        # week). The final step still fails the job so it shows red in Actions for a
+        # maintainer to notice, even though the commenter now gets an answer either way.
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same source scan-new-submission.yml and new-major-release-issue-recheck.yml
+          # use - --target-major became a required scan_submission.py arg after this
+          # workflow was written, and this step wasn't updated to pass it, so every
+          # /recheck on a listing PR since then failed at argument parsing (exit code
+          # 2) before ever running the scan - and since that's before the PR-comment
+          # step, the failure was invisible on the PR itself, just a red X in Actions.
+          TARGET_MAJOR: ${{ vars.NEW_MAJOR_RELEASE_TARGET_MAJOR || '10' }}
         run: |
           python .github/scripts/scan_submission.py \
             --plugininfo-url "${{ steps.lookup.outputs.plugininfo_url }}" \
             --schema .github/schema/pluginInfo.schema.json \
+            --target-major "$TARGET_MAJOR" \
             --plugin-list base-pluginList.json \
             --reporter "${{ steps.extract.outputs.reporter }}" \
             --issue-number "${{ steps.extract.outputs.issue_number }}" \
             --out scan-result.json
 
       - name: Comment fresh results on the PR
-        if: steps.authz.outputs.ok == 'true' && steps.lookup.outputs.plugininfo_url != ''
+        if: >-
+          steps.authz.outputs.ok == 'true' && steps.lookup.outputs.plugininfo_url != '' &&
+          steps.runcheck.outcome == 'success'
         uses: actions/github-script@v7
         with:
           script: |
@@ -225,3 +243,34 @@ jobs:
                     `\`pluginList.json\` - the branch may have been hand-edited. A maintainer will need ` +
                     `to look at this manually.`,
             });
+
+      # Mirrors "Run plugin check"'s condition, plus outcome == 'failure' - the one
+      # case none of the three comment steps above cover. Whatever broke (bad args,
+      # an exception, a timeout), the commenter still gets a reply instead of silence,
+      # with a direct link to the run so a maintainer doesn't have to go hunting for it.
+      - name: Report plugin check failure
+        if: >-
+          steps.authz.outputs.ok == 'true' && steps.lookup.outputs.plugininfo_url != '' &&
+          steps.runcheck.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+            const commenter = context.payload.comment.user.login;
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number,
+              body: `⚠️ \`/recheck\` (requested by @${commenter}) failed to run - this is a bug in ` +
+                    `the check itself, not something in your plugin to fix. A maintainer will need to ` +
+                    `look at the [workflow run](${runUrl}). Feel free to comment \`/recheck\` again ` +
+                    `later in case it was transient.`,
+            });
+
+      # continue-on-error above means the job would otherwise report success even
+      # though the actual check crashed - fail it here so it still shows red in
+      # Actions (for a maintainer skimming run history) after the PR comment above
+      # has already told the commenter what happened.
+      - name: Fail the job if the plugin check itself failed
+        if: steps.runcheck.outcome == 'failure'
+        run: exit 1

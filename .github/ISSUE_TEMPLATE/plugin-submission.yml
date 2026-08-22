@@ -108,14 +108,6 @@ body:
         - label: I understand inclusion is at the FPP developers' discretion and is not guaranteed.
           required: true
 
-  - type: checkboxes
-    id: announced
-    attributes:
-      label: Community announcement
-      options:
-        - label: I have announced this plugin to the FPP community (e.g. the FPP Facebook group) and considered feedback.
-          required: false
-
   - type: textarea
     id: notes
     attributes:

@@ -2,13 +2,19 @@
 
 Reads summary.json (produced by new_major_release_scan.py) and, for the current
 repo, keeps one tracking issue per plugin in sync. Idempotent: issues are matched by
-a hidden marker in the body, so re-runs update rather than duplicate.
+a hidden marker in the body, so re-runs update rather than duplicate. If a plugin's
+listing name changed (e.g. following a reponame-mismatch rename) since its issue was
+created, the marker's repo: field is used to re-identify and adopt that issue under
+its new name instead of orphaning it - see the adoption block in main().
 
 Modes:
   --mode create     create a missing issue, or update an existing one's body.
                     (used by the manual new-major-release workflow)
-  --mode reconcile  do NOT create anything; for a plugin now compatible, comment
-                    and CLOSE its open issue. (used by the daily workflow)
+  --mode reconcile  do NOT create anything; keeps each open issue's status:<...>
+                    label in sync with a fresh daily rescan (a maintainer
+                    filters/watches by that label - e.g. status:compatible - to
+                    find issues ready to close by hand; never auto-closes).
+                    (used by the daily workflow)
 
 By default, never @-mentions an author: bodies (from new_major_release_scan.issue_body)
 render the maintainer handle as plain text, so no one is notified. If the scan that
@@ -29,6 +35,7 @@ import os
 import urllib.error
 import urllib.request
 
+from lib_plugin_schema import adopt_renamed_issue, parse_plugin_marker, resolve_renamed_repo
 from new_major_release_scan import issue_body
 
 API = "https://api.github.com"
@@ -52,9 +59,9 @@ def list_new_major_release_issues(repo, token, label):
     """OPEN issues carrying the new-major-release label, matched later by marker.
 
     Closed issues are intentionally excluded: if a plugin's old tracking issue
-    was closed (e.g. reconcile mode auto-closing it once compatible), the next
-    scan should open a fresh, visible issue rather than silently
-    resurrecting/updating the closed one in place, where nobody would see it.
+    was closed (e.g. a maintainer closing it by hand, or the reminder-7 removal-PR
+    escalation), the next scan should open a fresh, visible issue rather than
+    silently resurrecting/updating the closed one in place, where nobody would see it.
     """
     out, page = [], 1
     while True:
@@ -94,14 +101,48 @@ def main():
     existing = {} if args.dry_run else {}
     if not args.dry_run:
         for iss in list_new_major_release_issues(repo, token, label):
-            marker = f"<!-- plugin:"
-            body = iss.get("body") or ""
-            if marker in body:
-                # marker line is: <!-- plugin:<name> new_major_release:fpp<major> -->
-                nm = body.split("<!-- plugin:", 1)[1].split()[0]
-                existing[nm] = iss
+            parsed = parse_plugin_marker(iss.get("body") or "")
+            if parsed:
+                existing[parsed[0]] = iss
 
-    created = updated = closed = noop = 0
+    # Adopt renamed plugins: an issue whose marker name is no longer in
+    # pluginList.json (e.g. the maintainer renamed the repo following a
+    # reponame-mismatch lint finding) would otherwise sit orphaned forever -
+    # /recheck dead-ends, reconcile can't find it to relabel, and the next
+    # --mode create run opens a duplicate. If the marker recorded a repo: (added
+    # alongside this adoption logic - older markers predate it and can't be
+    # resolved this way), follow GitHub's rename redirect for that owner/repo and
+    # match it against each current plugin's own owner/repo. On a hit, retitle
+    # the issue, rewrite its marker to the new name, and comment - same thread,
+    # same history, just re-pointed - so it's picked up under its new name by the
+    # per-plugin loop below in this same run.
+    adopted = 0
+    if not args.dry_run:
+        current_names = {r["name"].lower() for r in plugins}
+        current_by_repo = {(r["owner"].lower(), r["repo"].lower()): r
+                            for r in plugins if r.get("owner") and r.get("repo")}
+        for old_name in [n for n in list(existing) if n.lower() not in current_names]:
+            iss = existing[old_name]
+            parsed = parse_plugin_marker(iss.get("body") or "")
+            if not parsed:
+                continue
+            _, m_owner, m_repo, _ = parsed
+            if not m_owner or not m_repo:
+                continue
+            resolved = resolve_renamed_repo(m_owner, m_repo, token)
+            if not resolved:
+                continue
+            target_r = current_by_repo.get((resolved[0].lower(), resolved[1].lower()))
+            if not target_r or target_r["name"].lower() == old_name.lower():
+                continue
+            new_name = target_r["name"]
+            adopt_renamed_issue(lambda m, u, b=None: _req(m, u, token, b), API, repo, iss,
+                                 old_name, new_name, resolved[0], resolved[1], target)
+            del existing[old_name]
+            existing[new_name] = iss
+            adopted += 1
+
+    created = updated = relabeled = noop = 0
     for r in plugins:
         name = r["name"]
         title = f"[FPP {target}] {name} - compatibility & plugin check"
@@ -109,22 +150,56 @@ def main():
         iss = existing.get(name)
 
         if args.mode == "reconcile":
-            # Only act when the plugin is now compatible with no outstanding blockers
-            # and an issue is open. certified alone isn't enough - it only means a
-            # versions[] entry declares the target major, not that blocker findings
-            # (schema errors, lint failures, etc) have been resolved.
-            if r["ready_to_close"] and iss and iss.get("state") == "open":
-                if args.dry_run:
-                    print(f"[dry-run] CLOSE #{iss['number']} {name} (now FPP {target} compatible, no blockers)")
+            # This mode re-derives r["status"] fresh for every plugin daily
+            # (metadata-only rescan, no clone/lint) - keep the issue's status:<...>
+            # label in sync with it even on days it doesn't otherwise comment.
+            # Without this, a plugin that changes status without a NEW commit (e.g.
+            # just edits pluginInfo.json's versions[]) never gets its label updated
+            # either here or by the commit-triggered auto-recheck, so it can go
+            # stale indefinitely. Surgical swap (remove stale status:* labels, add
+            # the current one) - same approach as the recheck workflow and
+            # new_major_release_auto_recheck.py - so it never touches any other
+            # label (needs-manual-review, etc.), unlike a full PATCH labels=[...]
+            # replace (see --mode create's own note on this below).
+            if iss:
+                new_status_label = f"status:{r['status']}"
+                # "compatible" means ready_to_close, which requires num_best_practice==0
+                # - but best-practice findings mostly come from the static lint pass
+                # (lint_plugin_dir), which needs a clone. This reconcile scan is
+                # metadata-only (r["linted"] is False), so it never sees those findings
+                # and would rubber-stamp "compatible" just because versions[] still
+                # declares the target major - even if real lint findings (e.g.
+                # no-restart-flag) were never actually fixed. Only a genuine clone+lint
+                # pass (auto_recheck, or a human's /recheck) may grant "compatible";
+                # this metadata-only pass leaves the existing label alone instead.
+                if new_status_label == "status:compatible" and not r.get("linted"):
+                    noop += 1
+                    continue
+                current_status_labels = [
+                    l["name"] for l in (iss.get("labels") or [])
+                    if isinstance(l, dict) and (l.get("name") or "").startswith("status:")]
+                if current_status_labels != [new_status_label]:
+                    if args.dry_run:
+                        print(f"[dry-run] RELABEL #{iss['number']} {name} -> {new_status_label}")
+                    else:
+                        for old in current_status_labels:
+                            if old != new_status_label:
+                                try:
+                                    _req("DELETE", f"{API}/repos/{repo}/issues/{iss['number']}/labels/{old}", token)
+                                except urllib.error.HTTPError:
+                                    pass  # already gone - fine
+                        _req("POST", f"{API}/repos/{repo}/issues/{iss['number']}/labels", token,
+                             {"labels": [new_status_label]})
+                    relabeled += 1
                 else:
-                    _req("POST", f"{API}/repos/{repo}/issues/{iss['number']}/comments", token,
-                         {"body": f"✅ Detected a `versions[]` entry declaring FPP {target} "
-                                  f"support with no outstanding blockers - thanks! Closing automatically."})
-                    _req("PATCH", f"{API}/repos/{repo}/issues/{iss['number']}", token,
-                         {"state": "closed", "state_reason": "completed"})
-                closed += 1
+                    noop += 1
             else:
                 noop += 1
+            # No separate "now compatible" comment (dropped 2026-08-08) - the
+            # status:compatible label swap above is the signal a maintainer
+            # filters/watches for; a standalone comment restating the same thing
+            # added no information the label change didn't already carry. Still
+            # never auto-closes either way - a maintainer closes by hand.
             continue
 
         # mode == create : upsert the tracking issue
@@ -144,7 +219,7 @@ def main():
             created += 1
 
     print(f"\nmode={args.mode} dry_run={args.dry_run} :: "
-          f"created {created}, updated {updated}, closed {closed}, noop {noop}")
+          f"created {created}, updated {updated}, relabeled {relabeled}, noop {noop}, adopted {adopted}")
 
 
 if __name__ == "__main__":
