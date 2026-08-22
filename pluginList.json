@@ -57,6 +57,7 @@
             [ "fpp-haCommands", "https://raw.githubusercontent.com/jessica12ryan/fpp-haCommands/refs/heads/main/pluginInfo.json", "Automation" ],
             [ "fpp-sled-mailbox", "https://raw.githubusercontent.com/focusedonsound/fpp-sled-mailbox/refs/heads/main/pluginInfo.json", "Interaction" ],
             [ "fpp-hdmi-cec", "https://raw.githubusercontent.com/focusedonsound/fpp-hdmi-cec/refs/heads/main/pluginInfo.json", "Hardware" ],
+            [ "fpp-matrixscroller", "https://raw.githubusercontent.com/mikeneiderhauser/fpp-matrixscroller/refs/heads/master/pluginInfo.json", "Messaging" ],
             [ "fpp-plugin-shelly", "https://raw.githubusercontent.com/stevefromNewcastle/fpp-plugin-shelly/refs/heads/master/pluginInfo.json", "Automation" ],
             [ "fpp-plugin-buttonqueue", "https://raw.githubusercontent.com/computergeek1507/fpp-plugin-buttonqueue/refs/heads/main/pluginInfo.json", "Interaction" ]
         ]
