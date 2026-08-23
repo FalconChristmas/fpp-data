@@ -273,13 +273,16 @@ jobs:
           steps.authz.outputs.ok == 'true' && steps.authz.outputs.command == 'submit' &&
           steps.verify.outputs.verdict == 'unconfirmed'
         env:
-          # REPO_NAME traces back to resolve_repo_name_field()'s fallback, which can
-          # return arbitrary submitter-typed text unmodified (see
-          # lib_plugin_schema.resolve_repo_name()) -- passed via env and referenced as
+          # REPO_NAME is pluginList.json's OWN entry[0] key (listed_name), not the
+          # submitter-typed/URL-derived repo_name -- those two can differ (e.g.
+          # listing key "show-on-demand" vs. repo "show-on-demand-plugin"), and
+          # remove_plugin_entry.py matches by the listing key. Using repo_name here
+          # would silently no-op the removal (see verify_remove_plugin.py's
+          # resolve_owner() docstring). Still passed via env and referenced as
           # "$REPO_NAME" rather than ${{ }}-interpolated directly into the script/
           # commit-message text, so shell metacharacters in it can't break out of the
           # intended commands.
-          REPO_NAME: ${{ steps.verify.outputs.repo_name }}
+          REPO_NAME: ${{ steps.verify.outputs.listed_name }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -e
@@ -387,8 +390,8 @@ jobs:
         env:
           ISSUE_BODY: ${{ github.event.issue.body }}
           # See the "Escalate unconfirmed ownership" step's comment -- same
-          # attacker-influenceable-free-text concern, same env-var mitigation.
-          REPO_NAME: ${{ steps.verify.outputs.repo_name }}
+          # listed_name-not-repo_name requirement, same env-var mitigation.
+          REPO_NAME: ${{ steps.verify.outputs.listed_name }}
         run: |
           python .github/scripts/remove_plugin_entry.py \
             --plugin-list pluginList.json --repo-name "$REPO_NAME"

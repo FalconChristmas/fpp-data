@@ -55,7 +55,14 @@ def resolve_repo_name_field(body: str) -> str:
 
 
 def resolve_owner(repo_name: str, plugin_list_path: str, token):
-    """(owner, repo, archived_or_missing, delist_flag, error, not_found, transient) for a listed plugin.
+    """(owner, repo, archived_or_missing, delist_flag, error, not_found, transient, listed_name) for a listed plugin.
+
+    `listed_name` is pluginList.json's own entry[0] key for the match - which can
+    differ from `repo_name` (see the matching note below, e.g. listing key
+    "show-on-demand" vs. submitted/actual repo name "show-on-demand-plugin").
+    Callers that go on to edit pluginList.json (remove_plugin_entry.py) MUST use
+    `listed_name`, not `repo_name` - matching by `repo_name` there would hit this
+    exact same class of false-not-found bug this function was fixed for.
 
     `transient` marks the one failure mode that's worth telling the reporter to
     just `/recheck` later instead of waiting on a maintainer: the listed
@@ -90,9 +97,10 @@ def resolve_owner(repo_name: str, plugin_list_path: str, token):
             url_repo_name and url_repo_name.lower() == repo_name.lower()
         )
         if matches:
+            listed_name = entry[0]
             info, err = lib.fetch_json(info_url)
             if err:
-                return None, None, False, False, f"couldn't fetch pluginInfo.json: {err}", False, True
+                return None, None, False, False, f"couldn't fetch pluginInfo.json: {err}", False, True, listed_name
             info = info or {}
             # Proof-of-control: an author with write access set delist:true in their
             # OWN pluginInfo.json ("delist" is pluginInfo.schema.json's actual field
@@ -116,15 +124,15 @@ def resolve_owner(repo_name: str, plugin_list_path: str, token):
             # parse_raw_github_repo can't parse (custom domain, etc.).
             src = lib.parse_raw_github_repo(info_url) or lib.parse_github_repo(info.get("srcURL", "") or "")
             if not src:
-                return None, None, False, delist, "couldn't determine the plugin's GitHub owner/repo from its listing", False, False
+                return None, None, False, delist, "couldn't determine the plugin's GitHub owner/repo from its listing", False, False, listed_name
             owner, repo = src
             data, gherr = lib.gh_get_repo(owner, repo, token)
             # Only "gone" on a definitive 404 or explicit archived flag - NOT on a
             # transient error (rate limit / network), which would falsely verify.
             missing = data is None and bool(gherr) and "404" in gherr
             archived = bool(data and data.get("archived"))
-            return owner, repo, (missing or archived), delist, None, False, False
-    return None, None, False, False, f"'{repo_name}' is not in pluginList.json", True, False
+            return owner, repo, (missing or archived), delist, None, False, False, listed_name
+    return None, None, False, False, f"'{repo_name}' is not in pluginList.json", True, False, None
 
 
 def field_block(repo_name: str, owner: str | None = None, repo: str | None = None) -> str:
@@ -162,10 +170,13 @@ def main():
 
     owner = None  # only ever set for real by resolve_owner() below; stays None for
     repo = None   # the not-repo_name-at-all path so the GITHUB_OUTPUT write is safe.
+    listed_name = None  # pluginList.json's own entry[0] key - see resolve_owner()'s
+    # docstring. Callers editing pluginList.json (remove_plugin_entry.py) must use
+    # this, not repo_name, or they hit the same false-not-found class of bug.
     if not repo_name:
         verdict, msg = "error", "Could not read a **Plugin repoName** from the form."
     else:
-        owner, repo, gone, delist, err, not_found, transient = resolve_owner(repo_name, args.plugin_list, token)
+        owner, repo, gone, delist, err, not_found, transient, listed_name = resolve_owner(repo_name, args.plugin_list, token)
         if not_found:
             verdict, msg = "not_found", (
                 f"{field_block(repo_name)}\n\n"
@@ -229,6 +240,7 @@ def main():
             # real value, which is the only case a caller needs it for.
             f.write(f"owner={owner or ''}\n")
             f.write(f"repo={repo or ''}\n")
+            f.write(f"listed_name={listed_name or ''}\n")
             f.write(f"duplicate_issues={','.join(str(n) for n in dupes)}\n")
     print(f"{verdict}: {msg}")
 
