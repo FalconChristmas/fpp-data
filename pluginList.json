@@ -24,7 +24,6 @@
             [ "FPP-Plugin-MessageQueue", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-MessageQueue/master/pluginInfo.json", "Messaging"],
             [ "FPP-Plugin-EventDate", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-EventDate/master/pluginInfo.json", "Messaging" ],
             [ "FPP-Plugin-Matrix-Message", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-Matrix-Message/master/pluginInfo.json", "Messaging" ],
-            [ "FPP-Plugin-Weather", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-Weather/master/pluginInfo.json", "Data Feeds" ],
             [ "FPP-Plugin-Projector-Control", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-Projector-Control/master/pluginInfo.json", "Display & Video" ],
             [ "FPP-Plugin-TwilioControl", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-TwilioControl/master/pluginInfo.json", "Interaction" ],
             [ "remote-falcon", "https://raw.githubusercontent.com/remote-falcon/remote-falcon-plugin/master/pluginInfo.json", "Interaction" ],
