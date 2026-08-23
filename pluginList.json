@@ -29,7 +29,6 @@
             [ "remote-falcon", "https://raw.githubusercontent.com/remote-falcon/remote-falcon-plugin/master/pluginInfo.json", "Interaction" ],
             [ "show-on-demand", "https://raw.githubusercontent.com/joeharrison714/show-on-demand-plugin/master/pluginInfo.json", "Interaction" ],
             [ "showpilot-plugin", "https://raw.githubusercontent.com/ShowPilotFPP/ShowPilot-plugin/main/pluginInfo.json", "Interaction" ],
-            [ "fpp-sms-control-too", "https://raw.githubusercontent.com/joeharrison714/fpp-sms-control-too/master/pluginInfo.json", "Automation" ],
             [ "fpp-plugin-tplink","https://raw.githubusercontent.com/computergeek1507/fpp-plugin-tplink/main/pluginInfo.json", "Automation"],
             [ "fpp-zettle","https://raw.githubusercontent.com/bendudz/fpp-zettle/main/pluginInfo.json", "Payments"],
             [ "fpp-WledEffects","https://raw.githubusercontent.com/adamcoulombe/fpp-WledEffects/main/pluginInfo.json", "Automation"],
