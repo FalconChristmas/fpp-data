@@ -27,7 +27,6 @@
             [ "FPP-Plugin-Projector-Control", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-Projector-Control/master/pluginInfo.json", "Display & Video" ],
             [ "FPP-Plugin-TwilioControl", "https://raw.githubusercontent.com/FalconChristmas/FPP-Plugin-TwilioControl/master/pluginInfo.json", "Interaction" ],
             [ "remote-falcon", "https://raw.githubusercontent.com/remote-falcon/remote-falcon-plugin/master/pluginInfo.json", "Interaction" ],
-            [ "show-on-demand", "https://raw.githubusercontent.com/joeharrison714/show-on-demand-plugin/master/pluginInfo.json", "Interaction" ],
             [ "showpilot-plugin", "https://raw.githubusercontent.com/ShowPilotFPP/ShowPilot-plugin/main/pluginInfo.json", "Interaction" ],
             [ "fpp-plugin-tplink","https://raw.githubusercontent.com/computergeek1507/fpp-plugin-tplink/main/pluginInfo.json", "Automation"],
             [ "fpp-zettle","https://raw.githubusercontent.com/bendudz/fpp-zettle/main/pluginInfo.json", "Payments"],
