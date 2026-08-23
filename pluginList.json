@@ -36,7 +36,6 @@
             [ "fpp-zettle","https://raw.githubusercontent.com/bendudz/fpp-zettle/main/pluginInfo.json", "Payments"],
             [ "fpp-WledEffects","https://raw.githubusercontent.com/adamcoulombe/fpp-WledEffects/main/pluginInfo.json", "Automation"],
             [ "fpp-PixelRadio","https://raw.githubusercontent.com/FalconChristmas/fpp-PixelRadio/master/pluginInfo.json", "Audio"],
-            [ "fpp-NFL","https://raw.githubusercontent.com/koolsb/fpp-nfl/main/pluginInfo.json", "Data Feeds" ],
             [ "fpp-PictureFrame", "https://raw.githubusercontent.com/FalconChristmas/fpp-PictureFrame/main/pluginInfo.json", "Display & Video" ],
             [ "fpp-Capture", "https://raw.githubusercontent.com/FalconChristmas/fpp-Capture/main/pluginInfo.json", "Display & Video" ],
             [ "fpp-FPPMon", "https://raw.githubusercontent.com/KulpLights/fpp-FPPMon/master/pluginInfo.json", "Monitoring" ],
