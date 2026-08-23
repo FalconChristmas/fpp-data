@@ -75,8 +75,21 @@ def resolve_owner(repo_name: str, plugin_list_path: str, token):
     and leave the latter for a maintainer.
     """
     for entry in lib.load_pluginlist(plugin_list_path):
-        if entry and entry[0].lower() == repo_name.lower():
-            info_url = entry[1] if len(entry) > 1 else ""
+        if not entry:
+            continue
+        info_url = entry[1] if len(entry) > 1 else ""
+        # Match on pluginList.json's listing key (entry[0]) OR the actual GitHub
+        # repo name parsed from its own info URL - these are usually the same, but
+        # not always (e.g. listing key "show-on-demand" vs. repo
+        # "show-on-demand-plugin"). A submitter who pastes the real repo name/URL
+        # (which is what the form tells them to do) would otherwise get a false
+        # not_found even though the plugin IS listed.
+        url_repo = lib.parse_raw_github_repo(info_url)
+        url_repo_name = url_repo[1] if url_repo else None
+        matches = entry[0].lower() == repo_name.lower() or (
+            url_repo_name and url_repo_name.lower() == repo_name.lower()
+        )
+        if matches:
             info, err = lib.fetch_json(info_url)
             if err:
                 return None, None, False, False, f"couldn't fetch pluginInfo.json: {err}", False, True
