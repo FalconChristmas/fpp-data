@@ -582,14 +582,15 @@ def _outside_plugin_territory_hits(root: str, exts=SCRIPT_EXT):
     that falls outside the directories a plugin is expected to touch on its own -
     its own log file (/media/logs/, the *kind* of file there is checked separately
     by _log_dir_non_log_hits above), FPP's config storage (/media/config/, see the
-    core-config check's docstring), the plugins directory (/media/plugins/), or the
-    playlists directory (/media/playlists/, an established integration point for
-    plugin-managed temp playlists) - e.g. a state file dropped straight into
+    core-config check's docstring and _config_dir_hits below), its own runtime-data
+    directory (/media/plugindata/<repo>/), the plugins directory (/media/plugins/),
+    or the playlists directory (/media/playlists/, an established integration point
+    for plugin-managed temp playlists) - e.g. a state file dropped straight into
     /home/fpp/media/ itself. fpp_install.sh/fpp_uninstall.sh are excluded: an
     installer legitimately reaches outside the plugin's own footprint (systemd
     units, Apache config, cron, etc.) as part of installing/removing itself."""
     file_rx = re.compile(r'''(['"])(/home/fpp/media/[^'"]*\.\w{1,8})\1''')
-    allowed_rx = re.compile(r'^/home/fpp/media/(?:config|plugins|playlists|logs)/', re.I)
+    allowed_rx = re.compile(r'^/home/fpp/media/(?:config|plugins|plugindata|playlists|logs)/', re.I)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
         if _skippable(rel) or os.path.basename(path) in ("fpp_install.sh", "fpp_uninstall.sh"):
@@ -602,6 +603,117 @@ def _outside_plugin_territory_hits(root: str, exts=SCRIPT_EXT):
                 continue
             yield rel, i, line.strip()
 
+
+# Every shape a plugin uses to spell "FPP's config directory": the literal path
+# (with or without trailing slash), `<mediaDir>/config` in its shell/PHP
+# interpolated and concatenated forms, FPP's own accessors (`$settings
+# ['configDirectory']`, `$(getSetting configDirectory)`, `FPP_DIR_CONFIG(...)`),
+# and the usual `$cfgDir`/`$configDir`/`${CFGDIR}` local variable names. `$`-
+# prefixed only - a bare `config_dir` identifier (Python/JS/C++) is too often
+# assigned to something that isn't config/ at all (plugindata, /etc, ...).
+_CFG_DIR_ANCHOR_RX = re.compile(
+    r'/home/fpp/media/config(?=[\'"/])'
+    r'|\$\{?(?:FPP_)?MEDIA_?DIR\}?/config(?=[\'"/])'
+    r'|\$\{?mediaDir(?:ectory)?\}?/config(?=[\'"/])'
+    r'|\$settings\s*\[\s*[\'"]mediaDirectory[\'"]\s*\]\s*\.\s*[\'"]/config(?=[\'"/])'
+    r'|\$mediaDir(?:ectory)?\s*\.\s*[\'"]/config(?=[\'"/])'
+    r'|\$settings\s*\[\s*[\'"]configDirectory[\'"]\s*\]'
+    r'|\$\(\s*getSetting\s+configDirectory\s*\)'
+    r'|\bFPP_DIR_CONFIG\s*\(\s*'
+    r'|\$\{?(?:CFGDIR|CFG_DIR|CONFIG_DIR|FPP_CONFIG_DIR|configDirectory|configDir|config_dir|cfgDir|cfg_dir)\}?(?!\w)')
+# The local-alias names above (not FPP's own `$configDirectory` global) only count
+# in a file that actually assigns them to a config-dir spelling - `$config_dir =
+# ".../plugindata/x"` is a different directory with a confusable name.
+_CFG_ALIAS_RX = re.compile(r'^\$\{?(CFGDIR|CFG_DIR|CONFIG_DIR|FPP_CONFIG_DIR|configDir|config_dir|cfgDir|cfg_dir)\}?$')
+_CFG_ALIAS_ASSIGN_RX = re.compile(r'(?m)^\s*(?:local\s+|export\s+)?\$?(\w+)\s*=[^;\n]*?(?:/config\b|configDirectory|FPP_DIR_CONFIG)')
+# Filename literal after the anchor, past any concat/quote glue (` . "/`, `+ '/`,
+# `}/`, `, "` for os.path.join, `"/"."` - BetaBrite's idiom), and the last `.ext`
+# in the path expression (terminated by a quote/space/bracket, so a `.write(` or
+# `.stringify(` method call later on the line doesn't count as an extension).
+_CFG_NAME_RX = re.compile(r'^(?:[\s.+,]|[\'"]|/|[{}])*([^\'"\s,)]*)')
+_CFG_EXT_RX = re.compile(r'\.([A-Za-z0-9-]{1,8})(?=[\'"\s),;\]]|$)')
+_CFG_BINARY_EXTS = frozenset((
+    "db", "db3", "s3db", "sqlite", "sqlite3", "db-wal", "db-shm", "sqlite-wal", "sqlite-shm", "wal", "shm",
+    "bin", "dat", "gz", "tgz", "bz2", "xz", "zip", "tar", "7z",
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "mp3", "wav", "mp4", "pkl", "pickle"))
+_CFG_STATE_EXTS = frozenset(("log", "cache", "lock", "pid", "tmp"))
+# FPP core's own non-settings files under config/ - a plugin READING one is fine.
+_CFG_CORE_NAMES = frozenset(("cape-eeprom.bin", "media_durations.cache", "sequence_fps.cache"))
+_CFG_DB_SINK_RX = re.compile(
+    r'sqlite3\.connect\s*\(|new\s+SQLite3\s*\(|new\s+\\?PDO\s*\(\s*[\'"]sqlite:|sqlite3_open(?:_v2)?\s*\('
+    r'|new\s+(?:sqlite3\.)?Database\s*\(|\bsqlite3\s+[\'"]?[/$]', re.I)
+# Opening/writing the path for output, on the same line. Reads (file_get_contents,
+# fopen 'r', open() with no mode) don't match.
+_CFG_WRITE_SINK_RX = re.compile(
+    r'file_put_contents\s*\(|\bf?open\s*\(.*?,\s*(?:mode\s*=\s*)?[\'"][waxc]|\.write_(?:text|bytes)\s*\('
+    r'|fs\.(?:write|append)File(?:Sync)?\s*\(|fs\.createWriteStream\s*\(|\bofstream\b', re.I)
+# Sinks where the config path must be the DESTINATION, matched against the text
+# BEFORE the anchor: 2nd arg of copy/rename/move (anchor after the comma), a
+# shell redirect (not `2>&1`/`>&2`) or tee/touch target, or cp/mv/rsync/install
+# with the anchor as the last argument (`cp <config file> /tmp/x` is a read).
+_CFG_DEST_PREFIX_RX = re.compile(
+    r'\b(?:copy|rename|move_uploaded_file|shutil\.(?:copy2?|copyfile|move)|os\.rename)\s*\([^,]*,\s*$'
+    r'|(?<![-=<&0-9])>>?\s*[\'"]?$|\btee\s+(?:-a\s+)?[\'"]?$|\btouch\s+(?:-\w+\s+)*[\'"]?$'
+    r'|\b(?:cp|mv|rsync|install)\s+(?!.*\s(?:cp|mv|rsync|install)\s)')
+_CFG_LAST_ARG_RX = re.compile(r'[^\'"\s]*[\'"]?\s*(?:[;&|#].*)?$')
+_CFG_SCAN_EXTS = SCRIPT_EXT + (".inc", ".cpp", ".cc", ".c", ".h", ".hpp")
+
+
+def _config_dir_hits(root: str, exts=_CFG_SCAN_EXTS):
+    """Yield (relpath, lineno, line, fname, kind) for a line that builds a path under
+    FPP's config directory (/home/fpp/media/config/) for a file that doesn't belong
+    there. Single-line only - no variable tracking. `kind`:
+      "binary" - a database/binary extension (.db/.sqlite/.bin/.gz/.png/...), or a
+                 SQLite open (sqlite3.connect / new SQLite3 / new PDO('sqlite: /
+                 sqlite3_open / `sqlite3` CLI) on any config-dir path. Fires on the
+                 path expression alone, read or write - a .db under config/ got there
+                 by the plugin creating it, and opening a SQLite file creates it.
+      "state"  - a .log/.cache/.lock/.pid/.tmp path, likewise on the expression alone.
+      "text"   - any other non-`plugin.*` filename with a write sink on the SAME line
+                 (file_put_contents, fopen/open for write, fs.writeFile, shell
+                 redirect/cp/tee TO the path, ...). `plugin.<name>` / `plugin.<name>.json`
+                 is the settings-file convention (WriteSettingToFile/setPluginJSON)
+                 and never fires.
+    FPP core's own non-settings files (cape-eeprom.bin, *.cache) only fire with a
+    write/db sink on the line; rm/unlink lines are skipped (an uninstall cleaning up
+    is not a write). Motivating cases: AdvancedStats' plugin.<repo>.db, TwilioControl/
+    MessageQueue's FPP.<name>.db. Every hit is yielded; the caller sorts and dedupes."""
+    skip_rx = re.compile(r'\brm\s|\bunlink\s*\(')
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        is_shell = path.endswith(".sh")
+        text = _read(path)
+        aliases = set(_CFG_ALIAS_ASSIGN_RX.findall(text))
+        for i, line in enumerate(text.splitlines(), 1):
+            if _is_comment_line(line) or skip_rx.search(line):
+                continue
+            m = _CFG_DIR_ANCHOR_RX.search(line)
+            if not m or re.match(r'\s*=[^=]', line[m.end():]):
+                continue  # no anchor, or `$cfgDir = ...` (the dir itself being assigned)
+            am = _CFG_ALIAS_RX.match(m.group(0))
+            if am and am.group(1) not in aliases:
+                continue
+            rest = line[m.end():].split(";", 1)[0]
+            name = _CFG_NAME_RX.match(rest).group(1)
+            exts_found = _CFG_EXT_RX.findall(rest)
+            ext = exts_found[-1].lower() if exts_found else ""
+            fname = name if not ext or name.lower().endswith("." + ext) else (name or "<var>") + "..." + ext
+            db_sink = _CFG_DB_SINK_RX.search(line)
+            write_sink = _CFG_WRITE_SINK_RX.search(line) or (
+                _CFG_DEST_PREFIX_RX.search(line[:m.start()]) and (not is_shell or _CFG_LAST_ARG_RX.match(rest)))
+            if ext in _CFG_BINARY_EXTS or db_sink:
+                kind = "binary"
+            elif ext in _CFG_STATE_EXTS:
+                kind = "state"
+            elif name and not name.lower().startswith("plugin.") and write_sink:
+                kind = "text"
+            else:
+                continue
+            if fname.lower() in _CFG_CORE_NAMES and not (db_sink or write_sink):
+                continue
+            yield rel, i, line.strip(), fname, kind
 
 def _log_naming_hits(root: str, exts=SCRIPT_EXT):
     """Yield (relpath, lineno, line) for a log filename built from logDirectory/LOGDIR
@@ -2003,9 +2115,45 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"file path outside the plugin's own directory/log/config/playlists territory "
                    f"({hit[0]}:{hit[1]}: `{hit[2]}`).\n"
                    f"  - Store plugin-owned files inside the plugin's own directory "
-                   f"(`${{PLUGINDIR}}/{repo}/...`), FPP's config storage (`/media/config/`), or the "
-                   f"log directory (a real `.log` file only), rather than loose under "
-                   f"`/home/fpp/media/` itself"))
+                   f"(`${{PLUGINDIR}}/{repo}/...`), its runtime-data directory "
+                   f"(`/home/fpp/media/plugindata/{repo}/`), FPP's config storage (`/media/config/`, "
+                   f"for the `plugin.{repo}` settings file only), or the log directory (a real "
+                   f"`.log` file only), rather than loose under `/home/fpp/media/` itself"))
+
+    # Files a plugin creates under FPP's config directory that don't belong
+    # there: crash reports bundle every file under config/ and can't redact a
+    # binary, so a SQLite DB (AdvancedStats' stats DB, TwilioControl/
+    # MessageQueue's visitor-message DBs) ships whole - BLOCKER. A log/lock/
+    # cache or a non-`plugin.*` text file written there is the wrong place but
+    # redactable - BEST_PRACTICE. See _config_dir_hits for what each tier
+    # triggers on. Sorted by (path, line) and deduped by (kind, filename), so
+    # the first occurrence of each distinct offending file is what's reported.
+    seen_cfg_fnames = set()
+    for rel, lineno, line, fname, kind in sorted(_config_dir_hits(root), key=lambda h: (h[0], h[1])):
+        key = (kind, fname.lower())
+        if key in seen_cfg_fnames:
+            continue
+        seen_cfg_fnames.add(key)
+        if kind == "binary":
+            out.append(Finding(BLOCKER, "config-dir-binary-write",
+                       f"database/binary file `{fname}` under FPP's config directory ({rel}:{lineno}: "
+                       f"`{line}`) - crash reports bundle config/ and cannot redact binaries.\n"
+                       f"  - Write it to `/home/fpp/media/plugindata/{repo}/` instead (`mkdir -p` it in "
+                       f"scripts/fpp_install.sh); config/ is only for the `plugin.{repo}` settings file"))
+        elif kind == "state":
+            out.append(Finding(BEST_PRACTICE, "config-dir-misuse",
+                       f"log/cache/lock/pid file `{fname}` under FPP's config directory ({rel}:{lineno}: "
+                       f"`{line}`) - crash reports bundle config/, and runtime state isn't settings.\n"
+                       f"  - Write logs to `/home/fpp/media/logs/plugin-{repo}.log` and other state to "
+                       f"`/home/fpp/media/plugindata/{repo}/` (`mkdir -p` it in scripts/fpp_install.sh)"))
+        else:
+            out.append(Finding(BEST_PRACTICE, "config-dir-misuse",
+                       f"file `{fname}` written under FPP's config directory with a non-settings name "
+                       f"({rel}:{lineno}: `{line}`) - crash reports bundle config/, where only "
+                       f"`plugin.<repoName>` settings files are expected.\n"
+                       f"  - Settings: name it `plugin.{repo}` / `plugin.{repo}.json` "
+                       f"(WriteSettingToFile/setPluginJSON); anything else: write it to "
+                       f"`/home/fpp/media/plugindata/{repo}/` (`mkdir -p` it in scripts/fpp_install.sh)"))
 
     # Log filename doesn't start with the mandated "plugin-" prefix - it still
     # lands in the right directory, just under a name FPP's log viewer/Support
