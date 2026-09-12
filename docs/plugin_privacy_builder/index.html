@@ -1,0 +1,693 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Privacy declaration builder - Falcon Player</title>
+<!--
+  Guided form that produces the `privacy` block of a plugin's pluginInfo.json
+  (PLUGININFO_FORMAT.md "privacy" section and PLUGIN_GUIDELINES.md §14 in
+  fpp-plugin-Template; schema: .github/schema/pluginInfo.schema.json in this
+  repo). Loads the author's existing pluginInfo.json from their repo to
+  pre-fill name/repoName and any block they already have, walks through the
+  eight keys one at a time with the schema's own wording as guidance, then
+  hands back the block (and the whole file with the block merged in) to copy.
+
+  The live preview at the end uses FPP core's own renderer
+  (www/js/fpp-privacy-lights.js, via jsDelivr - not copied here) when it is
+  available; the form works without it.
+
+  Nothing leaves the browser: the only network calls are api.github.com /
+  raw.githubusercontent.com reads of the author's own repo.
+-->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.1.0/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
+<style>
+:root, [data-bs-theme=light] {
+  --bs-body-bg:#fff; --bs-body-color:#212529; --bs-secondary-color:rgba(33,37,41,.75); --bs-tertiary-bg:#f8f9fa; --bs-secondary-bg:#e9ecef;
+  --bs-border-color:#dee2e6; --bs-border-color-translucent:rgba(23,23,32,.175); --bs-link-color:#0d6efd; --bs-link-hover-color:#0a58ca;
+  --bs-success:#198754; --bs-warning:#ffc107; --bs-danger:#dc3545;
+  --bs-success-text-emphasis:rgb(10,54,33.6); --bs-success-bg-subtle:rgb(209,231,220.8); --bs-success-border-subtle:rgb(163,207,186.6);
+  --bs-warning-text-emphasis:rgb(102,77.2,2.8); --bs-warning-bg-subtle:rgb(255,242.6,205.4); --bs-warning-border-subtle:rgb(255,230.2,155.8);
+  --bs-danger-text-emphasis:rgb(88,21.2,27.6); --bs-danger-bg-subtle:rgb(248,214.6,217.8); --bs-danger-border-subtle:rgb(241,174.2,180.6);
+  --bs-secondary-text-emphasis:rgb(43.2,46.8,50); --bs-secondary-bg-subtle:rgb(225.6,227.4,229); --bs-secondary-border-subtle:rgb(196.2,199.8,203);
+  --bs-primary-text-emphasis:rgb(5.2,44,101.2); --bs-primary-bg-subtle:rgb(206.6,226,254.6); --bs-primary-border-subtle:rgb(158.2,197,254.2);
+  --pp-ground:#f4f5f7; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.15);
+  color-scheme:light;
+}
+[data-bs-theme=dark] {
+  --bs-body-bg:#212529; --bs-body-color:#dee2e6; --bs-secondary-color:rgba(222,226,230,.75); --bs-tertiary-bg:rgb(42.5,47.5,52.5); --bs-secondary-bg:#343a40;
+  --bs-border-color:#495057; --bs-border-color-translucent:rgba(255,255,255,.15); --bs-link-color:rgb(109.8,168,253.8); --bs-link-hover-color:rgb(139.8,185.4,254);
+  --bs-success-text-emphasis:rgb(117,183,152.4); --bs-success-bg-subtle:rgb(5,27,16.8); --bs-success-border-subtle:rgb(15,81,50.4);
+  --bs-warning-text-emphasis:rgb(255,217.8,106.2); --bs-warning-bg-subtle:rgb(51,38.6,1.4); --bs-warning-border-subtle:rgb(153,115.8,4.2);
+  --bs-danger-text-emphasis:rgb(234,133.8,143.4); --bs-danger-bg-subtle:rgb(44,10.6,13.8); --bs-danger-border-subtle:rgb(132,31.8,41.4);
+  --bs-secondary-text-emphasis:rgb(166.8,172.2,177); --bs-secondary-bg-subtle:rgb(21.6,23.4,25); --bs-secondary-border-subtle:rgb(64.8,70.2,75);
+  --bs-primary-text-emphasis:rgb(109.8,168,253.8); --bs-primary-bg-subtle:rgb(2.6,22,50.6); --bs-primary-border-subtle:rgb(7.8,66,151.8);
+  --pp-ground:#16191d; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.5);
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-bs-theme=light]) {
+  --bs-body-bg:#212529; --bs-body-color:#dee2e6; --bs-secondary-color:rgba(222,226,230,.75); --bs-tertiary-bg:rgb(42.5,47.5,52.5); --bs-secondary-bg:#343a40;
+  --bs-border-color:#495057; --bs-border-color-translucent:rgba(255,255,255,.15); --bs-link-color:rgb(109.8,168,253.8); --bs-link-hover-color:rgb(139.8,185.4,254);
+  --bs-success-text-emphasis:rgb(117,183,152.4); --bs-success-bg-subtle:rgb(5,27,16.8); --bs-success-border-subtle:rgb(15,81,50.4);
+  --bs-warning-text-emphasis:rgb(255,217.8,106.2); --bs-warning-bg-subtle:rgb(51,38.6,1.4); --bs-warning-border-subtle:rgb(153,115.8,4.2);
+  --bs-danger-text-emphasis:rgb(234,133.8,143.4); --bs-danger-bg-subtle:rgb(44,10.6,13.8); --bs-danger-border-subtle:rgb(132,31.8,41.4);
+  --bs-secondary-text-emphasis:rgb(166.8,172.2,177); --bs-secondary-bg-subtle:rgb(21.6,23.4,25); --bs-secondary-border-subtle:rgb(64.8,70.2,75);
+  --bs-primary-text-emphasis:rgb(109.8,168,253.8); --bs-primary-bg-subtle:rgb(2.6,22,50.6); --bs-primary-border-subtle:rgb(7.8,66,151.8);
+  --pp-ground:#16191d; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.5);
+  color-scheme:dark;
+}}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--pp-ground);color:var(--bs-body-color);font-family:"Helvetica Neue",Arial,"Noto Sans",system-ui,sans-serif;font-size:1rem;line-height:1.5;-webkit-text-size-adjust:100%}
+a{color:var(--bs-link-color);text-decoration:underline} a:hover{color:var(--bs-link-hover-color)}
+b,.fw-bold{font-weight:700} .fw-semibold{font-weight:600}
+.small{font-size:.875em}
+.text-secondary{color:var(--bs-secondary-color)!important}
+.text-uppercase{text-transform:uppercase}
+.text-success{color:var(--bs-success)!important} .text-warning{color:var(--bs-warning)!important} .text-danger{color:var(--bs-danger)!important}
+.text-success-emphasis{color:var(--bs-success-text-emphasis)!important} .text-warning-emphasis{color:var(--bs-warning-text-emphasis)!important} .text-danger-emphasis{color:var(--bs-danger-text-emphasis)!important} .text-secondary-emphasis{color:var(--bs-secondary-text-emphasis)!important}
+.bg-success-subtle{background-color:var(--bs-success-bg-subtle)!important} .bg-warning-subtle{background-color:var(--bs-warning-bg-subtle)!important} .bg-danger-subtle{background-color:var(--bs-danger-bg-subtle)!important} .bg-secondary-subtle{background-color:var(--bs-secondary-bg-subtle)!important}
+.border{border:1px solid var(--bs-border-color)!important}
+.border-success-subtle{border-color:var(--bs-success-border-subtle)!important} .border-warning-subtle{border-color:var(--bs-warning-border-subtle)!important} .border-danger-subtle{border-color:var(--bs-danger-border-subtle)!important} .border-secondary-subtle{border-color:var(--bs-secondary-border-subtle)!important}
+.rounded{border-radius:.375rem!important} .rounded-pill{border-radius:50rem!important}
+.d-flex{display:flex!important} .d-inline-flex{display:inline-flex!important} .d-none{display:none!important}
+.flex-wrap{flex-wrap:wrap!important} .flex-column{flex-direction:column!important}
+.align-items-center{align-items:center!important} .align-items-start{align-items:flex-start!important}
+.gap-1{gap:.25rem!important} .gap-2{gap:.5rem!important}
+.mt-1{margin-top:.25rem!important} .mt-2{margin-top:.5rem!important} .mt-3{margin-top:1rem!important}
+.mb-0{margin-bottom:0!important} .mb-1{margin-bottom:.25rem!important} .mb-2{margin-bottom:.5rem!important}
+.p-2{padding:.5rem!important} .ps-3{padding-left:1rem!important}
+.overflow-auto{overflow:auto!important}
+.list-unstyled{padding-left:0;list-style:none;margin:0}
+p{margin-top:0;margin-bottom:1rem}
+.link-primary{color:var(--bs-link-color)!important;cursor:pointer}
+.badge{--bs-badge-padding-x:.65em;--bs-badge-padding-y:.35em;--bs-badge-font-size:.75em;--bs-badge-font-weight:700;--bs-badge-border-radius:.375rem;display:inline-block;padding:var(--bs-badge-padding-y) var(--bs-badge-padding-x);font-size:var(--bs-badge-font-size);font-weight:var(--bs-badge-font-weight);line-height:1;text-align:center;white-space:nowrap;vertical-align:baseline;border-radius:var(--bs-badge-border-radius)}
+.pluginPrivacyChip{font-family:inherit;font-size:.8em;padding:.45em .8em;background-clip:padding-box}
+button.pluginPrivacyChip{cursor:pointer}
+.pluginPrivacyChip[aria-expanded="true"]{box-shadow:inset 0 0 0 1px currentColor}
+.pluginPrivacyChip[data-level="r"]{cursor:default}
+.pluginPrivacyChip[data-level="n"]{border-style:dashed!important}
+.pluginPrivacyChip[aria-expanded="true"] .fa-caret-right{transform:rotate(90deg)}
+details>summary{cursor:pointer}
+pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.8rem;line-height:1.4;background:var(--bs-tertiary-bg);border:1px solid var(--bs-border-color);border-radius:.375rem;padding:.75rem;overflow-x:auto;white-space:pre;margin:0}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.875em;color:inherit;background:var(--bs-tertiary-bg);padding:.05em .3em;border-radius:.25rem}
+
+/* page */
+.wrap{max-width:46rem;margin:0 auto;padding-block:1.5rem 4rem;padding-inline:1rem}
+.head{display:flex;flex-wrap:wrap;align-items:center;gap:.85rem;margin-bottom:.25rem}
+.head h1{font-size:1.4rem;margin:0;font-weight:600}
+.head .sub{margin:.1rem 0 0;color:var(--bs-secondary-color);font-size:.9rem}
+.fpplogo{height:2.1rem;width:auto;color:var(--bs-body-color);flex:0 0 auto}
+
+.theme{margin-left:auto;font:inherit;font-size:.875rem;padding:.3rem .7rem;border:1px solid var(--bs-border-color);border-radius:.375rem;background:var(--bs-body-bg);color:var(--bs-body-color);cursor:pointer}
+.lede{color:var(--bs-secondary-color);font-size:.925rem;margin:0 0 1.25rem;max-width:72ch}
+.panel{background:var(--bs-body-bg);border:1px solid var(--bs-border-color);border-radius:.5rem;padding:1.25rem;margin-bottom:1rem}
+.steps{display:flex;flex-wrap:wrap;gap:.35rem;margin:0 0 1rem;padding:0;list-style:none;font-size:.8rem}
+.steps li{padding:.2rem .6rem;border-radius:50rem;border:1px solid var(--bs-border-color);color:var(--bs-secondary-color);cursor:pointer;user-select:none}
+.steps li.cur{background:var(--bs-primary-bg-subtle);color:var(--bs-primary-text-emphasis);border-color:var(--bs-primary-border-subtle);font-weight:600}
+.steps li.done{color:var(--bs-body-color)}
+.steps li.bad{border-color:var(--bs-danger-border-subtle);color:var(--bs-danger-text-emphasis)}
+.step{display:none} .step.show{display:block}
+.step h2{font-size:1.15rem;font-weight:600;margin:0 0 .25rem}
+.step .q{margin:0 0 1rem;color:var(--bs-secondary-color);font-size:.925rem}
+label{display:block;font-weight:600;font-size:.9rem;margin:.9rem 0 .3rem}
+label:first-child{margin-top:0}
+.hint{font-weight:400;color:var(--bs-secondary-color);font-size:.85rem}
+input[type=text],input[type=number],select,textarea{width:100%;padding:.55rem .7rem;border:1px solid var(--bs-border-color);border-radius:.375rem;background:var(--bs-body-bg);color:var(--bs-body-color);font-size:1rem;font-family:inherit}
+textarea{min-height:5rem;resize:vertical}
+textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem;min-height:9rem}
+.row{display:flex;gap:.5rem;flex-wrap:wrap} .row>input[type=text]{flex:1 1 16rem}
+.count{font-size:.8rem;color:var(--bs-secondary-color);text-align:right;margin-top:.2rem} .count.over{color:var(--bs-warning-text-emphasis)}
+.check{display:flex;align-items:flex-start;gap:.5rem;font-weight:400;font-size:.95rem;margin:.5rem 0}
+.check input{margin-top:.3rem;flex:none}
+.choice{display:block;border:1px solid var(--bs-border-color);border-radius:.375rem;padding:.6rem .8rem;margin:.4rem 0;font-weight:400;cursor:pointer}
+.choice:has(input:checked){border-color:var(--bs-primary-border-subtle);background:var(--bs-primary-bg-subtle)}
+.choice input{margin-right:.5rem}
+.choice .d{display:block;color:var(--bs-secondary-color);font-size:.85rem;margin-left:1.4rem}
+.entry{border:1px solid var(--bs-border-color);border-radius:.375rem;padding:.9rem 1rem;margin:.75rem 0;background:var(--bs-tertiary-bg)}
+.entry .bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:.25rem}
+.entry .bar b{font-size:.85rem;text-transform:uppercase;letter-spacing:.03em;color:var(--bs-secondary-color)}
+.btn{display:inline-block;padding:.45rem .9rem;font-family:inherit;font-size:.95rem;font-weight:500;line-height:1.5;text-align:center;vertical-align:middle;cursor:pointer;user-select:none;border:1px solid transparent;border-radius:.375rem}
+.btn-primary{color:#fff;background-color:#0d6efd;border-color:#0d6efd} .btn-primary:hover{background-color:#0b5ed7}
+.btn-outline{color:var(--bs-body-color);background:transparent;border-color:var(--bs-border-color)} .btn-outline:hover{background:var(--bs-tertiary-bg)}
+.btn-link{background:none;border:0;color:var(--bs-link-color);padding:0;font:inherit;font-size:.875rem;cursor:pointer;text-decoration:underline}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+.btn-success{color:#fff;background-color:#198754;border-color:#198754} .btn-warning{color:#000;background-color:#ffc107;border-color:#ffc107} .btn-danger{color:#fff;background-color:#dc3545;border-color:#dc3545}
+.nav{display:flex;justify-content:space-between;gap:.5rem;margin-top:1.25rem;flex-wrap:wrap}
+.msg{margin-top:.6rem;font-size:.9rem;color:var(--bs-secondary-color)} .msg.err{color:var(--bs-danger-text-emphasis)} .msg.ok{color:var(--bs-success-text-emphasis)}
+.warn{font-size:.85rem;color:var(--bs-warning-text-emphasis);margin-top:.3rem} .warn:empty{display:none}
+.err{font-size:.85rem;color:var(--bs-danger-text-emphasis);margin-top:.3rem} .err:empty{display:none}
+.note{margin:1rem 0 0;padding:.75rem 1rem;border-left:3px solid var(--bs-border-color);color:var(--bs-secondary-color);font-size:.875rem}
+.note p{margin:0 0 .5rem} .note p:last-child{margin-bottom:0}
+.tbl{width:100%;border-collapse:collapse;font-size:.85rem;margin:.5rem 0 1rem}
+.tbl th,.tbl td{text-align:left;padding:.35rem .5rem;border-bottom:1px solid var(--bs-border-color);vertical-align:top}
+.tbl th{color:var(--bs-secondary-color);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.03em}
+.out{position:relative} .out .copy{position:absolute;top:.5rem;right:.5rem}
+.preview{border:1px solid var(--bs-border-color-translucent);border-radius:.5rem;padding:1rem;background:var(--bs-body-bg);box-shadow:var(--pp-shadow)}
+.installbtn{margin-top:.75rem;text-align:right}
+@media (max-width:480px){.panel{padding:1rem}}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="head">
+    <svg class="fpplogo" role="img" aria-label="FPP" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56.195 18.616"> <g id="fpp-logo" transform="translate(-373.818 -583.897)"> <path id="Path_21" data-name="Path 21" d="M415.23,583.9h-9.6a5.18,5.18,0,0,0-4.837,4.026l-2.1,10.458a3.426,3.426,0,0,0,.618,2.876,3.281,3.281,0,0,0,2.626,1.184h2.731l.083-.344a3.139,3.139,0,0,1-2.173-3.826l.242-1.208c.065,0,.13.006.2.006h9.6a5.179,5.179,0,0,0,4.837-4.026l1.022-5.086a3.423,3.423,0,0,0-.618-2.875A3.279,3.279,0,0,0,415.23,583.9Zm-.747,4.349-.878,4.369a1.228,1.228,0,0,1-1.322,1.095h-7.835a.772.772,0,0,1-.618-.276.807.807,0,0,1-.144-.679l.907-4.512a1.256,1.256,0,0,1,1.181-.969h7.951a.76.76,0,0,1,.609.276A.828.828,0,0,1,414.483,588.246Z" transform="translate(-7.429)" fill="currentColor"/> <path id="Path_22" data-name="Path 22" d="M444.822,585.081A3.28,3.28,0,0,0,442.2,583.9h-9.6a5.18,5.18,0,0,0-4.837,4.026l-2.1,10.458a3.426,3.426,0,0,0,.618,2.876,3.281,3.281,0,0,0,2.626,1.184h2.731l.083-.344a3.139,3.139,0,0,1-2.174-3.826l.243-1.208c.065,0,.13.006.2.006h9.6a5.179,5.179,0,0,0,4.837-4.026l1.022-5.086A3.425,3.425,0,0,0,444.822,585.081Zm-3.373,3.165-.878,4.369a1.228,1.228,0,0,1-1.323,1.095h-7.834a.775.775,0,0,1-.618-.276.809.809,0,0,1-.143-.679l.907-4.512a1.256,1.256,0,0,1,1.181-.969h7.951a.761.761,0,0,1,.609.276A.83.83,0,0,1,441.449,588.246Z" transform="translate(-15.51)" fill="currentColor"/> <path id="Path_23" data-name="Path 23" d="M389.077,584h-8.237A5.178,5.178,0,0,0,376,588.026l-2.1,10.458a3.427,3.427,0,0,0,.618,2.876,3.28,3.28,0,0,0,2.626,1.184h2.73a.2.2,0,0,0,.19-.152.156.156,0,0,0-.106-.193,3.14,3.14,0,0,1-2.174-3.826l.731-3.638h8.454a1.8,1.8,0,0,1,1.431.639.165.165,0,0,0,.183.046.2.2,0,0,0,.132-.156,3.385,3.385,0,0,0-.695-2.76,3.29,3.29,0,0,0-2.576-1.127H379.19l.609-3.032a1.269,1.269,0,0,1,1.185-.987h7.127a3.181,3.181,0,0,1,3.329,3.341.153.153,0,0,0,.156.16h0a.2.2,0,0,0,.192-.159l.531-2.642a3.428,3.428,0,0,0-.618-2.876A3.282,3.282,0,0,0,389.077,584Z" transform="translate(0 -0.031)" fill="currentColor"/> </g> </svg>
+    <div>
+      <h1>Privacy declaration builder</h1>
+      <p class="sub">For plugins listed with FPP - Falcon Player.</p>
+    </div>
+    <button type="button" class="theme" id="themeBtn" aria-label="Toggle light/dark">Dark</button>
+  </div>
+  <p class="lede">Builds the <code>privacy</code> block for your plugin's <code>pluginInfo.json</code>, one question at a time. FPP turns this block into the six privacy lights and the install dialog; the listing check compares it with your code. Write it for a neighbour, not a developer. Nothing you type leaves your browser. The block is described in <a href="https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGININFO_FORMAT.md" target="_blank" rel="noopener">PLUGININFO_FORMAT.md</a>; what a listing needs is in the <a href="https://github.com/FalconChristmas/fpp-data/blob/master/PLUGINS.md" target="_blank" rel="noopener">plugin guidelines</a>.</p>
+
+  <ol class="steps" id="steps"></ol>
+
+  <div class="panel">
+
+    <!-- 0 · start -->
+    <section class="step" data-step="0">
+      <h2>Start from your repo</h2>
+      <p class="q">Your existing <code>pluginInfo.json</code> pre-fills what it can - the plugin name and, if you already have one, the <code>privacy</code> block to edit. You can also start blank.</p>
+      <label for="repo">GitHub repo <span class="hint">- <code>owner/repo</code> or a github.com URL</span></label>
+      <div class="row">
+        <input id="repo" type="text" placeholder="owner/fpp-plugin-example" spellcheck="false">
+        <button type="button" class="btn btn-primary" id="loadBtn">Load</button>
+        <button type="button" class="btn btn-outline" id="blankBtn">Start blank</button>
+      </div>
+      <div class="msg" id="loadMsg"></div>
+      <details class="mt-2 small">
+        <summary class="link-primary">Or paste your pluginInfo.json</summary>
+        <textarea id="pasteJson" class="mono mt-2" spellcheck="false" placeholder='{ "name": "…", "repoName": "…", … }'></textarea>
+        <div class="mt-2"><button type="button" class="btn btn-outline" id="pasteBtn">Use pasted JSON</button></div>
+      </details>
+      <div class="note" id="draftNote" hidden><p>A draft from earlier is saved in this browser. <button type="button" class="btn-link" id="resumeBtn">Resume it</button> or load / start blank to replace it.</p></div>
+    </section>
+
+    <!-- 1 · summary -->
+    <section class="step" data-step="1">
+      <h2>Summary</h2>
+      <p class="q">One or two plain sentences for the install dialog: what leaves the device, to whom, and why. This is the first thing a person deciding whether to install your plugin reads.</p>
+      <label for="summary">Summary <span class="hint">- 1 to 200 characters; the listing check warns over 200</span></label>
+      <textarea id="summary" placeholder="Lets visitors text song requests to your show. Their phone number and message go to Twilio (the SMS company) and are kept on this device for 30 days."></textarea>
+      <div class="count" id="summaryCount"></div>
+      <div class="err" id="summaryErr"></div>
+      <div class="note"><p>If the plugin does nothing off this device and keeps nothing about anyone, <b>"Runs on this device only."</b> is enough. Tip: fill in the other steps first, then come back and write the summary from what you declared.</p></div>
+    </section>
+
+    <!-- 2 · sends -->
+    <section class="step" data-step="2">
+      <h2>Sends data</h2>
+      <p class="q">Every place data leaves this device: the plugin's own connections, anything it publishes on FPP's MQTT, fetches through FPP's helpers, loads into the operator's browser from a plugin page (a CDN, fonts, an embed), or broadcasts (FM, LoRa). Empty means the plugin sends nothing.</p>
+      <div class="note"><p><b>Do not list GitHub</b> (<code>github.com</code>, <code>api.github.com</code>, <code>raw.githubusercontent.com</code>, <code>*.github.io</code>) for fetching your own code, releases, update checks or a package - FPP's plugin manager makes that traffic already. A program you download is a <b>System change</b> of kind <code>download</code> instead.</p></div>
+      <div id="sendsList"></div>
+      <button type="button" class="btn btn-outline mt-2" data-add="sends"><i class="fas fa-plus"></i> Add a destination</button>
+      <div class="note" id="sendsEmptyNote"><p>Nothing listed = <b>"No sending disclosed"</b> (green).</p></div>
+      <div class="note nofit"><p><b>None of the choices fit?</b> <b>To</b> is free text, so any destination can be named: a hostname, a phrase for something the operator enters, or a broadcast. If a send really cannot be described that way, describe it in the <b>Anything else</b> step so it still shows in the install dialog, and <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> so the vocabulary can grow. Never invent a new key or value - FPP ignores it and the listing check rejects it.</p></div>
+    </section>
+
+    <!-- 3 · collects -->
+    <section class="step" data-step="3">
+      <h2>Collects data</h2>
+      <p class="q">Data the plugin keeps on this device about people, beyond the operator's own settings: logs of who did what, messages, names, photos, addresses. Empty means it keeps only the operator's settings.</p>
+      <div id="collectsList"></div>
+      <button type="button" class="btn btn-outline mt-2" data-add="collects"><i class="fas fa-plus"></i> Add something it keeps</button>
+      <div class="note" id="collectsEmptyNote"><p>Nothing listed = <b>"No collection disclosed"</b> (green). Data about visitors or passers-by with no time limit, or about third parties or performers, is red; anything else with a limit is amber.</p></div>
+      <div class="note nofit"><p><b>None of the choices fit?</b> Pick the closest one and describe the real behaviour in <b>What is kept</b> - <i>About whom</i> only sets the colour. If nothing is close, leave it out here, describe it in the <b>Anything else</b> step so it still shows in the install dialog, and <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> so the vocabulary can grow. Never invent a new key or value - FPP ignores it and the listing check rejects it.</p></div>
+    </section>
+
+    <!-- 4 · sensors -->
+    <section class="step" data-step="4">
+      <h2>Camera &amp; mic</h2>
+      <p class="q">Sensors the plugin reads that can observe a person. Empty means none. A camera stream that leaves the device is also a <b>Sends data</b> entry.</p>
+      <div id="sensorsList"></div>
+      <button type="button" class="btn btn-outline mt-2" data-add="sensors"><i class="fas fa-plus"></i> Add a sensor</button>
+      <div class="note" id="sensorsEmptyNote"><p>Nothing listed = <b>"No camera or mic disclosed"</b> (green). A sensor that isn't stored is amber; stored frames/audio/detections, or face/body tracking, is red ("Records people").</p></div>
+      <div class="note nofit"><p><b>None of the choices fit?</b> Pick the closest one and describe the real behaviour and use <b>Anything else</b> for the detail (sensors have no free-text line). If nothing is close, leave it out here, describe it in the <b>Anything else</b> step so it still shows in the install dialog, and <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> so the vocabulary can grow. Never invent a new key or value - FPP ignores it and the listing check rejects it.</p></div>
+    </section>
+
+    <!-- 5 · remote access -->
+    <section class="step" data-step="5">
+      <h2>Remote access</h2>
+      <p class="q">The plugin's <b>own</b> listener, at its widest reach. Pages and API routes served through FPP's normal web server are <code>none</code>.</p>
+      <div id="remoteChoices"></div>
+      <div class="note nofit"><p><b>None of the choices fit?</b> Pick the <b>widest</b> reach that applies and explain the detail in <b>Anything else</b>. If nothing is close, leave it out here, describe it in the <b>Anything else</b> step so it still shows in the install dialog, and <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> so the vocabulary can grow. Never invent a new key or value - FPP ignores it and the listing check rejects it.</p></div>
+    </section>
+
+    <!-- 6 · system changes -->
+    <section class="step" data-step="6">
+      <h2>System changes</h2>
+      <p class="q">Every change outside the plugin's own directory: services it installs, ports it opens, FPP settings it writes, software it downloads, package sources it adds, credentials it reads, privileges it grants. Empty means nothing outside its own directory.</p>
+      <div id="systemChangesList"></div>
+      <button type="button" class="btn btn-outline mt-2" data-add="systemChanges"><i class="fas fa-plus"></i> Add a change</button>
+      <div class="note" id="systemChangesEmptyNote"><p>Nothing listed = <b>"No system changes disclosed"</b> (green). Any change is amber; <code>package-source</code>, <code>tunnel</code>, <code>reads-core-credentials</code> and <code>privilege</code> are red ("Changes this device permanently").</p></div>
+      <div class="note nofit"><p><b>None of the choices fit?</b> Pick the closest one and describe the real behaviour in the <b>What</b> line - the colour comes from the kind, the words come from you. If nothing is close, leave it out here, describe it in the <b>Anything else</b> step so it still shows in the install dialog, and <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> so the vocabulary can grow. Never invent a new key or value - FPP ignores it and the listing check rejects it.</p></div>
+    </section>
+
+    <!-- 7 · closed code -->
+    <section class="step" data-step="7">
+      <h2>Can it be checked?</h2>
+      <p class="q">Is everything that runs either in your repository or installed from a public package source (apt, pip, npm, CPAN or similar)?</p>
+      <label class="choice"><input type="radio" name="closedCode" value="false"> Yes - everything is in the repo or from a public package source
+        <span class="d">Green: "Author says all its software can be checked". (A <code>download</code> system change still makes this amber.)</span></label>
+      <label class="choice"><input type="radio" name="closedCode" value="true"> No - something that runs is a prebuilt binary, a downloaded .so, a vendor installer or an obfuscated script
+        <span class="d">Red: "Includes software that can't be checked", and the headline becomes "Part of this plugin is a black box".</span></label>
+      <div class="err" id="closedCodeErr"></div>
+    </section>
+
+    <!-- 8 · other -->
+    <section class="step" data-step="8">
+      <h2>Anything else</h2>
+      <p class="q">Anything the other keys cannot say: what is left behind after uninstall, a visitor-facing page hosted by a vendor, payments taken, a self-updating component, a behaviour none of the earlier choices fit. FPP shows this text verbatim in the install dialog, so it is never lost - it just doesn't change a light's colour. Write <code>none</code> if there is nothing.</p>
+      <div class="note"><p>If you had to put something here because the vocabulary has no place for it, please <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> saying what it was. The keys and values are fixed on purpose (FPP computes the colours from them and the listing check matches your code against them), so the way to cover a new kind of behaviour is to add it to the vocabulary for everyone, not to invent a key in one plugin.</p></div>
+      <label for="other">Other</label>
+      <textarea id="other" placeholder="none"></textarea>
+      <div class="err" id="otherErr"></div>
+    </section>
+
+    <!-- 9 · result -->
+    <section class="step" data-step="9">
+      <h2>Your privacy block</h2>
+      <p class="q">Paste this into your <code>pluginInfo.json</code> as the <code>"privacy"</code> key, or copy the whole file with it merged in. Then run it past the <a href="../plugin_preview/" target="_blank" rel="noopener">plugin preview</a> once it's pushed.</p>
+      <div class="err" id="resultErr"></div>
+      <div id="previewWrap">
+        <h3 class="small text-uppercase text-secondary mb-1">How FPP will show it</h3>
+        <div class="preview" id="preview"></div>
+        <div class="installbtn"><span class="btn" id="installBtn">Install</span></div>
+      </div>
+      <label>The <code>privacy</code> block</label>
+      <div class="out"><button type="button" class="btn btn-outline btn-sm copy" data-copy="blockOut">Copy</button><pre id="blockOut"></pre></div>
+      <label>Whole <code>pluginInfo.json</code> with the block merged in <span class="hint" id="mergeHint"></span></label>
+      <div class="out"><button type="button" class="btn btn-outline copy" data-copy="fileOut">Copy</button><pre id="fileOut"></pre></div>
+      <div class="note"><p>This block is <b>what you declare</b>. The fpp-data listing check greps your code against it - a send, sensor, service or credential read it finds that you didn't declare is a blocker (<code>privacy-undeclared-*</code>), so say what the plugin actually does. From <b>1 January 2027</b> a plugin without this block cannot be listed or updated.</p></div>
+    </section>
+
+    <div class="nav">
+      <button type="button" class="btn btn-outline" id="backBtn">Back</button>
+      <button type="button" class="btn btn-primary" id="nextBtn">Next</button>
+    </div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/gh/FalconChristmas/fpp@master/www/js/fpp-privacy-lights.js" crossorigin="anonymous"></script>
+<script>
+(function () {
+"use strict";
+var $ = function (id) { return document.getElementById(id); };
+function esc(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
+
+// ---- theme --------------------------------------------------------------
+var root = document.documentElement;
+function isDark() { var t = root.getAttribute("data-bs-theme"); return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; }
+function applyTheme(t) { if (t) root.setAttribute("data-bs-theme", t); else root.removeAttribute("data-bs-theme"); $("themeBtn").textContent = isDark() ? "Light" : "Dark"; }
+try { applyTheme(localStorage.getItem("pp-theme") || ""); } catch (e) { applyTheme(""); }
+$("themeBtn").addEventListener("click", function () { var t = isDark() ? "light" : "dark"; try { localStorage.setItem("pp-theme", t); } catch (e) {} applyTheme(t); });
+
+// ---- vocabulary (pluginInfo.schema.json $defs/privacy*) -------------------
+var ABOUT = [
+  ["operator", "the operator", "the FPP owner - their own settings, logs of their own actions"],
+  ["household", "the household", "people at the property"],
+  ["visitors", "visitors", "people who interact with the show - text it, press a button, use a page"],
+  ["passers-by", "passers-by", "people captured without interacting - camera, presence sensor"],
+  ["third-parties", "third parties", "people in content - names in messages, contacts, photos"],
+  ["performers", "performers", "people who appear in or perform for the show"]
+];
+var SENSORS = [
+  ["camera", "Camera"], ["microphone", "Microphone"], ["face-tracking", "Face tracking"], ["body-tracking", "Body tracking"],
+  ["presence", "Presence / motion sensor"], ["rfid", "RFID / NFC reader"], ["gpio-input", "GPIO input (button, switch)"]
+];
+var REMOTE = [
+  ["none", "None", "No listener of its own, or only pages and routes on FPP's web server. Green."],
+  ["lan", "Local network", "Opens its own port on the local network (a small web server, a socket, a broker). Amber: \"Remote access, off by default\"."],
+  ["internet-authenticated", "Internet, with a login", "A port meant to be reached from the internet, behind a username/password or token. Amber."],
+  ["internet-open", "Internet, no login", "A port meant to be reached from the internet with no login. Red."],
+  ["exposes-fpp", "Puts FPP's own pages on the internet", "Proxies or forwards FPP's own web interface to the internet. Red."],
+  ["tunnel", "Tunnel / overlay network", "Bundles a tunnel (Cloudflare, ngrok, Tailscale, ZeroTier, ...) that lets an outside service reach this device. Red."]
+];
+var KINDS = [
+  ["service", "Service", "a systemd unit, daemon, cron job, mount or share"],
+  ["network", "Network", "opens a LAN port, mDNS, or tells the operator to forward a port"],
+  ["core-settings", "FPP settings", "writes FPP's own settings or files"],
+  ["download", "Download", "fetches extra software at install, self-updates, or downloads at runtime - name the host"],
+  ["package-source", "Package source", "adds an apt / pip / npm source - name the host"],
+  ["tunnel", "Tunnel", "installs an overlay network or remote-access tunnel"],
+  ["reads-core-credentials", "Reads FPP credentials", "reads FPP's own passwords or tokens (MQTT password, API keys, ...)"],
+  ["privilege", "Privilege", "sudoers, groups, kernel modules, SSH keys on other hosts"]
+];
+var STEP_NAMES = ["Start", "Summary", "Sends", "Collects", "Camera & mic", "Remote access", "System changes", "Can it be checked?", "Other", "Result"];
+
+// ---- state ----------------------------------------------------------------
+var info = null;            // the loaded pluginInfo.json (object) or null
+var infoSource = "";        // where it came from, for the result step
+var priv = emptyBlock();
+var cur = 0;
+var visited = {};
+
+function emptyBlock() {
+  return { summary: "", sends: [], collects: [], sensors: [], remoteAccess: "none", systemChanges: [], closedCode: null, other: "none" };
+}
+function newEntry(list) {
+  return list === "sends" ? { to: "", what: "", why: "", alwaysOn: false }
+    : list === "collects" ? { what: "", about: "operator", keptDays: null, canDelete: false, where: "" }
+    : list === "sensors" ? { type: "camera", stored: false }
+    : { kind: "service", what: "" };
+}
+// Adopt an existing block: keep only known keys, coerce types, ignore junk.
+function adoptBlock(p) {
+  var b = emptyBlock();
+  if (!p || typeof p !== "object" || Array.isArray(p)) return b;
+  if (typeof p.summary === "string") b.summary = p.summary;
+  if (typeof p.other === "string") b.other = p.other;
+  if (typeof p.closedCode === "boolean") b.closedCode = p.closedCode;
+  if (REMOTE.some(function (r) { return r[0] === p.remoteAccess; })) b.remoteAccess = p.remoteAccess;
+  ["sends", "collects", "sensors", "systemChanges"].forEach(function (k) {
+    if (!Array.isArray(p[k])) return;
+    b[k] = p[k].filter(function (e) { return e && typeof e === "object"; }).map(function (e) {
+      var n = newEntry(k);
+      Object.keys(n).forEach(function (f) {
+        if (!(f in e)) return;
+        if (typeof n[f] === "boolean") n[f] = !!e[f];
+        else if (f === "keptDays") n[f] = (typeof e[f] === "number" && e[f] >= 0) ? Math.floor(e[f]) : null;
+        else if (typeof e[f] === "string") n[f] = e[f];
+      });
+      return n;
+    });
+  });
+  return b;
+}
+
+function saveDraft() {
+  try { localStorage.setItem("pp-privacy-draft", JSON.stringify({ info: info, infoSource: infoSource, priv: priv, cur: cur })); } catch (e) {}
+}
+function loadDraft() {
+  try { var d = JSON.parse(localStorage.getItem("pp-privacy-draft") || "null"); return d && d.priv ? d : null; } catch (e) { return null; }
+}
+
+// ---- validation -----------------------------------------------------------
+var HOST_RE = /\b[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}\b/i;
+var GITHUB_RE = /(^|\.|\/)(github\.com|api\.github\.com|raw\.githubusercontent\.com|github\.io)(\/|$|\s)/i;
+var HWID_RE = /\b(serial( number)?|mac( address)?|uuid|hardware id|hwid|hw id)\b/i;
+
+function problems(step) {
+  var errs = [];
+  if (step === 1 && !priv.summary.trim()) errs.push("Write a summary.");
+  if (step === 2) priv.sends.forEach(function (e, i) {
+    if (!e.to.trim() || !e.what.trim() || !e.why.trim()) errs.push("Destination " + (i + 1) + ": to, what and why are all required.");
+  });
+  if (step === 3) priv.collects.forEach(function (e, i) {
+    if (!e.what.trim() || !e.where.trim()) errs.push("Entry " + (i + 1) + ": what and where are required.");
+  });
+  if (step === 6) priv.systemChanges.forEach(function (e, i) {
+    if (!e.what.trim()) errs.push("Change " + (i + 1) + ": say what it does.");
+  });
+  if (step === 7 && priv.closedCode === null) errs.push("Choose one.");
+  if (step === 8 && !priv.other.trim()) errs.push("Write \"none\" if there is nothing to add.");
+  return errs;
+}
+function allProblems() {
+  var all = [];
+  for (var s = 1; s <= 8; s++) all = all.concat(problems(s));
+  return all;
+}
+
+// ---- rendering the lists --------------------------------------------------
+function field(list, i, f, label, hint, opts) {
+  opts = opts || {};
+  var id = list + "-" + i + "-" + f;
+  var h = '<label for="' + id + '">' + label + (hint ? ' <span class="hint">- ' + hint + "</span>" : "") + "</label>";
+  h += '<input type="text" id="' + id + '" data-list="' + list + '" data-i="' + i + '" data-f="' + f + '" value="' + esc(priv[list][i][f]) + '"' +
+    (opts.placeholder ? ' placeholder="' + esc(opts.placeholder) + '"' : "") + (opts.max ? ' data-max="' + opts.max + '"' : "") + ' spellcheck="false">';
+  if (opts.max) h += '<div class="count" id="' + id + '-count"></div>';
+  h += '<div class="warn" id="' + id + '-warn"></div>';
+  return h;
+}
+function selectField(list, i, f, label, options, hint) {
+  var id = list + "-" + i + "-" + f;
+  var h = '<label for="' + id + '">' + label + (hint ? ' <span class="hint">- ' + hint + "</span>" : "") + "</label>";
+  h += '<select id="' + id + '" data-list="' + list + '" data-i="' + i + '" data-f="' + f + '">';
+  options.forEach(function (o) { h += '<option value="' + o[0] + '"' + (priv[list][i][f] === o[0] ? " selected" : "") + ">" + esc(o[1]) + (o[2] ? " - " + esc(o[2]) : "") + "</option>"; });
+  return h + "</select>";
+}
+function checkField(list, i, f, label, hint) {
+  var id = list + "-" + i + "-" + f;
+  return '<label class="check"><input type="checkbox" id="' + id + '" data-list="' + list + '" data-i="' + i + '" data-f="' + f + '"' + (priv[list][i][f] ? " checked" : "") + "><span>" + label + (hint ? ' <span class="hint">- ' + hint + "</span>" : "") + "</span></label>";
+}
+function entryBar(list, i, title) {
+  return '<div class="bar"><b>' + title + " " + (i + 1) + '</b><button type="button" class="btn-link" data-del="' + list + '" data-i="' + i + '">Remove</button></div>';
+}
+
+function renderList(list) {
+  var box = $(list + "List");
+  var h = "";
+  priv[list].forEach(function (e, i) {
+    h += '<div class="entry">';
+    if (list === "sends") {
+      h += entryBar(list, i, "Destination");
+      h += field(list, i, "to", "To", "a hostname (<code>api.twilio.com</code>), a phrase for an address the operator enters (<code>your MQTT broker</code>, <code>the FPP players you list</code>), or a broadcast (<code>anyone in FM range</code>). Start it with <code>http://</code> if the connection is unencrypted", { placeholder: "api.twilio.com" });
+      h += field(list, i, "what", "What is sent", "in words; say \"CPU serial number\" or \"MAC address\" if a hardware identifier is sent", { placeholder: "visitor phone numbers and messages", max: 100 });
+      h += field(list, i, "why", "Why", "lower-case, no full stop - FPP joins it after a dash", { placeholder: "to send and receive the text messages", max: 100 });
+      h += checkField(list, i, "alwaysOn", "Always on", "it sends before the operator turns anything on: at install, at boot, while fppd runs. Always-on to a hostname is red");
+    } else if (list === "collects") {
+      h += entryBar(list, i, "Keeps");
+      h += field(list, i, "what", "What is kept", "in words", { placeholder: "visitor phone numbers and messages", max: 100 });
+      h += selectField(list, i, "about", "About whom", ABOUT);
+      var kid = list + "-" + i + "-keptDays";
+      h += '<label for="' + kid + '">Kept for <span class="hint">- days; leave blank if it is kept until someone deletes it by hand</span></label>';
+      h += '<input type="number" min="0" step="1" id="' + kid + '" data-list="' + list + '" data-i="' + i + '" data-f="keptDays" value="' + (e.keptDays === null ? "" : e.keptDays) + '" placeholder="until deleted by hand">';
+      h += checkField(list, i, "canDelete", "Can be deleted from the plugin's own UI", "a button or control in the plugin removes it");
+      h += field(list, i, "where", "Where", "a path under <code>/home/fpp/media/</code> (<code>plugindata/fpp-plugin-x/</code>, <code>config/plugin.fpp-x</code>) or <code>plugin log</code>. FPP keeps these paths out of crash reports", { placeholder: "plugindata/fpp-plugin-x/" });
+    } else if (list === "sensors") {
+      h += entryBar(list, i, "Sensor");
+      h += selectField(list, i, "type", "Type", SENSORS);
+      h += checkField(list, i, "stored", "Stored", "frames, audio or detections are written to disk");
+    } else {
+      h += entryBar(list, i, "Change");
+      h += selectField(list, i, "kind", "Kind", KINDS);
+      h += field(list, i, "what", "What", "one line: \"enables smbd\", \"adds fpp to the video group\", \"downloads the Piper voice models from huggingface.co\"", { placeholder: "enables smbd", max: 120 });
+    }
+    h += "</div>";
+  });
+  box.innerHTML = h;
+  var note = $(list + "EmptyNote");
+  if (note) note.hidden = priv[list].length > 0;
+  priv[list].forEach(function (e, i) { Object.keys(e).forEach(function (f) { refreshFieldHints(list, i, f); }); });
+}
+
+function refreshFieldHints(list, i, f) {
+  var id = list + "-" + i + "-" + f;
+  var el = $(id);
+  if (!el) return;
+  var v = priv[list][i][f];
+  var max = el.getAttribute("data-max");
+  if (max) { var c = $(id + "-count"); c.textContent = String(v).length + " / " + max; c.className = "count" + (String(v).length > +max ? " over" : ""); }
+  var w = $(id + "-warn");
+  if (!w) return;
+  var msg = "";
+  if (list === "sends" && f === "to") {
+    if (GITHUB_RE.test(v)) msg = "GitHub hosts are not listed here - FPP's plugin manager already makes that traffic. If it downloads a program, declare a System change of kind download instead.";
+    else if (/^https:\/\//i.test(v)) msg = "Just the hostname is enough; https:// is assumed.";
+    else if (/^http:\/\//i.test(v) && HOST_RE.test(v.replace(/^http:\/\//i, ""))) msg = "Unencrypted to a hostname on the internet: this light will be red (\"Sends unencrypted to the internet\").";
+    else if (/localhost|127\.0\.0\.1/i.test(v)) msg = "127.0.0.1 / localhost never leaves the device - that isn't a send.";
+  }
+  if (list === "sends" && f === "what" && HWID_RE.test(v)) msg = "Names a hardware identifier: this light will be red (\"Sends identifying data\"). Keep it if that's true.";
+  if (list === "sends" && f === "why") {
+    if (/^[A-Z]/.test(v) || /\.$/.test(v.trim())) msg = "Start lower-case and leave off the full stop: FPP writes it as \"<what> - <why>.\"";
+  }
+  if (f === "what" && /never|not sent|no password|doesn't send|does not send/i.test(v)) msg = "List what IS sent - a \"never sends X\" claim can't be checked by the reader.";
+  w.textContent = msg;
+}
+
+function renderRemote() {
+  var h = "";
+  REMOTE.forEach(function (r) {
+    h += '<label class="choice"><input type="radio" name="remoteAccess" value="' + r[0] + '"' + (priv.remoteAccess === r[0] ? " checked" : "") + "> " + esc(r[1]) + '<span class="d">' + esc(r[2]) + "</span></label>";
+  });
+  $("remoteChoices").innerHTML = h;
+}
+
+function renderSteps() {
+  var h = "";
+  STEP_NAMES.forEach(function (n, i) {
+    var cls = i === cur ? "cur" : (visited[i] ? "done" : "");
+    if (visited[i] && i >= 1 && i <= 8 && problems(i).length) cls += " bad";
+    h += '<li class="' + cls + '" data-go="' + i + '">' + (i === 9 ? "" : (i + 1) + " · ") + esc(n) + "</li>";
+  });
+  $("steps").innerHTML = h;
+}
+
+function showStep(n) {
+  cur = n;
+  visited[n] = true;
+  document.querySelectorAll(".step").forEach(function (s) { s.classList.toggle("show", +s.getAttribute("data-step") === n); });
+  $("backBtn").disabled = n === 0;
+  $("nextBtn").textContent = n === 8 ? "Finish" : "Next";
+  $("nextBtn").hidden = n === 9;
+  if (n === 1) { $("summary").value = priv.summary; refreshSummary(); }
+  if (n === 2) renderList("sends");
+  if (n === 3) renderList("collects");
+  if (n === 4) renderList("sensors");
+  if (n === 5) renderRemote();
+  if (n === 6) renderList("systemChanges");
+  if (n === 7) { document.querySelectorAll('input[name="closedCode"]').forEach(function (r) { r.checked = priv.closedCode !== null && String(priv.closedCode) === r.value; }); $("closedCodeErr").textContent = ""; }
+  if (n === 8) { $("other").value = priv.other; $("otherErr").textContent = ""; }
+  if (n === 9) renderResult();
+  renderSteps();
+  saveDraft();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function refreshSummary() {
+  var v = $("summary").value;
+  var c = $("summaryCount"); c.textContent = v.length + " / 200"; c.className = "count" + (v.length > 200 ? " over" : "");
+}
+
+// ---- result ---------------------------------------------------------------
+function cleanBlock() {
+  var b = {
+    summary: priv.summary.trim(),
+    sends: priv.sends.map(function (e) { return { to: e.to.trim(), what: e.what.trim(), why: e.why.trim(), alwaysOn: !!e.alwaysOn }; }),
+    collects: priv.collects.map(function (e) { return { what: e.what.trim(), about: e.about, keptDays: e.keptDays, canDelete: !!e.canDelete, where: e.where.trim() }; }),
+    sensors: priv.sensors.map(function (e) { return { type: e.type, stored: !!e.stored }; }),
+    remoteAccess: priv.remoteAccess,
+    systemChanges: priv.systemChanges.map(function (e) { return { kind: e.kind, what: e.what.trim() }; }),
+    closedCode: !!priv.closedCode,
+    other: priv.other.trim() || "none"
+  };
+  return b;
+}
+
+function renderResult() {
+  var errs = allProblems();
+  $("resultErr").innerHTML = errs.length ? "Not finished yet: " + errs.map(esc).join(" ") + " Use the step list above to go back." : "";
+  var block = cleanBlock();
+  $("blockOut").textContent = '"privacy": ' + JSON.stringify(block, null, 4).replace(/\n/g, "\n") ;
+  var merged;
+  if (info) {
+    merged = {};
+    // Keep the author's key order; put privacy where it was, else at the end.
+    Object.keys(info).forEach(function (k) { merged[k] = k === "privacy" ? block : info[k]; });
+    if (!("privacy" in merged)) merged.privacy = block;
+    $("mergeHint").textContent = "- from " + infoSource;
+  } else {
+    merged = { privacy: block };
+    $("mergeHint").textContent = "- no pluginInfo.json was loaded, so this is just the block";
+  }
+  $("fileOut").textContent = JSON.stringify(merged, null, 4);
+
+  var pv = $("preview");
+  if (typeof FPPPluginPrivacy === "undefined") {
+    pv.innerHTML = '<div class="small text-secondary">The live preview needs FPP\'s own renderer (<code>fpp-privacy-lights.js</code>), which could not be loaded from the FPP repository. The block below is still complete.</div>';
+    $("installBtn").hidden = true;
+    return;
+  }
+  var r = FPPPluginPrivacy.evaluate(block, { unreviewed: true });
+  var h = '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; not verified by FPP</div>';
+  h += FPPPluginPrivacy.headlineHtml(r) + FPPPluginPrivacy.stripHtml(r, { prefix: "pv" }) + FPPPluginPrivacy.detailsHtml(r);
+  pv.innerHTML = h;
+  FPPPluginPrivacy.bind("preview");
+  var btn = FPPPluginPrivacy.installButtonFor(r);
+  $("installBtn").hidden = false;
+  $("installBtn").textContent = btn.text;
+  $("installBtn").className = "btn " + btn.cls;
+}
+
+// ---- events ---------------------------------------------------------------
+document.addEventListener("input", function (ev) {
+  var el = ev.target;
+  if (el.id === "summary") { priv.summary = el.value; refreshSummary(); $("summaryErr").textContent = ""; saveDraft(); return; }
+  if (el.id === "other") { priv.other = el.value; $("otherErr").textContent = ""; saveDraft(); return; }
+  var list = el.getAttribute("data-list");
+  if (!list) return;
+  var i = +el.getAttribute("data-i"), f = el.getAttribute("data-f");
+  if (el.type === "checkbox") priv[list][i][f] = el.checked;
+  else if (f === "keptDays") priv[list][i][f] = el.value === "" ? null : Math.max(0, Math.floor(+el.value || 0));
+  else priv[list][i][f] = el.value;
+  refreshFieldHints(list, i, f);
+  saveDraft();
+});
+document.addEventListener("change", function (ev) {
+  var el = ev.target;
+  if (el.name === "remoteAccess") { priv.remoteAccess = el.value; saveDraft(); }
+  if (el.name === "closedCode") { priv.closedCode = el.value === "true"; $("closedCodeErr").textContent = ""; saveDraft(); }
+  if (el.tagName === "SELECT" && el.getAttribute("data-list")) {
+    priv[el.getAttribute("data-list")][+el.getAttribute("data-i")][el.getAttribute("data-f")] = el.value; saveDraft();
+  }
+});
+document.addEventListener("click", function (ev) {
+  var t = ev.target.closest("[data-add],[data-del],[data-go],[data-copy]");
+  if (!t) return;
+  if (t.hasAttribute("data-add")) { var l = t.getAttribute("data-add"); priv[l].push(newEntry(l)); renderList(l); saveDraft(); var first = $(l + "-" + (priv[l].length - 1) + "-" + Object.keys(newEntry(l))[0]); if (first) first.focus(); }
+  if (t.hasAttribute("data-del")) { var d = t.getAttribute("data-del"); priv[d].splice(+t.getAttribute("data-i"), 1); renderList(d); saveDraft(); }
+  if (t.hasAttribute("data-go")) showStep(+t.getAttribute("data-go"));
+  if (t.hasAttribute("data-copy")) {
+    var text = $(t.getAttribute("data-copy")).textContent;
+    navigator.clipboard.writeText(text).then(function () { t.textContent = "Copied"; setTimeout(function () { t.textContent = "Copy"; }, 1500); }, function () { t.textContent = "Select and copy by hand"; });
+  }
+});
+$("backBtn").addEventListener("click", function () { if (cur > 0) showStep(cur - 1); });
+$("nextBtn").addEventListener("click", function () {
+  var errs = problems(cur);
+  if (errs.length) {
+    var box = { 1: "summaryErr", 7: "closedCodeErr", 8: "otherErr" }[cur];
+    if (box) $(box).textContent = errs.join(" ");
+    else { // list steps: highlight by re-rendering with warnings under the fields
+      var l = { 2: "sends", 3: "collects", 6: "systemChanges" }[cur];
+      renderList(l);
+      priv[l].forEach(function (e, i) { Object.keys(e).forEach(function (f) { if (typeof e[f] === "string" && !e[f].trim() && f !== "why") { var w = $(l + "-" + i + "-" + f + "-warn"); if (w) w.textContent = "Required."; } if (f === "why" && !e[f].trim()) { var w2 = $(l + "-" + i + "-why-warn"); if (w2) w2.textContent = "Required."; } }); });
+    }
+    return;
+  }
+  showStep(cur + 1);
+});
+
+// ---- loading --------------------------------------------------------------
+function setMsg(text, cls) { $("loadMsg").textContent = text; $("loadMsg").className = "msg" + (cls ? " " + cls : ""); }
+function begin(data, source) {
+  info = (data && typeof data === "object" && !Array.isArray(data)) ? data : null;
+  infoSource = source;
+  priv = adoptBlock(info && info.privacy);
+  visited = {};
+  $("draftNote").hidden = true;
+  showStep(1);
+}
+async function loadRepo(raw) {
+  raw = raw.trim();
+  var m = raw.match(/^(?:https?:\/\/)?(?:www\.)?(?:github\.com|raw\.githubusercontent\.com)\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:\/.*)?$/)
+       || raw.match(/^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?$/);
+  if (!m) return setMsg("Enter owner/repo or a github.com URL.", "err");
+  $("loadBtn").disabled = true;
+  try {
+    setMsg("Looking up repo…");
+    var repoRes = await fetch("https://api.github.com/repos/" + m[1] + "/" + m[2]);
+    if (!repoRes.ok) throw new Error("repo lookup failed (HTTP " + repoRes.status + ") - is it public?");
+    var branch = (await repoRes.json()).default_branch || "main";
+    var url = "https://raw.githubusercontent.com/" + m[1] + "/" + m[2] + "/refs/heads/" + branch + "/pluginInfo.json";
+    var res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error("no pluginInfo.json at the repo root (HTTP " + res.status + ")");
+    var data = JSON.parse(await res.text());
+    setMsg("");
+    begin(data, m[1] + "/" + m[2] + " (" + branch + ")");
+    if (data.privacy) setMsg("Loaded " + (data.name || m[2]) + " - it already has a privacy block, so you are editing it.", "ok");
+  } catch (e) {
+    setMsg("Couldn't load it (" + e.message + "). Paste the file below, or start blank.", "err");
+  } finally { $("loadBtn").disabled = false; }
+}
+$("loadBtn").addEventListener("click", function () { loadRepo($("repo").value); });
+$("repo").addEventListener("keydown", function (ev) { if (ev.key === "Enter") { ev.preventDefault(); loadRepo($("repo").value); } });
+$("blankBtn").addEventListener("click", function () { begin(null, ""); });
+$("pasteBtn").addEventListener("click", function () {
+  try { begin(JSON.parse($("pasteJson").value), "pasted JSON"); } catch (e) { setMsg("Not valid JSON: " + e.message, "err"); }
+});
+
+var draft = loadDraft();
+if (draft) {
+  $("draftNote").hidden = false;
+  $("resumeBtn").addEventListener("click", function () { info = draft.info; infoSource = draft.infoSource || ""; priv = adoptBlock(draft.priv); showStep(Math.min(Math.max(draft.cur || 1, 1), 9)); });
+}
+var q = new URLSearchParams(location.search).get("repo");
+if (q) { $("repo").value = q; loadRepo(q); }
+renderSteps();
+showStep(0);
+})();
+</script>
+</body>
+</html>
