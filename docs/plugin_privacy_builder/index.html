@@ -115,6 +115,9 @@ label:first-child{margin-top:0}
 .hint{font-weight:400;color:var(--bs-secondary-color);font-size:.85rem}
 input[type=text],input[type=number],select,textarea{width:100%;padding:.55rem .7rem;border:1px solid var(--bs-border-color);border-radius:.375rem;background:var(--bs-body-bg);color:var(--bs-body-color);font-size:1rem;font-family:inherit}
 textarea{min-height:5rem;resize:vertical}
+/* Grey example text must read as an example, not a pre-filled answer: the
+   first user left the boxes alone because the Twilio sample looked custom. */
+input::placeholder,textarea::placeholder{color:var(--bs-secondary-color);opacity:.55;font-style:italic}
 textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem;min-height:9rem}
 .row{display:flex;gap:.5rem;flex-wrap:wrap} .row>input[type=text]{flex:1 1 16rem}
 .count{font-size:.8rem;color:var(--bs-secondary-color);text-align:right;margin-top:.2rem} .count.over{color:var(--bs-warning-text-emphasis)}
@@ -137,6 +140,10 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;f
 .msg{margin-top:.6rem;font-size:.9rem;color:var(--bs-secondary-color)} .msg.err{color:var(--bs-danger-text-emphasis)} .msg.ok{color:var(--bs-success-text-emphasis)}
 .warn{font-size:.85rem;color:var(--bs-warning-text-emphasis);margin-top:.3rem} .warn:empty{display:none}
 .err{font-size:.85rem;color:var(--bs-danger-text-emphasis);margin-top:.3rem} .err:empty{display:none}
+/* Field messages sit in one row directly under their input (warn/err left,
+   counter right) so "Required." cannot be read as belonging to the next field. */
+.under{display:flex;justify-content:space-between;align-items:baseline;gap:.75rem;margin-top:.2rem} .under .warn,.under .err,.under .count{margin-top:0} .under .count{margin-left:auto;white-space:nowrap}
+input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 0 0 .15rem var(--bs-danger-bg-subtle)}
 .note{margin:1rem 0 0;padding:.75rem 1rem;border-left:3px solid var(--bs-border-color);color:var(--bs-secondary-color);font-size:.875rem}
 .note p{margin:0 0 .5rem} .note p:last-child{margin-bottom:0}
 .tbl{width:100%;border-collapse:collapse;font-size:.85rem;margin:.5rem 0 1rem}
@@ -187,10 +194,9 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;f
     <section class="step" data-step="1">
       <h2>Summary</h2>
       <p class="q">One or two plain sentences for the install dialog: what leaves the device, to whom, and why. This is the first thing a person deciding whether to install your plugin reads.</p>
-      <label for="summary">Summary <span class="hint">- 1 to 200 characters; the listing check warns over 200</span></label>
-      <textarea id="summary" placeholder="Lets visitors text song requests to your show. Their phone number and message go to Twilio (the SMS company) and are kept on this device for 30 days."></textarea>
-      <div class="count" id="summaryCount"></div>
-      <div class="err" id="summaryErr"></div>
+      <label for="summary">Summary <span class="hint">- 1 to 200 characters; the listing check warns over 200. the grey text in the box is only the shape of an answer, not one written for your plugin - type over it</span></label>
+      <textarea id="summary" placeholder="Sends [what] to [which service / device] to [do what], and keeps [what] on this device for [how long] - or just: Runs on this device only. (eg: Lets visitors text song requests to your show. Their phone number and message go to Twilio, the SMS company, and are kept on this device for 30 days.)"></textarea>
+      <div class="under"><div class="err" id="summaryErr"></div><div class="count" id="summaryCount"></div></div>
       <div class="note"><p>If the plugin does nothing off this device and keeps nothing about anyone, <b>"Runs on this device only."</b> is enough. Tip: fill in the other steps first, then come back and write the summary from what you declared.</p></div>
     </section>
 
@@ -259,8 +265,8 @@ textarea.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;f
       <h2>Anything else</h2>
       <p class="q">Anything the other keys cannot say: what is left behind after uninstall, a visitor-facing page hosted by a vendor, payments taken, a self-updating component, a behaviour none of the earlier choices fit. FPP shows this text verbatim in the install dialog, so it is never lost - it just doesn't change a light's colour. Write <code>none</code> if there is nothing.</p>
       <div class="note"><p>If you had to put something here because the vocabulary has no place for it, please <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> saying what it was. The keys and values are fixed on purpose (FPP computes the colours from them and the listing check matches your code against them), so the way to cover a new kind of behaviour is to add it to the vocabulary for everyone, not to invent a key in one plugin.</p></div>
-      <label for="other">Other</label>
-      <textarea id="other" placeholder="none"></textarea>
+      <label for="other">Other <span class="hint">- the box is empty until you type in it</span></label>
+      <textarea id="other" placeholder="none, or anything the earlier steps could not say (eg: a settings file is left behind after uninstall)"></textarea>
       <div class="err" id="otherErr"></div>
     </section>
 
@@ -386,21 +392,26 @@ function loadDraft() {
 var HOST_RE = /\b[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}\b/i;
 var GITHUB_RE = /(^|\.|\/)(github\.com|api\.github\.com|raw\.githubusercontent\.com|github\.io)(\/|$|\s)/i;
 var HWID_RE = /\b(serial( number)?|mac( address)?|uuid|hardware id|hwid|hw id)\b/i;
+// fpp-plugin-Template's placeholder in summary/other; the listing check
+// (privacy-template-text) blocks it, so refuse it here too.
+function isTemplateText(s) { return /template text/i.test(s || ""); }
 
 function problems(step) {
   var errs = [];
-  if (step === 1 && !priv.summary.trim()) errs.push("Write a summary.");
+  if (step === 1 && !priv.summary.trim()) errs.push("The summary box is empty - the grey text is only an example, not a summary written for your plugin. Type your own (or \"Runs on this device only.\" if it does nothing off this device).");
+  if (step === 1 && isTemplateText(priv.summary)) errs.push("That is the template's placeholder - replace it with what this plugin really does (or \"Runs on this device only.\" if it does nothing off this device).");
   if (step === 2) priv.sends.forEach(function (e, i) {
-    if (!e.to.trim() || !e.what.trim() || !e.why.trim()) errs.push("Destination " + (i + 1) + ": to, what and why are all required.");
+    if (!e.to.trim() || !e.what.trim() || !e.why.trim()) errs.push("Destination " + (i + 1) + ": to, what and why are all required - the grey text is only a hint, not an entry.");
   });
   if (step === 3) priv.collects.forEach(function (e, i) {
-    if (!e.what.trim() || !e.where.trim()) errs.push("Entry " + (i + 1) + ": what and where are required.");
+    if (!e.what.trim() || !e.where.trim()) errs.push("Entry " + (i + 1) + ": what and where are required - the grey text is only a hint, not an entry.");
   });
   if (step === 6) priv.systemChanges.forEach(function (e, i) {
-    if (!e.what.trim()) errs.push("Change " + (i + 1) + ": say what it does.");
+    if (!e.what.trim()) errs.push("Change " + (i + 1) + ": say what it does - the grey text is only a hint, not an entry.");
   });
   if (step === 7 && priv.closedCode === null) errs.push("Choose one.");
-  if (step === 8 && !priv.other.trim()) errs.push("Write \"none\" if there is nothing to add.");
+  if (step === 8 && !priv.other.trim()) errs.push("The box is empty - type \"none\" if there is nothing to add.");
+  if (step === 8 && isTemplateText(priv.other)) errs.push("That is the template's placeholder - replace it (write \"none\" if there is nothing to add).");
   return errs;
 }
 function allProblems() {
@@ -416,8 +427,7 @@ function field(list, i, f, label, hint, opts) {
   var h = '<label for="' + id + '">' + label + (hint ? ' <span class="hint">- ' + hint + "</span>" : "") + "</label>";
   h += '<input type="text" id="' + id + '" data-list="' + list + '" data-i="' + i + '" data-f="' + f + '" value="' + esc(priv[list][i][f]) + '"' +
     (opts.placeholder ? ' placeholder="' + esc(opts.placeholder) + '"' : "") + (opts.max ? ' data-max="' + opts.max + '"' : "") + ' spellcheck="false">';
-  if (opts.max) h += '<div class="count" id="' + id + '-count"></div>';
-  h += '<div class="warn" id="' + id + '-warn"></div>';
+  h += '<div class="under"><div class="warn" id="' + id + '-warn"></div>' + (opts.max ? '<div class="count" id="' + id + '-count"></div>' : "") + "</div>";
   return h;
 }
 function selectField(list, i, f, label, options, hint) {
@@ -442,19 +452,19 @@ function renderList(list) {
     h += '<div class="entry">';
     if (list === "sends") {
       h += entryBar(list, i, "Destination");
-      h += field(list, i, "to", "To", "a hostname (<code>api.twilio.com</code>), a phrase for an address the operator enters (<code>your MQTT broker</code>, <code>the FPP players you list</code>), or a broadcast (<code>anyone in FM range</code>). Start it with <code>http://</code> if the connection is unencrypted", { placeholder: "api.twilio.com" });
-      h += field(list, i, "what", "What is sent", "in words; say \"CPU serial number\" or \"MAC address\" if a hardware identifier is sent", { placeholder: "visitor phone numbers and messages", max: 100 });
-      h += field(list, i, "why", "Why", "lower-case, no full stop - FPP joins it after a dash", { placeholder: "to send and receive the text messages", max: 100 });
+      h += field(list, i, "to", "To", "a hostname (<code>api.twilio.com</code>), a phrase for an address the operator enters (<code>your MQTT broker</code>, <code>the FPP players you list</code>), or a broadcast (<code>anyone in FM range</code>). Start it with <code>http://</code> if the connection is unencrypted", { placeholder: "hostname, or who the operator chooses (eg: api.twilio.com, your MQTT broker, anyone in FM range)" });
+      h += field(list, i, "what", "What is sent", "in words; say \"CPU serial number\" or \"MAC address\" if a hardware identifier is sent", { placeholder: "what data, in words (eg: visitor phone numbers and messages, CPU serial number)", max: 100 });
+      h += field(list, i, "why", "Why", "lower-case, no full stop - FPP joins it after a dash", { placeholder: "to do what (eg: to send and receive the text messages, to fetch the forecast)", max: 100 });
       h += checkField(list, i, "alwaysOn", "Always on", "it sends before the operator turns anything on: at install, at boot, while fppd runs. Always-on to a hostname is red");
     } else if (list === "collects") {
       h += entryBar(list, i, "Keeps");
-      h += field(list, i, "what", "What is kept", "in words", { placeholder: "visitor phone numbers and messages", max: 100 });
+      h += field(list, i, "what", "What is kept", "in words", { placeholder: "what data, in words (eg: visitor phone numbers and messages, the operator's API key)", max: 100 });
       h += selectField(list, i, "about", "About whom", ABOUT);
       var kid = list + "-" + i + "-keptDays";
       h += '<label for="' + kid + '">Kept for <span class="hint">- days; leave blank if it is kept until someone deletes it by hand</span></label>';
       h += '<input type="number" min="0" step="1" id="' + kid + '" data-list="' + list + '" data-i="' + i + '" data-f="keptDays" value="' + (e.keptDays === null ? "" : e.keptDays) + '" placeholder="until deleted by hand">';
       h += checkField(list, i, "canDelete", "Can be deleted from the plugin's own UI", "a button or control in the plugin removes it");
-      h += field(list, i, "where", "Where", "a path under <code>/home/fpp/media/</code> (<code>plugindata/fpp-plugin-x/</code>, <code>config/plugin.fpp-x</code>) or <code>plugin log</code>. FPP keeps these paths out of crash reports", { placeholder: "plugindata/fpp-plugin-x/" });
+      h += field(list, i, "where", "Where", "a path under <code>/home/fpp/media/</code> (<code>plugindata/fpp-plugin-x/</code>, <code>config/plugin.fpp-x</code>) or <code>plugin log</code>. FPP keeps these paths out of crash reports", { placeholder: "path or plugin log (eg: plugindata/fpp-plugin-x/, config/plugin.fpp-x)" });
     } else if (list === "sensors") {
       h += entryBar(list, i, "Sensor");
       h += selectField(list, i, "type", "Type", SENSORS);
@@ -462,7 +472,7 @@ function renderList(list) {
     } else {
       h += entryBar(list, i, "Change");
       h += selectField(list, i, "kind", "Kind", KINDS);
-      h += field(list, i, "what", "What", "one line: \"enables smbd\", \"adds fpp to the video group\", \"downloads the Piper voice models from huggingface.co\"", { placeholder: "enables smbd", max: 120 });
+      h += field(list, i, "what", "What", "one line: \"enables smbd\", \"adds fpp to the video group\", \"downloads the Piper voice models from huggingface.co\"", { placeholder: "what it changes, one line (eg: enables smbd, adds fpp to the video group)", max: 120 });
     }
     h += "</div>";
   });
@@ -479,6 +489,7 @@ function refreshFieldHints(list, i, f) {
   var v = priv[list][i][f];
   var max = el.getAttribute("data-max");
   if (max) { var c = $(id + "-count"); c.textContent = String(v).length + " / " + max; c.className = "count" + (String(v).length > +max ? " over" : ""); }
+  el.classList.remove("is-invalid");
   var w = $(id + "-warn");
   if (!w) return;
   var msg = "";
@@ -521,14 +532,14 @@ function showStep(n) {
   $("backBtn").disabled = n === 0;
   $("nextBtn").textContent = n === 8 ? "Finish" : "Next";
   $("nextBtn").hidden = n === 9;
-  if (n === 1) { $("summary").value = priv.summary; refreshSummary(); }
+  if (n === 1) { $("summary").value = priv.summary; refreshSummary(); $("summaryErr").textContent = ""; $("summary").classList.remove("is-invalid"); }
   if (n === 2) renderList("sends");
   if (n === 3) renderList("collects");
   if (n === 4) renderList("sensors");
   if (n === 5) renderRemote();
   if (n === 6) renderList("systemChanges");
   if (n === 7) { document.querySelectorAll('input[name="closedCode"]').forEach(function (r) { r.checked = priv.closedCode !== null && String(priv.closedCode) === r.value; }); $("closedCodeErr").textContent = ""; }
-  if (n === 8) { $("other").value = priv.other; $("otherErr").textContent = ""; }
+  if (n === 8) { $("other").value = priv.other; $("otherErr").textContent = ""; $("other").classList.remove("is-invalid"); }
   if (n === 9) renderResult();
   renderSteps();
   saveDraft();
@@ -593,8 +604,8 @@ function renderResult() {
 // ---- events ---------------------------------------------------------------
 document.addEventListener("input", function (ev) {
   var el = ev.target;
-  if (el.id === "summary") { priv.summary = el.value; refreshSummary(); $("summaryErr").textContent = ""; saveDraft(); return; }
-  if (el.id === "other") { priv.other = el.value; $("otherErr").textContent = ""; saveDraft(); return; }
+  if (el.id === "summary") { priv.summary = el.value; refreshSummary(); $("summaryErr").textContent = ""; el.classList.remove("is-invalid"); saveDraft(); return; }
+  if (el.id === "other") { priv.other = el.value; $("otherErr").textContent = ""; el.classList.remove("is-invalid"); saveDraft(); return; }
   var list = el.getAttribute("data-list");
   if (!list) return;
   var i = +el.getAttribute("data-i"), f = el.getAttribute("data-f");
@@ -628,11 +639,11 @@ $("nextBtn").addEventListener("click", function () {
   var errs = problems(cur);
   if (errs.length) {
     var box = { 1: "summaryErr", 7: "closedCodeErr", 8: "otherErr" }[cur];
-    if (box) $(box).textContent = errs.join(" ");
+    if (box) { $(box).textContent = errs.join(" "); var inp = { 1: "summary", 8: "other" }[cur]; if (inp) $(inp).classList.add("is-invalid"); }
     else { // list steps: highlight by re-rendering with warnings under the fields
       var l = { 2: "sends", 3: "collects", 6: "systemChanges" }[cur];
       renderList(l);
-      priv[l].forEach(function (e, i) { Object.keys(e).forEach(function (f) { if (typeof e[f] === "string" && !e[f].trim() && f !== "why") { var w = $(l + "-" + i + "-" + f + "-warn"); if (w) w.textContent = "Required."; } if (f === "why" && !e[f].trim()) { var w2 = $(l + "-" + i + "-why-warn"); if (w2) w2.textContent = "Required."; } }); });
+      priv[l].forEach(function (e, i) { Object.keys(e).forEach(function (f) { if (typeof e[f] === "string" && !e[f].trim() && f !== "why") { var w = $(l + "-" + i + "-" + f + "-warn"); if (w) { w.textContent = "Required."; $(l + "-" + i + "-" + f).classList.add("is-invalid"); } } if (f === "why" && !e[f].trim()) { var w2 = $(l + "-" + i + "-why-warn"); if (w2) { w2.textContent = "Required."; $(l + "-" + i + "-why").classList.add("is-invalid"); } } }); });
     }
     return;
   }
