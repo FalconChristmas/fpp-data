@@ -123,8 +123,11 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 .pluginCardActions{min-height:1.5rem}
 /* page chrome */
 .ppwrap{max-width:52rem;margin:0 auto;padding-block:1.5rem 4rem;padding-inline:1rem}
-.pphead{display:flex;flex-wrap:wrap;align-items:center;gap:.75rem;margin-bottom:.25rem}
+.pphead{display:flex;flex-wrap:wrap;align-items:center;gap:.85rem;margin-bottom:.25rem}
 .pphead h1{font-size:1.4rem;margin:0;font-weight:600}
+.pphead .sub{margin:.1rem 0 0;color:var(--bs-secondary-color);font-size:.9rem}
+.fpplogo{height:2.1rem;width:auto;color:var(--bs-body-color);flex:0 0 auto}
+
 .pptheme{margin-left:auto;font:inherit;font-size:.875rem;padding:.3rem .7rem;border:1px solid var(--bs-border-color);border-radius:.375rem;background:var(--bs-body-bg);color:var(--bs-body-color);cursor:pointer}
 .pplede{color:var(--bs-secondary-color);font-size:.925rem;margin:0 0 1rem;max-width:72ch}
 .ppform{background:var(--bs-body-bg);border:1px solid var(--bs-border-color);border-radius:.5rem;padding:1rem 1.25rem;margin-bottom:1.5rem}
@@ -147,10 +150,14 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
 <body>
 <main class="ppwrap">
   <div class="pphead">
-    <h1>Plugin preview</h1>
+    <svg class="fpplogo" role="img" aria-label="FPP" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56.195 18.616"> <g id="fpp-logo" transform="translate(-373.818 -583.897)"> <path id="Path_21" data-name="Path 21" d="M415.23,583.9h-9.6a5.18,5.18,0,0,0-4.837,4.026l-2.1,10.458a3.426,3.426,0,0,0,.618,2.876,3.281,3.281,0,0,0,2.626,1.184h2.731l.083-.344a3.139,3.139,0,0,1-2.173-3.826l.242-1.208c.065,0,.13.006.2.006h9.6a5.179,5.179,0,0,0,4.837-4.026l1.022-5.086a3.423,3.423,0,0,0-.618-2.875A3.279,3.279,0,0,0,415.23,583.9Zm-.747,4.349-.878,4.369a1.228,1.228,0,0,1-1.322,1.095h-7.835a.772.772,0,0,1-.618-.276.807.807,0,0,1-.144-.679l.907-4.512a1.256,1.256,0,0,1,1.181-.969h7.951a.76.76,0,0,1,.609.276A.828.828,0,0,1,414.483,588.246Z" transform="translate(-7.429)" fill="currentColor"/> <path id="Path_22" data-name="Path 22" d="M444.822,585.081A3.28,3.28,0,0,0,442.2,583.9h-9.6a5.18,5.18,0,0,0-4.837,4.026l-2.1,10.458a3.426,3.426,0,0,0,.618,2.876,3.281,3.281,0,0,0,2.626,1.184h2.731l.083-.344a3.139,3.139,0,0,1-2.174-3.826l.243-1.208c.065,0,.13.006.2.006h9.6a5.179,5.179,0,0,0,4.837-4.026l1.022-5.086A3.425,3.425,0,0,0,444.822,585.081Zm-3.373,3.165-.878,4.369a1.228,1.228,0,0,1-1.323,1.095h-7.834a.775.775,0,0,1-.618-.276.809.809,0,0,1-.143-.679l.907-4.512a1.256,1.256,0,0,1,1.181-.969h7.951a.761.761,0,0,1,.609.276A.83.83,0,0,1,441.449,588.246Z" transform="translate(-15.51)" fill="currentColor"/> <path id="Path_23" data-name="Path 23" d="M389.077,584h-8.237A5.178,5.178,0,0,0,376,588.026l-2.1,10.458a3.427,3.427,0,0,0,.618,2.876,3.28,3.28,0,0,0,2.626,1.184h2.73a.2.2,0,0,0,.19-.152.156.156,0,0,0-.106-.193,3.14,3.14,0,0,1-2.174-3.826l.731-3.638h8.454a1.8,1.8,0,0,1,1.431.639.165.165,0,0,0,.183.046.2.2,0,0,0,.132-.156,3.385,3.385,0,0,0-.695-2.76,3.29,3.29,0,0,0-2.576-1.127H379.19l.609-3.032a1.269,1.269,0,0,1,1.185-.987h7.127a3.181,3.181,0,0,1,3.329,3.341.153.153,0,0,0,.156.16h0a.2.2,0,0,0,.192-.159l.531-2.642a3.428,3.428,0,0,0-.618-2.876A3.282,3.282,0,0,0,389.077,584Z" transform="translate(0 -0.031)" fill="currentColor"/> </g> </svg>
+    <div>
+      <h1>Plugin preview</h1>
+      <p class="sub">See your plugin as FPP - Falcon Player will show it.</p>
+    </div>
     <button type="button" class="pptheme" id="themeBtn" aria-label="Toggle light/dark">Dark</button>
   </div>
-  <p class="pplede">See how FPP's Plugin Manager will show your plugin before you submit it: the card in the plugin list and the install dialog, including the six privacy lights computed from the <code>privacy</code> block of your <code>pluginInfo.json</code>. The colours and wording are FPP's own, produced by the same script FPP runs. The rules are in <a href="https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGIN_GUIDELINES.md" target="_blank" rel="noopener">PLUGIN_GUIDELINES.md</a> §14.15.</p>
+  <p class="pplede">See how FPP's Plugin Manager will show your plugin before you submit it: the card in the plugin list and the install dialog, including the six privacy lights computed from the <code>privacy</code> block of your <code>pluginInfo.json</code>. The colours and wording are FPP's own, produced by the same script FPP runs. The rules are in <a href="https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGIN_GUIDELINES.md" target="_blank" rel="noopener">PLUGIN_GUIDELINES.md</a> §14.15; what a listing needs is in the <a href="https://github.com/FalconChristmas/fpp-data/blob/master/PLUGINS.md" target="_blank" rel="noopener">plugin guidelines</a>.</p>
 
   <form class="ppform" id="form" autocomplete="off">
     <label for="repo">GitHub repo or pluginInfo.json URL <span class="hint">- <code>owner/repo</code>, a github.com URL, or a direct URL to a <code>pluginInfo.json</code></span></label>
