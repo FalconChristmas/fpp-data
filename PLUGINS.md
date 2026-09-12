@@ -29,6 +29,18 @@ own rules and data format.
   "Don't destabilize the host" sections, and `PLUGININFO_FORMAT.md`'s
   resource-hints / `platforms` sections, for exactly what's expected and how to
   declare it.
+- **Declare what the plugin does with data** in a `privacy` block in
+  `pluginInfo.json` - **required for listing**; a plugin without one is not
+  listed or updated. Format and rules are in
+  [`PLUGININFO_FORMAT.md`'s `privacy` section](https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGININFO_FORMAT.md#privacy)
+  and `PLUGIN_GUIDELINES.md`'s Privacy section. Use the
+  [**Privacy declaration builder**](https://falconchristmas.github.io/fpp-data/plugin_privacy_builder/)
+  rather than hand-writing it.
+- **Look at it before you submit.** The
+  [**Plugin preview**](https://falconchristmas.github.io/fpp-data/plugin_preview/?repo=owner/repo)
+  renders your `pluginInfo.json` as FPP's Plugin Manager will show it. If the
+  dialog reads wrong to you it will read wrong to every FPP user - fix it
+  before opening the issue.
 
 ## After you submit a plugin
 
