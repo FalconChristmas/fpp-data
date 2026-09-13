@@ -57,6 +57,16 @@ SCRIPT_EXT = (".sh", ".py", ".php", ".js")
 # be legitimate.
 SUDO_SCOPE = HOOKS + ("fpp_upgrade.sh",)
 
+# The one-liner every restart-flag finding recommends. Deliberately NOT the bare
+# `source ${FPPDIR}/scripts/common; setSetting restartFlag 1` older advice
+# suggested: under `set -u` that form aborts the whole script instead of setting
+# the flag - FPPDIR is unset on the uninstall path (uninstall_plugin passes it
+# only as a trailing arg and sudo strips the exported one) and scripts/common
+# itself expands a bare $LD_LIBRARY_PATH, so even with FPPDIR set the sourced
+# file trips nounset. fpp-live-follow followed the old advice verbatim and its
+# install AND uninstall silently exited on that line (fpp-data #231).
+RESTART_FLAG_SNIPPET = '( set +u; source "${FPPDIR:-/opt/fpp}/scripts/common" && setSetting restartFlag 1 ) || true'
+
 
 @dataclass
 class Finding:
@@ -916,6 +926,63 @@ def _unpinned_third_party_clone_hits(root: str, own_owner: str | None, own_repo:
             yield rel, i, line.strip()
 
 
+def _nounset_fppdir_hits(root: str):
+    """Yield (relpath, lineno, line) for a shell script that enables `set -u`
+    (nounset) and then, while it is still in effect, either sources
+    ${FPPDIR}/scripts/common or expands FPPDIR with no default. Both abort the
+    script instead of failing soft, and the guidelines' own restart-flag advice
+    used to produce exactly this shape:
+      - on the uninstall path FPPDIR is unset (uninstall_plugin passes it only as
+        a trailing argument and the Plugin Manager's plain `sudo` strips the
+        exported one) -> "FPPDIR: unbound variable", script exits before any
+        cleanup runs;
+      - on the install path FPPDIR IS set, but scripts/common expands a bare
+        $LD_LIBRARY_PATH (always stripped by sudo) so sourcing it under nounset
+        dies inside common - usually hidden by a 2>/dev/null on the source line.
+    Confirmed real (fpp-data #231, 2026-09): fpp-live-follow's fpp_install.sh
+    exited right after its first echo for three weeks; nobody noticed because the
+    error was silenced. Statement-level `set +u` (or `set +o nounset`) after the
+    enabling line ends the window; `set +u` earlier on the same line (the
+    recommended subshell form) exempts that line. A script that assigns FPPDIR
+    itself first (`FPPDIR="${FPPDIR:-}"`, `: "${FPPDIR:=/opt/fpp}"`) has made
+    later bare expansions safe (fpp-AnnouncementAssistant does this), so those
+    are exempt from that point on - sourcing common under nounset is not."""
+    assigns = re.compile(r'^\s*(export\s+)?FPPDIR=|\$\{FPPDIR:=')
+    nounset_on = re.compile(r'(^|[;&|(]\s*|\bthen\s+|\bdo\s+)set\s+(-[a-zA-Z]*u[a-zA-Z]*\b|-o\s+nounset\b)')
+    nounset_off = re.compile(r'^\s*set\s+(\+[a-zA-Z]*u[a-zA-Z]*\b|\+o\s+nounset\b)')
+    same_line_off = re.compile(r'set\s+(\+[a-zA-Z]*u[a-zA-Z]*\b|\+o\s+nounset\b)')
+    source_common = re.compile(r'(^|[;&|(]\s*|\bthen\s+|\bdo\s+)(source|\.)\s+"?\$\{?FPPDIR\}?[^\s"]*/scripts/common\b')
+    bare_fppdir = re.compile(r'\$FPPDIR\b|\$\{FPPDIR\}')
+    shebang = re.compile(r'^#!\s*\S*/(ba)?sh\b|^#!\s*\S*/env\s+(ba)?sh\b')
+    for path in _iter_files(root):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        if not rel.endswith(".sh") and not shebang.match(text):
+            continue
+        armed = assigned = False
+        for i, line in enumerate(text.splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            if assigns.search(line):
+                assigned = True
+            if not armed:
+                if nounset_on.search(line):
+                    armed = True
+                continue
+            if nounset_off.match(line):
+                armed = False
+                continue
+            m = source_common.search(line) or (None if assigned else bare_fppdir.search(line))
+            if not m:
+                continue
+            off = same_line_off.search(line)
+            if off and off.start() < m.start():
+                continue
+            yield rel, i, line.strip()
+
+
 def _device_path_no_allowlist_hits(root: str, exts=(".cpp", ".c", ".h", ".hpp", ".php", ".py"), window: int = 20):
     """Yield (relpath, lineno, line) for a device path built by concatenating a variable
     (`"/dev/" + var` in C++ or Python, `"/dev/".$var` in PHP, `f"/dev/{var}"` in Python)
@@ -1143,6 +1210,21 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"update that sha deliberately when you've reviewed the new code, instead of tracking "
                    f"a floating branch"))
 
+    # `set -u` + ${FPPDIR} / sourcing scripts/common: the script aborts (usually
+    # silently) instead of running - see _nounset_fppdir_hits for the two paths.
+    hit = next(iter(_nounset_fppdir_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "nounset-fppdir",
+                   f"enables `set -u` and then expands FPPDIR or sources scripts/common under it "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`) - this aborts the script instead of running "
+                   f"it: FPPDIR is unset on the uninstall path (uninstall_plugin passes it only as "
+                   f"an argument and sudo strips the exported one), and even when it is set, "
+                   f"scripts/common expands a bare $LD_LIBRARY_PATH which trips nounset inside the "
+                   f"sourced file. A `2>/dev/null` or `|| true` on that line does not help - the "
+                   f"expansion error exits the shell before either applies.\n"
+                   f"  - Use `${{FPPDIR:-/opt/fpp}}` for the path and source common with nounset "
+                   f"relaxed in a subshell, e.g. `{RESTART_FLAG_SNIPPET}`"))
+
     # Reboots/shutdowns are an error. A bare reboot/shutdown only counts as a
     # command (start of line / after ;&| / sudo / then|do, in a shell script, or
     # wrapped in system()/exec()) - not the word "Reboot" in UI text.
@@ -1167,8 +1249,8 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"restarts fppd directly ({hit[0]}:{hit[1]}: `{hit[2]}`) - replace it with the "
                    f"restart flag instead, so FPP restarts safely between sequences instead of "
                    f"killing a running show.\n"
-                   f"  - Shell: source `${{FPPDIR}}/scripts/common` first (it defines the function), "
-                   f"then call `setSetting restartFlag 1`.\n"
+                   f"  - Shell: `{RESTART_FLAG_SNIPPET}` (common defines the function; the "
+                   f"subshell/default keep it from aborting a `set -u` script).\n"
                    f"  - C++: call `setSetting(\"restartFlag\", \"1\")` (declared in `settings.h`, "
                    f"already pulled in via `fpp-pch.h`) - not `SetRestartFlag()`, which is the "
                    f"browser-JS helper used from PHP pages, not a C++ API"))
@@ -2010,7 +2092,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                            f"branch/build to FPP majors before {HOTLOAD_INTRODUCED_MAJOR} too, which "
                            f"have no plugin load/unload feature at all - those installs still need a "
                            f"full fppd restart to pick up install/uninstall.\n"
-                           f"  - Add `source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to "
+                           f"  - Add `{RESTART_FLAG_SNIPPET}` to "
                            f"each script listed above (creating fpp_install.sh/fpp_uninstall.sh if "
                            f"missing - only fpp_upgrade.sh is optional, and only needs it if you "
                            f"already have one); only drop it once you split off a separate FPP "
@@ -2029,7 +2111,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                            f"script is the only code that ever runs before removal), so the flag has to "
                            f"be set independently in each one this plugin actually has/needs - fixing it "
                            f"in one script does not cover the others.\n"
-                           f"  - Add `source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to each "
+                           f"  - Add `{RESTART_FLAG_SNIPPET}` to each "
                            f"script listed above (creating fpp_install.sh/fpp_uninstall.sh if missing - "
                            f"only fpp_upgrade.sh is optional, and only needs it if you already have one) "
                            f"so the Plugin Manager's restart banner appears right after that step instead "
