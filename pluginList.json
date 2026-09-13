@@ -47,7 +47,6 @@
             [ "fpp-servo-calibrator", "https://raw.githubusercontent.com/pgianotto/fpp-servo-calibrator/master/pluginInfo.json", "Hardware" ],
             [ "fpp-live-follow", "https://raw.githubusercontent.com/pgianotto/fpp-live-follow/master/pluginInfo.json", "Interaction" ],
             [ "fpp-performance-capture", "https://raw.githubusercontent.com/pgianotto/animatronic-motion-system/master/pluginInfo.json", "Hardware" ],
-            [ "fpp-SETIQ", "https://raw.githubusercontent.com/diaquas/fpp-SETIQ/main/pluginInfo.json", "Interaction" ],
             [ "fpp-haCommands", "https://raw.githubusercontent.com/jessica12ryan/fpp-haCommands/refs/heads/main/pluginInfo.json", "Automation" ],
             [ "fpp-sled-mailbox", "https://raw.githubusercontent.com/focusedonsound/fpp-sled-mailbox/refs/heads/main/pluginInfo.json", "Interaction" ],
             [ "fpp-ChannelEKG", "https://raw.githubusercontent.com/kylegrymonprez/fpp-ChannelEKG/refs/heads/main/pluginInfo.json", "Monitoring" ],
