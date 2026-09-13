@@ -666,6 +666,16 @@ _CFG_DEST_PREFIX_RX = re.compile(
     r'|(?<![-=<&0-9])>>?\s*[\'"]?$|\btee\s+(?:-a\s+)?[\'"]?$|\btouch\s+(?:-\w+\s+)*[\'"]?$'
     r'|\b(?:cp|mv|rsync|install)\s+(?!.*\s(?:cp|mv|rsync|install)\s)')
 _CFG_LAST_ARG_RX = re.compile(r'[^\'"\s]*[\'"]?\s*(?:[;&|#].*)?$')
+# A file being moved OUT of config/ - rename()/os.rename()/shutil.move() with the
+# config path as the FIRST argument, or `mv <config path> <elsewhere>` - is the
+# one-time migration the fix text below suggests, not a write. Matched against
+# the text BEFORE the anchor (prefix-anchored, unlike the whole-line rm/unlink
+# skip), so the same call with config/ as the destination (the
+# `_CFG_DEST_PREFIX_RX` shape) still fires; so does a move whose destination is
+# also under config/ (checked by the caller).
+_CFG_MOVE_SRC_PREFIX_RX = re.compile(
+    r'\b(?:rename|shutil\.move|os\.rename|os\.replace)\s*\(\s*(?:os\.path\.join\s*\(\s*)?[\'"]?$'
+    r'|\bmv\s+(?:-\w+\s+)*[\'"]?$')
 _CFG_SCAN_EXTS = SCRIPT_EXT + (".inc", ".cpp", ".cc", ".c", ".h", ".hpp")
 
 
@@ -702,6 +712,8 @@ def _config_dir_hits(root: str, exts=_CFG_SCAN_EXTS):
             m = _CFG_DIR_ANCHOR_RX.search(line)
             if not m or re.match(r'\s*=[^=]', line[m.end():]):
                 continue  # no anchor, or `$cfgDir = ...` (the dir itself being assigned)
+            if _CFG_MOVE_SRC_PREFIX_RX.search(line[:m.start()]) and not _CFG_DIR_ANCHOR_RX.search(line[m.end():]):
+                continue  # migrating a file out of config/ - the fix, not the problem
             am = _CFG_ALIAS_RX.match(m.group(0))
             if am and am.group(1) not in aliases:
                 continue
@@ -2225,7 +2237,10 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"database/binary file `{fname}` under FPP's config directory ({rel}:{lineno}: "
                        f"`{line}`) - crash reports bundle config/ and cannot redact binaries.\n"
                        f"  - Write it to `/home/fpp/media/plugindata/{repo}/` instead (`mkdir -p` it in "
-                       f"scripts/fpp_install.sh); config/ is only for the `plugin.{repo}` settings file"))
+                       f"scripts/fpp_install.sh, then `chown ${{FPPUSER}}:${{FPPGROUP}}` - install scripts "
+                       f"run as root but the web server writes as `fpp`; an existing file can be moved "
+                       f"across there with `mv`/`rename()`, which this check doesn't flag); config/ is "
+                       f"only for the `plugin.{repo}` settings file"))
         elif kind == "state":
             out.append(Finding(BEST_PRACTICE, "config-dir-misuse",
                        f"log/cache/lock/pid file `{fname}` under FPP's config directory ({rel}:{lineno}: "
