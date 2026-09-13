@@ -513,7 +513,11 @@ def _destructive_no_guard_hits(root: str, exts=(".php",)):
     file on exit) and `@`-suppressed calls (the error-suppression idiom is a strong
     signal for "best-effort internal cleanup", e.g. removing a temp file after an
     atomic rename or a PID file when stopping a process, rather than a page whose
-    entire job is the destructive action) - neither is the shape this rule targets."""
+    entire job is the destructive action) - neither is the shape this rule targets.
+    Also skips a .php file that starts with a shebang (`#!/usr/bin/env php`): that's a
+    CLI script (a poller/daemon started from callbacks.sh, a command script), not a
+    page - there is no GET request to reach it with (TwilioPoll.php clearing its own
+    stop file, fpp-data#206)."""
     destructive_rx = re.compile(r'(?<!@)\bunlink\s*\(|(?<!@)\brm\s+-[rf]|(?:exec|system|shell_exec)\s*\([^)]*\brm\s+')
     guard_rx = re.compile(r"\$_SERVER\s*\[\s*['\"]REQUEST_METHOD['\"]\s*\]|\$_POST\b")
     for path in _iter_files(root, exts):
@@ -521,7 +525,7 @@ def _destructive_no_guard_hits(root: str, exts=(".php",)):
         if _skippable(rel):
             continue
         text = _read(path)
-        if guard_rx.search(text):
+        if text.startswith("#!") or guard_rx.search(text):
             continue
         for i, line in enumerate(text.splitlines(), 1):
             if _is_comment_line(line) or "register_shutdown_function" in line:

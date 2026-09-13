@@ -67,5 +67,30 @@ class ConfigDirMigration(unittest.TestCase):
             [("functions.inc.php", "binary")])
 
 
+class DestructiveNoGuard(unittest.TestCase):
+    """destructive-no-csrf targets web pages; a shebang'd .php file is a CLI
+    script with no request to guard against."""
+
+    def hits(self, text: str, rel: str = "page.php"):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(tmp, {rel: text})
+            return [h[0] for h in L._destructive_no_guard_hits(tmp)]
+
+    def test_page_with_unguarded_unlink_fires(self):
+        self.assertEqual(self.hits('<?php\nunlink($settings["configDirectory"] . "/x.json");\n'), ["page.php"])
+
+    def test_page_with_post_guard_is_skipped(self):
+        self.assertEqual(self.hits('<?php\nif (isset($_POST["del"])) { unlink("/tmp/x"); }\n'), [])
+
+    def test_cli_script_with_shebang_is_skipped(self):
+        self.assertEqual(self.hits('#!/usr/bin/env php\n<?php\nunlink("/tmp/STOP");\nwhile (true) { sleep(1); }\n', "Poll.php"), [])
+
+    def test_shebang_variant_is_skipped(self):
+        self.assertEqual(self.hits('#!/bin/env php\n<?php\nunlink("/tmp/STOP");\n', "Poll.php"), [])
+
+    def test_shebang_not_on_first_line_still_fires(self):
+        self.assertEqual(self.hits('<?php\n// #!/usr/bin/env php\nunlink("/tmp/x");\n'), ["page.php"])
+
+
 if __name__ == "__main__":
     unittest.main()
