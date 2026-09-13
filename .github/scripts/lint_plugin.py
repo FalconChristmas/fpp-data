@@ -505,6 +505,52 @@ def _unescaped_html_attr_hits(root: str, exts=(".php",)):
                 break
 
 
+def _cli_only_php_includes(root: str) -> set:
+    """Relpaths of .php/.inc files that are only ever include/require'd by
+    shebang'd CLI scripts (directly, or via another such CLI-only include) and
+    never by a web-facing page - so, like the CLI script itself, there is no GET
+    request that can reach them. Include targets are matched by basename (the
+    usual `require("lock.helper.php")` / `require __DIR__ . '/x.php'` shapes both
+    end in the literal filename). A file nobody includes is NOT CLI-only - it's
+    a page (fpp-data#202: lock.helper.php, a lock-file class used only by the
+    `#!/usr/bin/php` runEventDate.php, tripping destructive-no-csrf)."""
+    include_rx = re.compile(r'\b(?:require|include)(?:_once)?\b[^;]*?([\w.\-]+\.(?:php|inc))\s*[\'"]')
+    files = {}
+    for path in _iter_files(root, (".php", ".inc")):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        files[rel] = (text.startswith("#!"),
+                      {m.group(1) for m in include_rx.finditer(text)})
+    by_base = {}
+    for rel in files:
+        by_base.setdefault(os.path.basename(rel), set()).add(rel)
+    includers = {}
+    for rel, (_, targets) in files.items():
+        for base in targets:
+            for target in by_base.get(base, ()):
+                if target != rel:
+                    includers.setdefault(target, set()).add(rel)
+
+    memo = {}
+
+    def is_cli(rel, stack=()):
+        if rel in memo:
+            return memo[rel]
+        if files[rel][0]:
+            memo[rel] = True
+            return True
+        incs = includers.get(rel)
+        if not incs or rel in stack:
+            return False
+        ok = all(is_cli(i, stack + (rel,)) for i in incs)
+        memo[rel] = ok
+        return ok
+
+    return {rel for rel in files if rel in includers and is_cli(rel)}
+
+
 def _destructive_no_guard_hits(root: str, exts=(".php",)):
     """Yield (relpath, lineno, line) for a file that runs a destructive call
     (unlink/rm/exec-rm) with no HTTP-method or $_POST check anywhere in that same
@@ -520,12 +566,13 @@ def _destructive_no_guard_hits(root: str, exts=(".php",)):
     stop file, fpp-data#206)."""
     destructive_rx = re.compile(r'(?<!@)\bunlink\s*\(|(?<!@)\brm\s+-[rf]|(?:exec|system|shell_exec)\s*\([^)]*\brm\s+')
     guard_rx = re.compile(r"\$_SERVER\s*\[\s*['\"]REQUEST_METHOD['\"]\s*\]|\$_POST\b")
+    cli_only = _cli_only_php_includes(root)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
         if _skippable(rel):
             continue
         text = _read(path)
-        if text.startswith("#!") or guard_rx.search(text):
+        if text.startswith("#!") or rel in cli_only or guard_rx.search(text):
             continue
         for i, line in enumerate(text.splitlines(), 1):
             if _is_comment_line(line) or "register_shutdown_function" in line:

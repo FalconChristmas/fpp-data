@@ -91,6 +91,33 @@ class DestructiveNoGuard(unittest.TestCase):
     def test_shebang_not_on_first_line_still_fires(self):
         self.assertEqual(self.hits('<?php\n// #!/usr/bin/env php\nunlink("/tmp/x");\n'), ["page.php"])
 
+    def multi_hits(self, files: dict):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(tmp, files)
+            return sorted(h[0] for h in L._destructive_no_guard_hits(tmp))
+
+    CLI = '#!/usr/bin/php\n<?php\nrequire ("lock.helper.php");\nlockHelper::unlock();\n'
+    LOCK = '<?php\nclass lockHelper {\n  public static function unlock() { unlink(LOCK_DIR . "x.lock"); }\n}\n'
+
+    def test_include_used_only_by_cli_script_is_skipped(self):
+        self.assertEqual(self.multi_hits({"runEventDate.php": self.CLI, "lock.helper.php": self.LOCK}), [])
+
+    def test_include_also_used_by_a_page_still_fires(self):
+        self.assertEqual(self.multi_hits({
+            "runEventDate.php": self.CLI, "lock.helper.php": self.LOCK,
+            "plugin_setup.php": '<?php\nrequire_once __DIR__ . "/lock.helper.php";\n',
+        }), ["lock.helper.php"])
+
+    def test_include_reached_only_through_another_cli_only_include_is_skipped(self):
+        self.assertEqual(self.multi_hits({
+            "daemon.php": '#!/usr/bin/env php\n<?php\ninclude "functions.inc.php";\n',
+            "functions.inc.php": '<?php\nrequire("lock.helper.php");\n',
+            "lock.helper.php": self.LOCK,
+        }), [])
+
+    def test_unincluded_file_is_a_page_and_still_fires(self):
+        self.assertEqual(self.multi_hits({"runEventDate.php": self.CLI, "orphan.php": self.LOCK}), ["orphan.php"])
+
 
 if __name__ == "__main__":
     unittest.main()
