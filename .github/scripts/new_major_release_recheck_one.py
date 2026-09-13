@@ -31,7 +31,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib_plugin_schema import (  # noqa: E402
-    fetch_json, load_pluginlist, parse_github_repo, resolve_renamed_repo,
+    branch_for_major, fetch_json, load_pluginlist, parse_github_repo, resolve_renamed_repo,
 )
 from new_major_release_scan import scan_plugin, issue_body  # noqa: E402
 from scan_submission import clone_repo  # noqa: E402
@@ -93,7 +93,8 @@ def main():
             # Best-effort: scan_plugin() falls back to metadata-only if the clone
             # dir isn't there, same as a bulk run over a plugin clone_plugins.py
             # couldn't fetch.
-            clone_repo(owner, repo, os.path.join(plugins_dir, entry[0]))
+            clone_repo(owner, repo, os.path.join(plugins_dir, entry[0]),
+                       branch_for_major((info or {}).get("versions"), args.target_major))
 
         r = scan_plugin(entry, args.target_major, plugins_dir, token, schema)
 

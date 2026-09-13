@@ -51,8 +51,12 @@ def _major(v) -> Optional[int]:
     return int(head) if head.isdigit() else None
 
 
-def compatible_with_major(versions, m: int) -> bool:
-    """Is any versions[] entry certified for FPP major `m`?
+def _version_key(v) -> tuple:
+    return tuple(int(p) if p.isdigit() else 0 for p in str(v).split("."))
+
+
+def entry_for_major(versions, m: int) -> Optional[dict]:
+    """The versions[] entry certified for FPP major `m`, else None.
 
     Mirrors the Plugin Manager's own logic (D21): an OPEN-ended max ("0"/""/"0.0")
     only certifies the major the entry was built for - an open entry built for an
@@ -68,12 +72,36 @@ def compatible_with_major(versions, m: int) -> bool:
         mx = v.get("maxFPPVersion")
         if mx in (None, "", "0", "0.0"):
             if mn == m:            # open-ended: certifies only its own major
-                return True
+                return v
         else:
             mxm = _major(mx)
             if mxm is not None and mn <= m <= mxm:
-                return True
-    return False
+                return v
+    return None
+
+
+def compatible_with_major(versions, m: int) -> bool:
+    """Is any versions[] entry certified for FPP major `m`?"""
+    return entry_for_major(versions, m) is not None
+
+
+def branch_for_major(versions, m: Optional[int] = None) -> Optional[str]:
+    """The git branch FPP actually installs, per pluginInfo.json's versions[].
+
+    Prefers the entry certified for major `m`; otherwise the entry for the newest
+    FPP version (highest minFPPVersion). Returns None when no entry names a
+    branch - callers fall back to the repo's default branch. Used so the plugin
+    lint/scan reads the code users on FPP <m> get, not whatever the GitHub
+    default branch happens to be (the two often differ - e.g. a plugin whose
+    master targets FPP 4 and a newer branch serves FPP 5+).
+    """
+    e = entry_for_major(versions, m) if m is not None else None
+    if e is None:
+        cands = [v for v in versions or []
+                 if isinstance(v, dict) and _major(v.get("minFPPVersion")) is not None]
+        e = max(cands, key=lambda v: _version_key(v["minFPPVersion"]), default=None)
+    b = (e or {}).get("branch")
+    return b.strip() if isinstance(b, str) and b.strip() else None
 
 
 def owner_ref(login: str) -> str:
