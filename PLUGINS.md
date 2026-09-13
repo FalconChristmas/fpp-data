@@ -34,7 +34,7 @@ own rules and data format.
   listed or updated. Format and rules are in
   [`PLUGININFO_FORMAT.md`'s `privacy` section](https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGININFO_FORMAT.md#privacy)
   and `PLUGIN_GUIDELINES.md`'s Privacy section. Use the
-  [**Privacy declaration builder**](https://falconchristmas.github.io/fpp-data/plugin_privacy_builder/)
+  [**Privacy disclosure builder**](https://falconchristmas.github.io/fpp-data/plugin_privacy_builder/)
   rather than hand-writing it.
 - **Look at it before you submit.** The
   [**Plugin preview**](https://falconchristmas.github.io/fpp-data/plugin_preview/?repo=owner/repo)

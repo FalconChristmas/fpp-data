@@ -25,7 +25,7 @@ working skeleton to fork.
 Two browser-only pages (nothing leaves your browser except reads of your own
 public repo) that help get `pluginInfo.json` right before you submit:
 
-- [**Privacy declaration builder**](https://falconchristmas.github.io/fpp-data/plugin_privacy_builder/) -
+- [**Privacy disclosure builder**](https://falconchristmas.github.io/fpp-data/plugin_privacy_builder/) -
   a guided form that writes the `privacy` block for you. Give it your repo (or
   paste your `pluginInfo.json`) and it pre-fills the plugin name and any block
   you already have, walks through the eight keys one at a time with the same
@@ -39,7 +39,7 @@ public repo) that help get `pluginInfo.json` right before you submit:
   pushed, or paste the JSON.
 
 The preview only shows what you *declared*. The plugin check that compares the
-declaration with your code runs on the submission issue, not in the browser.
+disclosure with your code runs on the submission issue, not in the browser.
 
 ## Removing a plugin
 
