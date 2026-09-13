@@ -2412,7 +2412,10 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         # | grep -v <marker> | crontab -` replaces the crontab with everything
         # EXCEPT the matched entry - this is more common, and safer, than a
         # blanket `crontab -r` (which wipes the user's entire crontab).
-        has_cleanup = re.search(r'remove_all|crontab\s+-r|cron\.d/.*rm\b', uninstall_body) \
+        # For /etc/cron.d entries the normal spelling is `rm -f /etc/cron.d/<name>`
+        # (rm BEFORE the path); the earlier `cron\.d/.*rm\b` only matched rm AFTER
+        # the path, which false-positived every plugin using the normal form.
+        has_cleanup = re.search(r'remove_all|crontab\s+-r|\brm\b.*cron\.d/|cron\.d/.*\brm\b', uninstall_body) \
             or re.search(r'crontab\s+-l.*\|.*grep\s+-v.*\|.*crontab\s+-', uninstall_body)
         if not has_cleanup:
             out.append(Finding(BLOCKER, "cron-no-uninstall",
