@@ -887,8 +887,12 @@ def _unpinned_third_party_clone_hits(root: str, own_owner: str | None, own_repo:
     clone_rx = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?clone\b[^\n]*?(https?://github\.com/\S+)')
     # A real commit SHA (hex only) pins the checkout to a specific reviewed state;
     # a branch name like "origin/master" isn't hex-only and won't match this, so
-    # that shape is correctly still treated as floating/unpinned.
-    pin_rx = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?(?:checkout|reset\s+--hard)\s+(?:origin/)?([0-9a-f]{7,40})\b', re.I)
+    # that shape is correctly still treated as floating/unpinned. Flags between
+    # the subcommand and the sha (`checkout --quiet <sha>`, `checkout -q <sha>`,
+    # `reset --hard -q <sha>`) are tolerated: fpp-live-follow pinned exactly as
+    # the finding text asked and still tripped this through four /recheck rounds
+    # (fpp-data #231) because `--quiet` sat between `checkout` and the sha.
+    pin_rx = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?(?:checkout|reset\s+--hard)\s+(?:-\S+\s+)*(?:origin/)?([0-9a-f]{7,40})\b', re.I)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
         if _skippable(rel):
