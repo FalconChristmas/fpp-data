@@ -33,10 +33,10 @@ public repo) that help get `pluginInfo.json` right before you submit:
   or merged into your whole file. Deep link: `?repo=owner/repo`.
 - [**Plugin preview**](https://falconchristmas.github.io/fpp-data/plugin_preview/) -
   renders your `pluginInfo.json` exactly as FPP's Plugin Manager will show it:
-  the card with its six privacy dots and the install dialog with the headline,
-  lights and Install button. It runs FPP's own renderer, so what you see is
-  what an FPP user sees. Deep link: `?repo=owner/repo` once the file is
-  pushed, or paste the JSON.
+  the card with its six privacy dots and the install dialog with the lights,
+  the line under each and the Install button. It runs FPP's own renderer, so
+  what you see is what an FPP user sees. Deep link: `?repo=owner/repo` once
+  the file is pushed, or paste the JSON.
 
 The preview only shows what you *declared*. The plugin check that compares the
 disclosure with your code runs on the submission issue, not in the browser.

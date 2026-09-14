@@ -62,7 +62,8 @@ body{margin:0;background:var(--pp-ground);color:var(--bs-body-color);font-family
 a{color:var(--bs-link-color);text-decoration:underline} a:hover{color:var(--bs-link-hover-color)}
 b,.fw-bold{font-weight:700} .fw-semibold{font-weight:600}
 .small{font-size:.875em}
-.text-secondary{color:var(--bs-secondary-color)!important}
+.text-secondary,.text-body-secondary{color:var(--bs-secondary-color)!important}
+.bg-body-tertiary{background-color:var(--bs-tertiary-bg)!important}
 .text-uppercase{text-transform:uppercase}
 .text-success{color:var(--bs-success)!important} .text-warning{color:var(--bs-warning)!important} .text-danger{color:var(--bs-danger)!important}
 .text-success-emphasis{color:var(--bs-success-text-emphasis)!important} .text-warning-emphasis{color:var(--bs-warning-text-emphasis)!important} .text-danger-emphasis{color:var(--bs-danger-text-emphasis)!important} .text-secondary-emphasis{color:var(--bs-secondary-text-emphasis)!important}
@@ -204,6 +205,7 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
     <section class="step" data-step="2">
       <h2>Sends data</h2>
       <p class="q">Every place data leaves this device: the plugin's own connections, anything it publishes on FPP's MQTT, fetches through FPP's helpers, loads into the operator's browser from a plugin page (a CDN, fonts, an embed), or broadcasts (FM, LoRa). Empty means the plugin sends nothing.</p>
+      <div class="note"><p><b>A CDN, font or badge host your pages load</b> is a destination only if the load actually happens. FPP serves plugin pages under its own Content-Security-Policy, so such a tag is blocked unless your install script whitelists the host with <code>ManageApacheContentPolicy.sh add &lt;directive&gt; &lt;host&gt;</code> or the page is served by your own listener (<b>Remote access</b> other than <code>none</code>). If it is, declare it with <b>What is sent</b> <code>your browser's address</code> - FPP shows that as amber "Your browser loads files from &lt;host&gt;"; if not, bundle the file or remove the tag.</p></div>
       <div class="note"><p><b>Do not list GitHub</b> (<code>github.com</code>, <code>api.github.com</code>, <code>raw.githubusercontent.com</code>, <code>*.github.io</code>) for fetching your own code, releases, update checks or a package - FPP's plugin manager makes that traffic already. A program you download is a <b>System change</b> of kind <code>download</code> instead.</p></div>
       <div id="sendsList"></div>
       <button type="button" class="btn btn-outline mt-2" data-add="sends"><i class="fas fa-plus"></i> Add a destination</button>
@@ -217,7 +219,7 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
       <p class="q">Data the plugin keeps on this device about people, beyond the operator's own settings: logs of who did what, messages, names, photos, addresses. Empty means it keeps only the operator's settings.</p>
       <div id="collectsList"></div>
       <button type="button" class="btn btn-outline mt-2" data-add="collects"><i class="fas fa-plus"></i> Add something it keeps</button>
-      <div class="note" id="collectsEmptyNote"><p>Nothing listed = <b>"No collection disclosed"</b> (green). Data about visitors or passers-by with no time limit, or about third parties or performers, is red; anything else with a limit is amber.</p></div>
+      <div class="note" id="collectsEmptyNote"><p>Nothing listed = <b>"No collection disclosed"</b> (green). Data about anyone but the operator or their household (visitors, passers-by, third parties, performers) with no time limit is red ("Collects visitor data"); give it a time limit and it is amber ("Collects, with limits").</p></div>
       <div class="note nofit"><p><b>None of the choices fit?</b> Pick the closest one and describe the real behaviour in <b>What is kept</b> - <i>About whom</i> only sets the colour. If nothing is close, leave it out here, describe it in the <b>Anything else</b> step so it still shows in the install dialog, and <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> so the vocabulary can grow. Never invent a new key or value - FPP ignores it and the listing check rejects it.</p></div>
     </section>
 
@@ -227,7 +229,7 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
       <p class="q">Sensors the plugin reads that can observe a person. Empty means none. A camera stream that leaves the device is also a <b>Sends data</b> entry.</p>
       <div id="sensorsList"></div>
       <button type="button" class="btn btn-outline mt-2" data-add="sensors"><i class="fas fa-plus"></i> Add a sensor</button>
-      <div class="note" id="sensorsEmptyNote"><p>Nothing listed = <b>"No camera or mic disclosed"</b> (green). A sensor that isn't stored is amber; stored frames/audio/detections, or face/body tracking, is red ("Records people").</p></div>
+      <div class="note" id="sensorsEmptyNote"><p>Nothing listed = <b>"No camera or mic disclosed"</b> (green). A camera or microphone that isn't stored is amber ("Camera, not stored"), as is any other sensor ("Uses a sensor, not stored", or "Sensor readings kept" if its readings are stored); stored camera or microphone data, or face/body tracking, is red ("Records people").</p></div>
       <div class="note nofit"><p><b>None of the choices fit?</b> Pick the closest one and describe the real behaviour and use <b>Anything else</b> for the detail (sensors have no free-text line). If nothing is close, leave it out here, describe it in the <b>Anything else</b> step so it still shows in the install dialog, and <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> so the vocabulary can grow. Never invent a new key or value - FPP ignores it and the listing check rejects it.</p></div>
     </section>
 
@@ -245,14 +247,14 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
       <p class="q">Every change outside the plugin's own directory: services it installs, ports it opens, FPP settings it writes, software it downloads, package sources it adds, credentials it reads, privileges it grants. Empty means nothing outside its own directory.</p>
       <div id="systemChangesList"></div>
       <button type="button" class="btn btn-outline mt-2" data-add="systemChanges"><i class="fas fa-plus"></i> Add a change</button>
-      <div class="note" id="systemChangesEmptyNote"><p>Nothing listed = <b>"No system changes disclosed"</b> (green). Any change is amber; <code>package-source</code>, <code>tunnel</code>, <code>reads-core-credentials</code> and <code>privilege</code> are red ("Changes this device permanently").</p></div>
+      <div class="note" id="systemChangesEmptyNote"><p>Nothing listed = <b>"No system changes disclosed"</b> (green). Any change is amber ("Changes this device"); <code>package-source</code> and <code>tunnel</code> are red ("Changes this device permanently"), as are <code>reads-core-credentials</code> ("Reads FPP's credentials") and <code>privilege</code> ("Grants extra privileges").</p></div>
       <div class="note nofit"><p><b>None of the choices fit?</b> Pick the closest one and describe the real behaviour in the <b>What</b> line - the colour comes from the kind, the words come from you. If nothing is close, leave it out here, describe it in the <b>Anything else</b> step so it still shows in the install dialog, and <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> so the vocabulary can grow. Never invent a new key or value - FPP ignores it and the listing check rejects it.</p></div>
     </section>
 
     <!-- 7 · closed code -->
     <section class="step" data-step="7">
       <h2>Can it be checked?</h2>
-      <p class="q">Can everything that runs be read by anyone: is it in your repository, from a public package source (apt, pip, npm, CPAN or similar), or an open-source project's own release of its public code?</p>
+      <p class="q">Can everything that runs be read by anyone: is it in your repository, from a public package source (apt, pip, npm, CPAN or similar) whose source is published, or an open-source project's own release of its public code? A closed binary wheel or vendor SDK from PyPI/npm is closed code; a fetched package is still a <b>System change</b> of kind <code>download</code>.</p>
       <label class="choice"><input type="radio" name="closedCode" value="false"> Yes - everything is in the repo, from a public package source, or an open-source project's own release (its .deb from GitHub releases, say)
         <span class="d">Green: "Author says all its software can be checked". (A <code>download</code> system change still makes this amber.)</span></label>
       <label class="choice"><input type="radio" name="closedCode" value="true"> No - something that runs cannot be read: a prebuilt binary with no public source, a downloaded .so, a vendor installer or an obfuscated script
@@ -263,7 +265,7 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
     <!-- 8 · other -->
     <section class="step" data-step="8">
       <h2>Anything else</h2>
-      <p class="q">Anything the other keys cannot say: what is left behind after uninstall, a visitor-facing page hosted by a vendor, payments taken, a self-updating component, a behaviour none of the earlier choices fit. FPP shows this text verbatim in the install dialog, so it is never lost - it just doesn't change a light's colour. Write <code>none</code> if there is nothing.</p>
+      <p class="q">Anything the other keys cannot say: what is left behind after uninstall, a visitor-facing page hosted by a vendor, payments taken, a self-updating component, a behaviour none of the earlier choices fit. FPP shows this text verbatim in the install dialog, so it is never lost - it just doesn't change a light's colour. It counts like the other keys on upgrade: a change to it re-shows the dialog before the update is applied (rewording the summary alone does not). Write <code>none</code> if there is nothing.</p>
       <div class="note"><p>If you had to put something here because the vocabulary has no place for it, please <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> saying what it was. The keys and values are fixed on purpose (FPP computes the colours from them and the listing check matches your code against them), so the way to cover a new kind of behaviour is to add it to the vocabulary for everyone, not to invent a key in one plugin.</p></div>
       <label for="other">Other <span class="hint">- the box is empty until you type in it</span></label>
       <textarea id="other" placeholder="none, or anything the earlier steps could not say (eg: a settings file is left behind after uninstall)"></textarea>
@@ -389,9 +391,14 @@ function loadDraft() {
 }
 
 // ---- validation -----------------------------------------------------------
-var HOST_RE = /\b[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}\b/i;
+// As fpp-privacy-lights.js: a dotted domain whose last label is neither a
+// reserved LAN suffix (projector.local, nas.lan) nor a file extension
+// (remotes.json) is a hostname on the internet.
+var HOST_RE = /\b[a-z0-9-]+(\.[a-z0-9-]+)*\.(?!(?:local|localhost|localdomain|lan|home|internal|arpa|json|txt|csv|log|conf|cfg|ini|php|py|sh|js|html|xml|yaml|yml|db)\b)[a-z]{2,}\b(?!\.[a-z0-9-])/i;
 var GITHUB_RE = /(^|\.|\/)(github\.com|api\.github\.com|raw\.githubusercontent\.com|github\.io)(\/|$|\s)/i;
-var HWID_RE = /\b(serial( number)?|mac( address)?|uuid|hardware id|hwid|hw id)\b/i;
+// Qualified forms only, as fpp-privacy-lights.js: "serial port" and "the
+// playlist uuid" identify nobody.
+var HWID_RE = /\b(serial numbers?|cpu serial|mac addresse?s?|hardware ids?|hwid|hw id|device ids?|(?:device|player|device's|player's) uuids?)\b/i;
 // fpp-plugin-Template's placeholder in summary/other; the listing check
 // (privacy-template-text) blocks it, so refuse it here too.
 function isTemplateText(s) { return /template text/i.test(s || ""); }
@@ -455,7 +462,7 @@ function renderList(list) {
       h += field(list, i, "to", "To", "a hostname (<code>api.twilio.com</code>), a phrase for an address the operator enters (<code>your MQTT broker</code>, <code>the FPP players you list</code>), or a broadcast (<code>anyone in FM range</code>). Start it with <code>http://</code> if the connection is unencrypted", { placeholder: "hostname, or who the operator chooses (eg: api.twilio.com, your MQTT broker, anyone in FM range)" });
       h += field(list, i, "what", "What is sent", "in words; say \"CPU serial number\" or \"MAC address\" if a hardware identifier is sent", { placeholder: "what data, in words (eg: visitor phone numbers and messages, CPU serial number)", max: 100 });
       h += field(list, i, "why", "Why", "lower-case, no full stop - FPP joins it after a dash", { placeholder: "to do what (eg: to send and receive the text messages, to fetch the forecast)", max: 100 });
-      h += checkField(list, i, "alwaysOn", "Always on", "it sends before the operator turns anything on: at install, at boot, while fppd runs. Always-on to a hostname is red");
+      h += checkField(list, i, "alwaysOn", "Always on", "it sends before the operator turns anything on: at install, at boot, while fppd runs. Always on to a hostname or public address on the internet is red (\"Sends to the internet on its own\"); to a device on your network or an address the operator enters it is amber");
     } else if (list === "collects") {
       h += entryBar(list, i, "Keeps");
       h += field(list, i, "what", "What is kept", "in words", { placeholder: "what data, in words (eg: visitor phone numbers and messages, the operator's API key)", max: 100 });
@@ -464,7 +471,7 @@ function renderList(list) {
       h += '<label for="' + kid + '">Kept for <span class="hint">- days; leave blank if it is kept until someone deletes it by hand</span></label>';
       h += '<input type="number" min="0" step="1" id="' + kid + '" data-list="' + list + '" data-i="' + i + '" data-f="keptDays" value="' + (e.keptDays === null ? "" : e.keptDays) + '" placeholder="until deleted by hand">';
       h += checkField(list, i, "canDelete", "Can be deleted from the plugin's own UI", "a button or control in the plugin removes it");
-      h += field(list, i, "where", "Where", "a path under <code>/home/fpp/media/</code> (<code>plugindata/fpp-plugin-x/</code>, <code>config/plugin.fpp-x</code>) or <code>plugin log</code>. FPP keeps these paths out of crash reports", { placeholder: "path or plugin log (eg: plugindata/fpp-plugin-x/, config/plugin.fpp-x)" });
+      h += field(list, i, "where", "Where", "where the operator would look and what to delete: a path under <code>/home/fpp/media/</code> (<code>plugindata/fpp-plugin-x/</code>, <code>config/plugin.fpp-x</code>), <code>plugin log</code>, or a phrase if it is held off the device (<code>the vendor's service</code>). For the operator only; FPP does not act on it", { placeholder: "path, plugin log, or where it is held off-device (eg: plugindata/fpp-plugin-x/, the vendor's service)" });
     } else if (list === "sensors") {
       h += entryBar(list, i, "Sensor");
       h += selectField(list, i, "type", "Type", SENSORS);
@@ -592,7 +599,11 @@ function renderResult() {
   }
   var r = FPPPluginPrivacy.evaluate(block, { unreviewed: true });
   var h = '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; not verified by FPP</div>';
-  h += FPPPluginPrivacy.headlineHtml(r) + FPPPluginPrivacy.stripHtml(r, { prefix: "pv" }) + FPPPluginPrivacy.detailsHtml(r);
+  // Same order as FPP's install dialog: summary, strip, other. The headline
+  // is shown only for a block with no disclosure (and as the card tooltip).
+  h += FPPPluginPrivacy.summaryHtml(r);
+  if (!r.declared) h += FPPPluginPrivacy.headlineHtml(r);
+  h += FPPPluginPrivacy.stripHtml(r, { prefix: "pv" }) + FPPPluginPrivacy.detailsHtml(r);
   pv.innerHTML = h;
   FPPPluginPrivacy.bind("preview");
   var btn = FPPPluginPrivacy.installButtonFor(r);

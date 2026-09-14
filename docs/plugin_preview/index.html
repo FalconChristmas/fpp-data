@@ -8,8 +8,10 @@
 <!--
   Renders a plugin's pluginInfo.json the way FPP's Plugin Manager will show it:
   the card in the plugin list (six privacy dots) and the install dialog (trust
-  callout, headline, six chips with their detail lines, summary, full
-  disclosure, install button). The colours and every sentence come from
+  callout, label line, the author's summary, six chips with their detail lines,
+  the author's `other` text, install button; FPP's headline is shown only for a
+  block with no disclosure - for a declared block it is the card's tooltip).
+  The colours and every sentence come from
   fpp-privacy-lights.js, the SAME script FPP itself runs, loaded straight from
   the FPP repo (www/js/fpp-privacy-lights.js on master) via jsDelivr - nothing
   is copied here, so the preview always shows what current FPP shows. Not
@@ -65,7 +67,8 @@ body{margin:0;background:var(--pp-ground);color:var(--bs-body-color);font-family
 a{color:var(--bs-link-color);text-decoration:underline} a:hover{color:var(--bs-link-hover-color)}
 b,.fw-bold{font-weight:700} .fw-semibold{font-weight:600}
 .small{font-size:.875em}
-.text-secondary{color:var(--bs-secondary-color)!important}
+.text-secondary,.text-body-secondary{color:var(--bs-secondary-color)!important}
+.bg-body-tertiary{background-color:var(--bs-tertiary-bg)!important}
 .text-uppercase{text-transform:uppercase}
 .text-success{color:var(--bs-success)!important} .text-warning{color:var(--bs-warning)!important} .text-danger{color:var(--bs-danger)!important}
 .text-success-emphasis{color:var(--bs-success-text-emphasis)!important} .text-warning-emphasis{color:var(--bs-warning-text-emphasis)!important} .text-danger-emphasis{color:var(--bs-danger-text-emphasis)!important} .text-secondary-emphasis{color:var(--bs-secondary-text-emphasis)!important}
@@ -263,13 +266,18 @@ function PrivacyRowHtml(data) {
   return '<span class="ms-auto d-inline-flex align-items-center small">' +
     FPPPluginPrivacy.stripHtml(PluginPrivacyResult(data), { compact: true }) + "</span>";
 }
+// Label line, the author's summary, the strip and its lines, then the
+// author's `other` text - the same order as plugins.php. The headline of a
+// declared block is its worst chip's text again, so FPP shows it only for a
+// block with no disclosure (and as the card's tooltip).
 function PrivacyBlockHtml(r, prefix) {
   var h = r.declared
-    ? '<div class="small text-secondary mt-3 mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; not verified by FPP</div>'
-    : '<div class="small text-secondary mt-3 mb-1"><span class="fw-bold text-uppercase">No disclosure</span> &middot; the author has not said what this plugin does with data</div>';
+    ? '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; not verified by FPP</div>'
+    : '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">No disclosure</span> &middot; the author has not said what this plugin does with data</div>';
   if (r.unreviewed && r.declared)
     h += '<div class="small text-secondary mb-1">Loaded from a URL, not from the plugin list: this disclosure was not reviewed for the plugin list.</div>';
-  h += FPPPluginPrivacy.headlineHtml(r);
+  h += FPPPluginPrivacy.summaryHtml(r);
+  if (!r.declared) h += FPPPluginPrivacy.headlineHtml(r);
   h += FPPPluginPrivacy.stripHtml(r, { prefix: prefix });
   h += FPPPluginPrivacy.detailsHtml(r);
   return h;
