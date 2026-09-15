@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -117,6 +118,64 @@ class DestructiveNoGuard(unittest.TestCase):
 
     def test_unincluded_file_is_a_page_and_still_fires(self):
         self.assertEqual(self.multi_hits({"runEventDate.php": self.CLI, "orphan.php": self.LOCK}), ["orphan.php"])
+
+
+
+
+class RestartFlagOneRule(unittest.TestCase):
+    """Exactly one finding exists about the restart flag - no-restart-flag, when the
+    flag is missing where FPP needs it. A plugin with the flag set gets nothing under
+    any versions[] shape; a hot-load-safe plugin that only serves FPP 10+ needs no flag
+    at all (fpp-data#136, #236, #241)."""
+
+    FLAG = "#!/bin/bash\n. ${FPPDIR}/scripts/common\nsetSetting restartFlag 1\n"
+    NOFLAG = "#!/bin/bash\necho installing\n"
+    INFO = {
+        "repoName": "fpp-synthetic", "name": "Synthetic", "author": "test", "description": "test plugin",
+        "homeURL": "https://github.com/example/fpp-synthetic",
+        "srcURL": "https://github.com/example/fpp-synthetic.git",
+        "bugURL": "https://github.com/example/fpp-synthetic/issues",
+        "privacy": {"summary": "Runs on this device only.", "sends": [], "collects": [], "sensors": [],
+                    "remoteAccess": "none", "systemChanges": [], "closedCode": False, "other": "none"},
+    }
+    SPANNING = [
+        {"minFPPVersion": "9.0", "maxFPPVersion": "9.99", "branch": "main", "sha": ""},
+        {"minFPPVersion": "10.0", "maxFPPVersion": "0", "branch": "main", "sha": ""},
+    ]
+    TEN_ONLY = [{"minFPPVersion": "10.0", "maxFPPVersion": "0", "branch": "main", "sha": ""}]
+
+    def restart_findings(self, versions, hook):
+        files = {
+            "callbacks.sh": "#!/bin/bash\necho\n",
+            "commands/descriptions.json": "[]",
+            "scripts/fpp_install.sh": hook,
+            "scripts/fpp_uninstall.sh": hook,
+        }
+        info = dict(self.INFO, versions=versions)
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(tmp, dict(files, **{"pluginInfo.json": json.dumps(info)}))
+            return {f.code: f for f in L.lint_plugin_dir(tmp, "fpp-synthetic", info)
+                    if "restart" in f.code or "hotload" in f.code}
+
+    def test_flag_set_spanning_majors_is_silent(self):
+        self.assertEqual(self.restart_findings(self.SPANNING, self.FLAG), {})
+
+    def test_flag_set_ten_only_is_silent(self):
+        self.assertEqual(self.restart_findings(self.TEN_ONLY, self.FLAG), {})
+
+    def test_flag_missing_spanning_majors_fires_with_the_versions_reason(self):
+        found = self.restart_findings(self.SPANNING, self.NOFLAG)
+        self.assertEqual(list(found), ["no-restart-flag"])
+        self.assertEqual(found["no-restart-flag"].severity, L.BEST_PRACTICE)
+        self.assertIn("versions[] serves this exact branch/build to FPP majors before 10", found["no-restart-flag"].message)
+
+    def test_flag_missing_ten_only_hotload_safe_is_silent(self):
+        self.assertEqual(self.restart_findings(self.TEN_ONLY, self.NOFLAG), {})
+
+    def test_pinned_old_major_does_not_span(self):
+        pinned = [dict(self.SPANNING[0], sha="0123456789abcdef0123456789abcdef01234567"), self.SPANNING[1]]
+        self.assertEqual(self.restart_findings(pinned, self.NOFLAG), {})
+
 
 
 if __name__ == "__main__":

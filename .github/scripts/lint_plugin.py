@@ -3194,22 +3194,16 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         any(m < HOTLOAD_INTRODUCED_MAJOR for m in majors) and any(m >= HOTLOAD_INTRODUCED_MAJOR for m in majors)
         for majors in _head_tracking_by_branch.values())
     effective_hotload_safe = hotload_safe and not spans_pre_hotload_major
+    # ONE rule about the flag: no-restart-flag, below, and only when the flag is
+    # missing where FPP needs it. Keeping a restart flag is never a defect, so
+    # nothing here ever asks for its removal ("restart-likely-not-required") or
+    # explains why it must stay when it is already set
+    # ("hotload-safe-but-spans-pre-hotload-fpp") - both fired on plugins that were
+    # already correct, could not be cleared without either dropping a harmless
+    # flag or restructuring versions[], and kept tracking issues from ever going
+    # clean (fpp-data#136, #236, #241). A plugin with the flag set everywhere it
+    # is needed gets no restart-flag finding under any versions[] shape.
 
-    if effective_hotload_safe and ships_native:
-        out.append(Finding(OPTIONAL, "restart-likely-not-required",
-                   "doesn't register HTTP routes directly on drogon::app() (outside registerPluginApi()) "
-                   "and defines no createChannelOutput(), so on an FPP build with the plugin load/unload "
-                   "feature (plugin API 6+), install/uninstall should be picked up by fppd without a "
-                   "restart - this plugin likely doesn't need to force one via restartFlag/rebootFlag at "
-                   "those two lifecycle points.\n"
-                   "  - Verify with an actual install/uninstall before relying on it"))
-    elif effective_hotload_safe:
-        out.append(Finding(OPTIONAL, "restart-likely-not-required",
-                   "ships a root callbacks script, so on an FPP build with the plugin load/unload feature "
-                   "(plugin API 6+), PluginManager::loadPlugin() actually calls loadUserPlugin() (which "
-                   "reads commands/descriptions.json) - install/uninstall should register/withdraw this "
-                   "plugin's commands without a restart.\n"
-                   "  - Verify with an actual install/uninstall before relying on it"))
     if ships_commands or ships_native:
         # A reboot flag also satisfies this: a reboot restarts fppd along with
         # everything else, so a plugin that already asks for one (e.g. it also
@@ -3327,24 +3321,6 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                            f"so the Plugin Manager's restart banner appears right after that step instead "
                            f"of leaving the command silently unavailable/lingering as a ghost until fppd "
                            f"happens to restart for an unrelated reason"))
-        elif hotload_safe and spans_pre_hotload_major:
-            # Only surface this standalone when the flag genuinely IS set everywhere it's
-            # needed (no gaps above) - otherwise it just restates "you need the flag" a
-            # second time alongside no-restart-flag's own concrete gap, reading as two
-            # different problems instead of one (fpp-data#136: this used to fire even
-            # when no-restart-flag ALSO fired for the same plugin, which read as
-            # contradictory - "looks safe" immediately followed by an unrelated-sounding
-            # restart-flag complaint).
-            out.append(Finding(BEST_PRACTICE, "hotload-safe-but-spans-pre-hotload-fpp",
-                       "looks structurally safe to hot-load/unload on its own, but pluginInfo.json's "
-                       f"versions[] declares a single branch/build whose range starts before FPP "
-                       f"{HOTLOAD_INTRODUCED_MAJOR} (where the plugin load/unload feature doesn't "
-                       f"exist at all) and extends into or past it - so this same code also has to "
-                       f"support install/uninstall via a full fppd restart for those older FPP "
-                       f"installs.\n"
-                       f"  - Keep restartFlag/rebootFlag set here regardless; only drop it if you "
-                       f"split off a separate FPP {HOTLOAD_INTRODUCED_MAJOR}+-only branch/sha in "
-                       f"versions[]"))
 
     # --- logging conventions -------------------------------------------------
     log_hit = first(r'''(['"][^'"]*\.log['"])|>>?\s*\S*\.log''')
