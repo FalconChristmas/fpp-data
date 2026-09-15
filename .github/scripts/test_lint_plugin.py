@@ -177,6 +177,24 @@ class RestartFlagOneRule(unittest.TestCase):
         self.assertEqual(self.restart_findings(pinned, self.NOFLAG), {})
 
 
+class SudoInComments(unittest.TestCase):
+    """`sudo` in a comment explaining a choice is not a sudo call (fpp-data#266:
+    `# sudo, not plain rm: ...` was reported, with advice to run the comment)."""
+
+    def sudo(self, text):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(tmp, {"scripts/fpp_uninstall.sh": text})
+            return [f for f in L.lint_plugin_dir(tmp, "fpp-synthetic", None) if f.code == "sudo"]
+
+    def test_comment_lines_are_skipped(self):
+        self.assertEqual(self.sudo("#!/bin/bash\n# sudo, not plain rm: same reasoning as delete_backup.sh\nrm -rf \"$d\"  # no sudo needed\n"), [])
+
+    def test_real_call_still_fires(self):
+        found = self.sudo("#!/bin/bash\n# sudo, not plain rm\nsudo rm -rf \"$d\"\n")
+        self.assertEqual(len(found), 1)
+        self.assertIn("fpp_uninstall.sh:3", found[0].message)
+
+
 
 if __name__ == "__main__":
     unittest.main()

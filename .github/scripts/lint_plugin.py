@@ -2130,8 +2130,8 @@ def _privacy_findings(root: str, info: dict | None, own_owner: str | None) -> li
     if over:
         out.append(Finding(BEST_PRACTICE, "privacy-text-length",
                    f"{len(over)} privacy text(s) exceed the install-dialog caps: {', '.join(over[:6])}"
-                   f"{' ...' if len(over) > 6 else ''}. FPP shows these inline under each light, so long "
-                   "text is cut off.\n"
+                   f"{' ...' if len(over) > 6 else ''}. FPP shows every word under its light - nothing is cut "
+                   "off - so a paragraph here makes the install dialog long.\n"
                    f"  - Keep summary to {_PRIV_LEN_SUMMARY} characters, sends[].what/why and collects[].what to "
                    f"{_PRIV_LEN_TEXT}, systemChanges[].what to {_PRIV_LEN_CHANGE}; the detail goes in `other`"))
 
@@ -2802,18 +2802,27 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # runtime request-handler scripts) runs as the `fpp` user, where sudo can
     # be legitimate. Scope by filename, not extension, so those runtime
     # scripts aren't flagged.
+    def _first_sudo_line(path):
+        """(lineno, line) of the first `sudo` on a code line - not one in a comment
+        explaining a sudo choice (fpp-data#266: `# sudo, not plain rm: ...` was
+        reported with the advice to run the comment directly)."""
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            code = re.split(r'\s#', line, maxsplit=1)[0]   # `cmd  # a trailing note`
+            if re.search(r'\bsudo\b', code):
+                return i, line.strip()
+        return None
+
     hit = None
     for dirpath, dirnames, filenames in os.walk(root):
         if ".git" in dirnames:
             dirnames.remove(".git")
         for fn in filenames:
             if fn in SUDO_SCOPE:
-                body = _read(os.path.join(dirpath, fn))
-                m = re.search(r'\bsudo\b', body)
+                m = _first_sudo_line(os.path.join(dirpath, fn))
                 if m:
-                    lineno = body[:m.start()].count("\n") + 1
-                    hit = (os.path.relpath(os.path.join(dirpath, fn), root), lineno,
-                           body.splitlines()[lineno - 1].strip())
+                    hit = (os.path.relpath(os.path.join(dirpath, fn), root), m[0], m[1])
                     break
         if hit:
             break
@@ -2821,11 +2830,9 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         for cand in ("Makefile", "makefile"):
             p = os.path.join(root, cand)
             if os.path.isfile(p):
-                body = _read(p)
-                m = re.search(r'\bsudo\b', body)
+                m = _first_sudo_line(p)
                 if m:
-                    lineno = body[:m.start()].count("\n") + 1
-                    hit = (cand, lineno, body.splitlines()[lineno - 1].strip())
+                    hit = (cand, m[0], m[1])
                 break
     if hit:
         # `sudo -u <user> <cmd>` is a privilege DROP (root -> unprivileged runtime
