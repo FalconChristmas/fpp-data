@@ -189,6 +189,15 @@ class SudoInComments(unittest.TestCase):
     def test_comment_lines_are_skipped(self):
         self.assertEqual(self.sudo("#!/bin/bash\n# sudo, not plain rm: same reasoning as delete_backup.sh\nrm -rf \"$d\"  # no sudo needed\n"), [])
 
+    def test_root_guarded_call_is_skipped(self):
+        # fpp-data#266: escalates only when run by hand as non-root
+        self.assertEqual(self.sudo('#!/bin/bash\nif [ "$(id -u)" -eq 0 ]; then\n    rm -rf "$d"\nelse\n    sudo rm -rf "$d"\nfi\n'), [])
+        self.assertEqual(self.sudo('#!/bin/bash\n[ "$EUID" -ne 0 ] && sudo rm -rf "$d"\n'), [])
+
+    def test_guard_too_far_above_does_not_count(self):
+        body = '#!/bin/bash\nme=$(id -u)\n' + 'echo x\n' * 8 + 'sudo rm -rf "$d"\n'
+        self.assertEqual(len(self.sudo(body)), 1)
+
     def test_real_call_still_fires(self):
         found = self.sudo("#!/bin/bash\n# sudo, not plain rm\nsudo rm -rf \"$d\"\n")
         self.assertEqual(len(found), 1)

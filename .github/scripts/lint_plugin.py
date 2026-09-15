@@ -2802,16 +2802,27 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # runtime request-handler scripts) runs as the `fpp` user, where sudo can
     # be legitimate. Scope by filename, not extension, so those runtime
     # scripts aren't flagged.
+    # A root test just above the sudo: the script also runs by hand as a normal
+    # user and escalates only then (`if [ "$(id -u)" -eq 0 ]; then rm; else sudo rm`),
+    # which is the right way to write a hook that has a manual mode.
+    root_guard_rx = re.compile(r'\$\(\s*id\s+-u\s*\)|`id\s+-u`|\$\{?EUID\}?|\$\{?UID\}?\b|\bwhoami\b|\bid\s+-un?\b')
+
     def _first_sudo_line(path):
         """(lineno, line) of the first `sudo` on a code line - not one in a comment
-        explaining a sudo choice (fpp-data#266: `# sudo, not plain rm: ...` was
-        reported with the advice to run the comment directly)."""
-        for i, line in enumerate(_read(path).splitlines(), 1):
+        explaining a sudo choice, and not one guarded by a root test on the line or within
+        the six lines above (fpp-data#266: both were reported, the first with the advice to
+        run the comment directly)."""
+        lines = _read(path).splitlines()
+        for i, line in enumerate(lines):
             if _is_comment_line(line):
                 continue
             code = re.split(r'\s#', line, maxsplit=1)[0]   # `cmd  # a trailing note`
-            if re.search(r'\bsudo\b', code):
-                return i, line.strip()
+            if not re.search(r'\bsudo\b', code):
+                continue
+            guarded = [l for l in lines[max(0, i - 6):i] if not _is_comment_line(l)] + [code[:code.index("sudo")]]
+            if any(root_guard_rx.search(l) for l in guarded):
+                continue
+            return i + 1, line.strip()
         return None
 
     hit = None
@@ -2856,7 +2867,9 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"uses sudo in a script ({hit[0]}:{hit[1]}: `{hit[2]}`) - install/hooks already "
                        f"run as root.\n"
                        f"  - Remove the sudo call and run the command directly, e.g. "
-                       f"`{hit[2].replace('sudo ', '', 1)}`"))
+                       f"`{hit[2].replace('sudo ', '', 1)}`; if the script is also run by hand as a "
+                       f"normal user, escalate only then: `if [ \"$(id -u)\" -eq 0 ]; then <cmd>; else "
+                       f"sudo <cmd>; fi`"))
 
     # --- untrusted request data reaching a dangerous sink --------------------
 
