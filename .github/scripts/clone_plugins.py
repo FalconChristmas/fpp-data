@@ -1,7 +1,10 @@
 """Shallow-clone every plugin in pluginList.json into <out>/<repoName>.
 
-Derives the clone URL + branch from each entry's pluginInfo URL
-(raw.githubusercontent.com/<owner>/<repo>/<ref>/pluginInfo.json). Failures are
+Derives the clone URL from each entry's pluginInfo URL
+(raw.githubusercontent.com/<owner>/<repo>/<ref>/pluginInfo.json) and the branch
+from that pluginInfo.json's versions[] - the entry for --target-major, else the
+newest FPP version - so the lint sees the code FPP actually installs, not the
+GitHub default branch. Falls back to the URL's ref if versions[] names none. Failures are
 reported but don't stop the run - the new-major-release scanner still reports a
 plugin it couldn't clone (metadata-only). Used by the plugin-check workflow.
 
@@ -41,6 +44,8 @@ def main():
                                                 "(shared with new_major_release_scan.py's --seed "
                                                 "so both processes select the identical subset)")
     ap.add_argument("--only-owner", default="", help="clone only plugins owned by this GitHub account (case-insensitive)")
+    ap.add_argument("--target-major", type=int, default=0,
+                    help="prefer the versions[] branch certified for this FPP major (0 = newest version's branch)")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -67,6 +72,9 @@ def main():
             fail += 1
             continue
         owner, repo, branch = tgt
+        info, _ = lib.fetch_json(info_url)
+        branch = lib.branch_for_major((info or {}).get("versions"),
+                                      args.target_major or None) or branch
         url = f"https://github.com/{owner}/{repo}.git"
         try:
             r = subprocess.run(["git", "clone", "--depth", "1", "--branch", branch, url, dest],

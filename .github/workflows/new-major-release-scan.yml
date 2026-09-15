@@ -85,7 +85,8 @@ jobs:
           python .github/scripts/clone_plugins.py \
             --plugin-list pluginList.json --out plugins --limit "${{ inputs.limit }}" \
             --seed "$SEED" \
-            --only-owner "${{ inputs.only_account }}"
+            --only-owner "${{ inputs.only_account }}" \
+            --target-major "${{ inputs.target_major }}"
 
       - name: Scan (lint + FPP-${{ inputs.target_major }} compatibility)
         env:
