@@ -325,8 +325,8 @@ var SENSORS = [
 ];
 var REMOTE = [
   ["none", "None", "No listener of its own, or only pages and routes on FPP's web server. Green."],
-  ["lan", "Local network", "Opens its own port on the local network (a small web server, a socket, a broker). Amber: \"Remote access, off by default\"."],
-  ["internet-authenticated", "Internet, with a login", "A port meant to be reached from the internet, behind a username/password or token. Amber."],
+  ["lan", "Local network", "Opens its own port on the local network (a small web server, a socket, a broker). Amber: \"Listens on your network\"."],
+  ["internet-authenticated", "Internet, with a login", "A port meant to be reached from the internet, behind a username/password or token. Amber: \"Reachable from the internet, with a login\"."],
   ["internet-open", "Internet, no login", "A port meant to be reached from the internet with no login. Red."],
   ["exposes-fpp", "Puts FPP's own pages on the internet", "Proxies or forwards FPP's own web interface to the internet. Red."],
   ["tunnel", "Tunnel / overlay network", "Bundles a tunnel (Cloudflare, ngrok, Tailscale, ZeroTier, ...) that lets an outside service reach this device. Red."]
