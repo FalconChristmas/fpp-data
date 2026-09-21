@@ -3916,9 +3916,16 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # (not just deprecated) - a plugin still on this overload no longer compiles
     # against current FPP headers at all, it's not a soft "borrowed time" nudge
     # anymore.
+    # Skipped when the repo ALSO defines the no-arg registerApis(): that's the
+    # shape of a plugin serving one branch to FPP 8/9 and 10+ (versions[] with
+    # both ranges) and keeping the legacy overload under an
+    # `#if FPP_PLUGIN_API_VERSION >= 6 ... #else` guard - _grep is line-by-line
+    # and can't see the guard, so without this gate the ported plugin stays
+    # flagged forever (fpp-gameday, fpp-data#281). has_own_register_apis is
+    # computed above (hotload_safe/unsafe_direct_routes).
     hit = first(r'(register|unregister)Apis\s*\(\s*httpserver::webserver',
                exts=(".cpp", ".c", ".h", ".hpp"))
-    if hit:
+    if hit and not has_own_register_apis:
         out.append(Finding(BLOCKER, "deprecated-httpserver-api",
                    f"implements the removed registerApis(httpserver::webserver*) overload "
                    f"({hit[0]}:{hit[1]}: `{hit[2]}`) instead of the modern no-arg registerApis() - "
