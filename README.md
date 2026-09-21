@@ -20,6 +20,27 @@ Building the plugin itself? Start at
 it has the `pluginInfo.json` format reference, the plugin guidelines, and a
 working skeleton to fork.
 
+## Tools for plugin authors
+
+Two browser-only pages (nothing leaves your browser except reads of your own
+public repo) that help get `pluginInfo.json` right before you submit:
+
+- [**Privacy disclosure builder**](https://falconchristmas.github.io/fpp-data/plugin_privacy_builder/) -
+  a guided form that writes the `privacy` block for you. Give it your repo (or
+  paste your `pluginInfo.json`) and it pre-fills the plugin name and any block
+  you already have, walks through the eight keys one at a time with the same
+  wording and rules the plugin check uses, and hands back the block on its own
+  or merged into your whole file. Deep link: `?repo=owner/repo`.
+- [**Plugin preview**](https://falconchristmas.github.io/fpp-data/plugin_preview/) -
+  renders your `pluginInfo.json` exactly as FPP's Plugin Manager will show it:
+  the card with its six privacy dots and the install dialog with the lights,
+  the line under each and the Install button. It runs FPP's own renderer, so
+  what you see is what an FPP user sees. Deep link: `?repo=owner/repo` once
+  the file is pushed, or paste the JSON.
+
+The preview only shows what you *declared*. The plugin check that compares the
+disclosure with your code runs on the submission issue, not in the browser.
+
 ## Removing a plugin
 
 Start at [**Request Plugin Removal**](https://falconchristmas.github.io/fpp-data/submit_remove_plugin/). Existing installs are unaffected; the entry is just removed from `pluginList.json`.

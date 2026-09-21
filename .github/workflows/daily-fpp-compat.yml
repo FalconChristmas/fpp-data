@@ -118,6 +118,9 @@ jobs:
           #        every other auto-generated removal PR. Otherwise, plain reminder -
           #        no further escalation defined past 7.
           #
+          # The whole ladder is skipped once the owner has used `/submit` - from then
+          # on it's waiting on a maintainer, not the author.
+          #
           # Reminder count is read back from prior "new-major-release-stale-nudge:N"
           # marker comments (max N seen), not a running counter anywhere else, so this
           # stays correct even if a run is skipped or the workflow changes. Due date
@@ -147,6 +150,21 @@ jobs:
               const comments = await github.paginate(github.rest.issues.listComments, {
                 owner, repo, issue_number: issue.number, per_page: 100,
               });
+              // Once the owner has used `/submit` the ball is in a MAINTAINER's court -
+              // nothing the author can do until someone looks - so reminding them is
+              // pure pestering (fpp-data#227: reminder 3 landed hours after the owner's
+              // `/submit`; #236: four reminders over a pending `/submit`). Stop the
+              // ladder there. Detected via the bot's own accepted-/submit comment
+              // (new-major-release-issue-recheck.yml), NOT the needs-manual-review
+              // label: reminder 4 below sets that label too, and keying on it would
+              // silently kill reminders 5-7 (and the removal escalation) for a plugin
+              // whose author never replied at all. A `/recheck` or plain reply alone
+              // does NOT stop it: the findings are still the author's to fix, so keep
+              // nudging until they either clear them or `/submit`.
+              if (comments.some(c => c.body && c.body.includes("at the owner's request via `/submit`"))) {
+                core.info(`#${issue.number}: skipping reminders - owner used /submit, awaiting a maintainer.`);
+                continue;
+              }
               let sentCount = 0;
               for (const c of comments) {
                 const m = c.body && c.body.match(NUDGE_MARKER_RE);

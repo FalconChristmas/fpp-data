@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Plugin preview - Falcon Player</title>
+<!--
+  Renders a plugin's pluginInfo.json the way FPP's Plugin Manager will show it:
+  the card in the plugin list (six privacy dots) and the install dialog (trust
+  callout, label line, the author's summary, six chips with their detail lines,
+  the author's `other` text, install button; FPP's headline is shown only for a
+  block with no disclosure - for a declared block it is the card's tooltip).
+  The colours and every sentence come from
+  fpp-privacy-lights.js, the SAME script FPP itself runs, loaded straight from
+  the FPP repo (www/js/fpp-privacy-lights.js on master) via jsDelivr - nothing
+  is copied here, so the preview always shows what current FPP shows. Not
+  raw.githubusercontent.com: it serves scripts as text/plain, which browsers
+  refuse. Rules: PLUGIN_GUIDELINES.md §14.15 in fpp-plugin-Template.
+
+  The styling below is the subset of Bootstrap 5.3 + FPP's own classes that
+  the renderer and plugins.php emit, with the theme tokens inlined so the page
+  needs no Bootstrap build. Font Awesome (the dots/carets) is loaded from cdnjs.
+
+  This page only shows what the author DECLARED. The listing check
+  (lint_plugin.py) that compares the declaration with the code runs on the
+  submission issue, not here.
+-->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.1.0/css/all.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
+<style>
+:root, [data-bs-theme=light] {
+  --bs-body-bg:#fff; --bs-body-color:#212529; --bs-secondary-color:rgba(33,37,41,.75); --bs-tertiary-bg:#f8f9fa; --bs-secondary-bg:#e9ecef;
+  --bs-border-color:#dee2e6; --bs-border-color-translucent:rgba(23,23,32,.175); --bs-link-color:#0d6efd; --bs-link-hover-color:#0a58ca;
+  --bs-success:#198754; --bs-warning:#ffc107; --bs-danger:#dc3545;
+  --bs-success-text-emphasis:rgb(10,54,33.6); --bs-success-bg-subtle:rgb(209,231,220.8); --bs-success-border-subtle:rgb(163,207,186.6);
+  --bs-warning-text-emphasis:rgb(102,77.2,2.8); --bs-warning-bg-subtle:rgb(255,242.6,205.4); --bs-warning-border-subtle:rgb(255,230.2,155.8);
+  --bs-danger-text-emphasis:rgb(88,21.2,27.6); --bs-danger-bg-subtle:rgb(248,214.6,217.8); --bs-danger-border-subtle:rgb(241,174.2,180.6);
+  --bs-secondary-text-emphasis:rgb(43.2,46.8,50); --bs-secondary-bg-subtle:rgb(225.6,227.4,229); --bs-secondary-border-subtle:rgb(196.2,199.8,203);
+  --bs-primary-text-emphasis:rgb(5.2,44,101.2); --bs-primary-bg-subtle:rgb(206.6,226,254.6); --bs-primary-border-subtle:rgb(158.2,197,254.2);
+  --pp-ground:#f4f5f7; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.15); --bs-btn-close-color:#000;
+  color-scheme:light;
+}
+[data-bs-theme=dark] {
+  --bs-body-bg:#212529; --bs-body-color:#dee2e6; --bs-secondary-color:rgba(222,226,230,.75); --bs-tertiary-bg:rgb(42.5,47.5,52.5); --bs-secondary-bg:#343a40;
+  --bs-border-color:#495057; --bs-border-color-translucent:rgba(255,255,255,.15); --bs-link-color:rgb(109.8,168,253.8); --bs-link-hover-color:rgb(139.8,185.4,254);
+  --bs-success-text-emphasis:rgb(117,183,152.4); --bs-success-bg-subtle:rgb(5,27,16.8); --bs-success-border-subtle:rgb(15,81,50.4);
+  --bs-warning-text-emphasis:rgb(255,217.8,106.2); --bs-warning-bg-subtle:rgb(51,38.6,1.4); --bs-warning-border-subtle:rgb(153,115.8,4.2);
+  --bs-danger-text-emphasis:rgb(234,133.8,143.4); --bs-danger-bg-subtle:rgb(44,10.6,13.8); --bs-danger-border-subtle:rgb(132,31.8,41.4);
+  --bs-secondary-text-emphasis:rgb(166.8,172.2,177); --bs-secondary-bg-subtle:rgb(21.6,23.4,25); --bs-secondary-border-subtle:rgb(64.8,70.2,75);
+  --bs-primary-text-emphasis:rgb(109.8,168,253.8); --bs-primary-bg-subtle:rgb(2.6,22,50.6); --bs-primary-border-subtle:rgb(7.8,66,151.8);
+  --pp-ground:#16191d; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.5); --bs-btn-close-color:#fff;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-bs-theme=light]) {
+  --bs-body-bg:#212529; --bs-body-color:#dee2e6; --bs-secondary-color:rgba(222,226,230,.75); --bs-tertiary-bg:rgb(42.5,47.5,52.5); --bs-secondary-bg:#343a40;
+  --bs-border-color:#495057; --bs-border-color-translucent:rgba(255,255,255,.15); --bs-link-color:rgb(109.8,168,253.8); --bs-link-hover-color:rgb(139.8,185.4,254);
+  --bs-success-text-emphasis:rgb(117,183,152.4); --bs-success-bg-subtle:rgb(5,27,16.8); --bs-success-border-subtle:rgb(15,81,50.4);
+  --bs-warning-text-emphasis:rgb(255,217.8,106.2); --bs-warning-bg-subtle:rgb(51,38.6,1.4); --bs-warning-border-subtle:rgb(153,115.8,4.2);
+  --bs-danger-text-emphasis:rgb(234,133.8,143.4); --bs-danger-bg-subtle:rgb(44,10.6,13.8); --bs-danger-border-subtle:rgb(132,31.8,41.4);
+  --bs-secondary-text-emphasis:rgb(166.8,172.2,177); --bs-secondary-bg-subtle:rgb(21.6,23.4,25); --bs-secondary-border-subtle:rgb(64.8,70.2,75);
+  --bs-primary-text-emphasis:rgb(109.8,168,253.8); --bs-primary-bg-subtle:rgb(2.6,22,50.6); --bs-primary-border-subtle:rgb(7.8,66,151.8);
+  --pp-ground:#16191d; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.5); --bs-btn-close-color:#fff;
+  color-scheme:dark;
+}}
+*,*::before,*::after{box-sizing:border-box}
+body{margin:0;background:var(--pp-ground);color:var(--bs-body-color);font-family:"Helvetica Neue",Arial,"Noto Sans",system-ui,sans-serif;font-size:1rem;line-height:1.5;-webkit-text-size-adjust:100%}
+a{color:var(--bs-link-color);text-decoration:underline} a:hover{color:var(--bs-link-hover-color)}
+b,.fw-bold{font-weight:700} .fw-semibold{font-weight:600}
+.small{font-size:.875em}
+.text-secondary,.text-body-secondary{color:var(--bs-secondary-color)!important}
+.bg-body-tertiary{background-color:var(--bs-tertiary-bg)!important}
+.text-uppercase{text-transform:uppercase}
+.text-success{color:var(--bs-success)!important} .text-warning{color:var(--bs-warning)!important} .text-danger{color:var(--bs-danger)!important}
+.text-success-emphasis{color:var(--bs-success-text-emphasis)!important} .text-warning-emphasis{color:var(--bs-warning-text-emphasis)!important} .text-danger-emphasis{color:var(--bs-danger-text-emphasis)!important} .text-secondary-emphasis{color:var(--bs-secondary-text-emphasis)!important}
+.bg-success-subtle{background-color:var(--bs-success-bg-subtle)!important} .bg-warning-subtle{background-color:var(--bs-warning-bg-subtle)!important} .bg-danger-subtle{background-color:var(--bs-danger-bg-subtle)!important} .bg-secondary-subtle{background-color:var(--bs-secondary-bg-subtle)!important}
+.border{border:1px solid var(--bs-border-color)!important}
+.border-success-subtle{border-color:var(--bs-success-border-subtle)!important} .border-warning-subtle{border-color:var(--bs-warning-border-subtle)!important} .border-danger-subtle{border-color:var(--bs-danger-border-subtle)!important} .border-secondary-subtle{border-color:var(--bs-secondary-border-subtle)!important}
+.rounded{border-radius:.375rem!important} .rounded-pill{border-radius:50rem!important}
+.d-flex{display:flex!important} .d-inline-flex{display:inline-flex!important} .d-none{display:none!important}
+.flex-wrap{flex-wrap:wrap!important} .flex-column{flex-direction:column!important} .flex-grow-1{flex-grow:1!important}
+.align-items-center{align-items:center!important} .align-items-start{align-items:flex-start!important}
+.ms-auto{margin-left:auto!important} .min-w-0{min-width:0!important}
+.gap-1{gap:.25rem!important} .gap-2{gap:.5rem!important} .gap-3{gap:1rem!important}
+.mt-1{margin-top:.25rem!important} .mt-2{margin-top:.5rem!important} .mt-3{margin-top:1rem!important}
+.mb-0{margin-bottom:0!important} .mb-1{margin-bottom:.25rem!important} .mb-2{margin-bottom:.5rem!important} .mb-3{margin-bottom:1rem!important}
+.p-2{padding:.5rem!important} .ps-3{padding-left:1rem!important}
+.overflow-auto{overflow:auto!important}
+.list-unstyled{padding-left:0;list-style:none;margin:0}
+p{margin-top:0;margin-bottom:1rem}
+.link-primary{color:var(--bs-link-color)!important;cursor:pointer}
+/* badge (Bootstrap 5.3) */
+.badge{--bs-badge-padding-x:.65em;--bs-badge-padding-y:.35em;--bs-badge-font-size:.75em;--bs-badge-font-weight:700;--bs-badge-border-radius:.375rem;display:inline-block;padding:var(--bs-badge-padding-y) var(--bs-badge-padding-x);font-size:var(--bs-badge-font-size);font-weight:var(--bs-badge-font-weight);line-height:1;text-align:center;white-space:nowrap;vertical-align:baseline;border-radius:var(--bs-badge-border-radius)}
+.text-bg-graceful{background:var(--bs-primary-bg-subtle);color:var(--bs-primary-text-emphasis);border:1px solid var(--bs-primary-border-subtle)}
+.pluginPrivacyChip{font-family:inherit;font-size:.8em;padding:.45em .8em;background-clip:padding-box}
+button.pluginPrivacyChip{cursor:pointer}
+.pluginPrivacyChip[aria-expanded="true"]{box-shadow:inset 0 0 0 1px currentColor}
+.pluginPrivacyChip[data-level="r"]{cursor:default}
+.pluginPrivacyChip[data-level="n"]{border-style:dashed!important}
+.pluginPrivacyChip:focus-visible{outline:2px solid var(--bs-link-color);outline-offset:2px}
+.pluginPrivacyChip[aria-expanded="true"] .fa-caret-right{transform:rotate(90deg)}
+/* modal (Bootstrap 5.3) */
+.modal-content{position:relative;display:flex;flex-direction:column;width:100%;color:var(--bs-body-color);background-color:var(--bs-body-bg);background-clip:padding-box;border:1px solid var(--bs-border-color-translucent);border-radius:.5rem;box-shadow:var(--pp-shadow)}
+.modal-header{display:flex;flex-shrink:0;align-items:center;padding:1.5rem 1.5rem;border-bottom:1px solid var(--bs-border-color)}
+.modal-title{margin:0;line-height:1.5;font-size:1.25rem;font-weight:500}
+.modal-body{position:relative;flex:1 1 auto;padding:1.5rem;min-width:0;overflow-wrap:anywhere}
+.modal-footer{display:flex;flex-shrink:0;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:.5rem;padding:1.25rem 1.5rem;border-top:1px solid var(--bs-border-color)}
+.btn-close{margin-left:auto;width:1em;height:1em;padding:.25em;background:transparent;border:0;border-radius:.375rem;opacity:.5;cursor:pointer;font-size:1.25rem;line-height:1;color:var(--bs-btn-close-color)}
+.btn-close::before{content:"\00d7";font-size:1.4em;line-height:.6}
+.btn{display:inline-block;padding:.375rem .75rem;font-family:inherit;font-size:1rem;font-weight:400;line-height:1.5;text-align:center;vertical-align:middle;cursor:pointer;user-select:none;border:1px solid transparent;border-radius:.375rem}
+.btn-success{color:#fff;background-color:#198754;border-color:#198754}
+.btn-secondary{color:#fff;background-color:#6c757d;border-color:#6c757d}
+.btn-warning{color:#000;background-color:#ffc107;border-color:#ffc107}
+.btn-danger{color:#fff;background-color:#dc3545;border-color:#dc3545}
+.btn-primary{color:#fff;background-color:#0d6efd;border-color:#0d6efd} .btn-primary:hover{background-color:#0b5ed7}
+.btn:focus-visible,.btn-close:focus-visible{outline:2px solid var(--bs-link-color);outline-offset:2px}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+details>summary{cursor:pointer}
+pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.8rem;line-height:1.4;background:var(--bs-tertiary-bg);border:1px solid var(--bs-border-color);border-radius:.375rem;padding:.75rem;overflow-x:auto;white-space:pre}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.875em;color:inherit}
+/* the plugin-list card (plugins.php) */
+.card{position:relative;display:flex;flex-direction:column;min-width:0;color:var(--bs-body-color);background-color:var(--bs-body-bg);border:1px solid var(--bs-border-color-translucent);border-radius:.375rem;max-width:26rem}
+.card-body{flex:1 1 auto;padding:1rem}
+.card-title{font-size:1.1rem;font-weight:500;margin:0}
+.card-text{margin:0}
+.pluginCardDesc{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.pluginCardActions{min-height:1.5rem}
+/* page chrome */
+.ppwrap{max-width:52rem;margin:0 auto;padding-block:1.5rem 4rem;padding-inline:1rem}
+.pphead{display:flex;flex-wrap:wrap;align-items:center;gap:.85rem;margin-bottom:.25rem}
+.pphead h1{font-size:1.4rem;margin:0;font-weight:600}
+.pphead .sub{margin:.1rem 0 0;color:var(--bs-secondary-color);font-size:.9rem}
+.fpplogo{height:2.1rem;width:auto;color:var(--bs-body-color);flex:0 0 auto}
+
+.pptheme{margin-left:auto;font:inherit;font-size:.875rem;padding:.3rem .7rem;border:1px solid var(--bs-border-color);border-radius:.375rem;background:var(--bs-body-bg);color:var(--bs-body-color);cursor:pointer}
+.pplede{color:var(--bs-secondary-color);font-size:.925rem;margin:0 0 1rem;max-width:72ch}
+.ppform{background:var(--bs-body-bg);border:1px solid var(--bs-border-color);border-radius:.5rem;padding:1rem 1.25rem;margin-bottom:1.5rem}
+.ppform label{display:block;font-weight:600;font-size:.9rem;margin:0 0 .3rem}
+.ppform .hint{font-weight:400;color:var(--bs-secondary-color);font-size:.85rem}
+.ppform input,.ppform textarea{width:100%;padding:.55rem .7rem;border:1px solid var(--bs-border-color);border-radius:.375rem;background:var(--bs-body-bg);color:var(--bs-body-color);font-size:1rem;font-family:inherit}
+.ppform textarea{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.85rem;min-height:9rem;resize:vertical}
+.pprow{display:flex;gap:.5rem;flex-wrap:wrap} .pprow input{flex:1 1 18rem}
+.ppmsg{margin-top:.6rem;font-size:.9rem;color:var(--bs-secondary-color)} .ppmsg.err{color:var(--bs-danger-text-emphasis)} .ppmsg.ok{color:var(--bs-success-text-emphasis)}
+.ppsection{margin-bottom:2.5rem}
+.ppsection h2{font-size:1.05rem;font-weight:600;margin:0 0 .6rem}
+.ppsection h2 small{color:var(--bs-secondary-color);font-weight:400;font-size:.85rem}
+.ppmodalwrap{max-width:50rem}
+.ppnote{margin-top:1rem;padding:.75rem 1rem;border-left:3px solid var(--bs-border-color);color:var(--bs-secondary-color);font-size:.875rem}
+.ppnote p{margin:0 0 .5rem} .ppnote p:last-child{margin-bottom:0}
+#out{display:none} #out.show{display:block}
+@media (max-width:480px){.modal-header,.modal-body{padding:1rem}.modal-footer{padding:.75rem 1rem}}
+</style>
+</head>
+<body>
+<main class="ppwrap">
+  <div class="pphead">
+    <svg class="fpplogo" role="img" aria-label="FPP" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 56.195 18.616"> <g id="fpp-logo" transform="translate(-373.818 -583.897)"> <path id="Path_21" data-name="Path 21" d="M415.23,583.9h-9.6a5.18,5.18,0,0,0-4.837,4.026l-2.1,10.458a3.426,3.426,0,0,0,.618,2.876,3.281,3.281,0,0,0,2.626,1.184h2.731l.083-.344a3.139,3.139,0,0,1-2.173-3.826l.242-1.208c.065,0,.13.006.2.006h9.6a5.179,5.179,0,0,0,4.837-4.026l1.022-5.086a3.423,3.423,0,0,0-.618-2.875A3.279,3.279,0,0,0,415.23,583.9Zm-.747,4.349-.878,4.369a1.228,1.228,0,0,1-1.322,1.095h-7.835a.772.772,0,0,1-.618-.276.807.807,0,0,1-.144-.679l.907-4.512a1.256,1.256,0,0,1,1.181-.969h7.951a.76.76,0,0,1,.609.276A.828.828,0,0,1,414.483,588.246Z" transform="translate(-7.429)" fill="currentColor"/> <path id="Path_22" data-name="Path 22" d="M444.822,585.081A3.28,3.28,0,0,0,442.2,583.9h-9.6a5.18,5.18,0,0,0-4.837,4.026l-2.1,10.458a3.426,3.426,0,0,0,.618,2.876,3.281,3.281,0,0,0,2.626,1.184h2.731l.083-.344a3.139,3.139,0,0,1-2.174-3.826l.243-1.208c.065,0,.13.006.2.006h9.6a5.179,5.179,0,0,0,4.837-4.026l1.022-5.086A3.425,3.425,0,0,0,444.822,585.081Zm-3.373,3.165-.878,4.369a1.228,1.228,0,0,1-1.323,1.095h-7.834a.775.775,0,0,1-.618-.276.809.809,0,0,1-.143-.679l.907-4.512a1.256,1.256,0,0,1,1.181-.969h7.951a.761.761,0,0,1,.609.276A.83.83,0,0,1,441.449,588.246Z" transform="translate(-15.51)" fill="currentColor"/> <path id="Path_23" data-name="Path 23" d="M389.077,584h-8.237A5.178,5.178,0,0,0,376,588.026l-2.1,10.458a3.427,3.427,0,0,0,.618,2.876,3.28,3.28,0,0,0,2.626,1.184h2.73a.2.2,0,0,0,.19-.152.156.156,0,0,0-.106-.193,3.14,3.14,0,0,1-2.174-3.826l.731-3.638h8.454a1.8,1.8,0,0,1,1.431.639.165.165,0,0,0,.183.046.2.2,0,0,0,.132-.156,3.385,3.385,0,0,0-.695-2.76,3.29,3.29,0,0,0-2.576-1.127H379.19l.609-3.032a1.269,1.269,0,0,1,1.185-.987h7.127a3.181,3.181,0,0,1,3.329,3.341.153.153,0,0,0,.156.16h0a.2.2,0,0,0,.192-.159l.531-2.642a3.428,3.428,0,0,0-.618-2.876A3.282,3.282,0,0,0,389.077,584Z" transform="translate(0 -0.031)" fill="currentColor"/> </g> </svg>
+    <div>
+      <h1>Plugin preview</h1>
+      <p class="sub">See your plugin as FPP - Falcon Player will show it.</p>
+    </div>
+    <button type="button" class="pptheme" id="themeBtn" aria-label="Toggle light/dark">Dark</button>
+  </div>
+  <p class="pplede">See how FPP's Plugin Manager will show your plugin before you submit it: the card in the plugin list and the install dialog, including the six privacy lights computed from the <code>privacy</code> block of your <code>pluginInfo.json</code>. The colours and wording are FPP's own, produced by the same script FPP runs. The rules are in <a href="https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGIN_GUIDELINES.md" target="_blank" rel="noopener">PLUGIN_GUIDELINES.md</a> §14.15; what a listing needs is in the <a href="https://github.com/FalconChristmas/fpp-data/blob/master/PLUGINS.md" target="_blank" rel="noopener">plugin guidelines</a>.</p>
+
+  <form class="ppform" id="form" autocomplete="off">
+    <label for="repo">GitHub repo or pluginInfo.json URL <span class="hint">- <code>owner/repo</code>, a github.com URL, or a direct URL to a <code>pluginInfo.json</code></span></label>
+    <div class="pprow">
+      <input id="repo" type="text" placeholder="owner/fpp-plugin-example" spellcheck="false">
+      <button type="submit" class="btn btn-primary" id="go">Preview</button>
+    </div>
+    <details class="mt-2 small">
+      <summary class="link-primary">Or paste the JSON instead</summary>
+      <label for="json" class="mt-2">pluginInfo.json <span class="hint">- the whole file, or just the <code>privacy</code> block</span></label>
+      <textarea id="json" spellcheck="false" placeholder='{ "name": "…", "repoName": "…", "privacy": { … } }'></textarea>
+      <div class="mt-2"><button type="button" class="btn btn-primary" id="goJson">Preview pasted JSON</button></div>
+    </details>
+    <div class="ppmsg" id="msg"></div>
+  </form>
+
+  <div id="out">
+    <section class="ppsection">
+      <h2>In the plugin list <small>- the six dots; hover one for its state</small></h2>
+      <div id="card"></div>
+    </section>
+
+    <section class="ppsection">
+      <h2>Install dialog</h2>
+      <div class="ppmodalwrap"><div class="modal-content" role="dialog" aria-labelledby="dlgTitle">
+        <div class="modal-header"><h5 class="modal-title" id="dlgTitle">Install third-party plugin?</h5><button type="button" class="btn-close" aria-label="Close" tabindex="-1"></button></div>
+        <div class="modal-body" id="confirmInstallDialog"></div>
+        <div class="modal-footer"><button type="button" class="btn" id="installBtn">Install</button><button type="button" class="btn btn-secondary">Cancel</button></div>
+      </div></div>
+      <div class="ppnote">
+        <p>This is what the author <b>declared</b>, rendered by FPP. Nothing here is checked against the plugin's code: the listing check that does that (<code>lint_plugin.py</code>) runs when you <a href="../submit_new_plugin/">submit the plugin</a>, and a contradiction between the code and this block is a blocker there.</p>
+        <p id="srcNote"></p>
+      </div>
+    </section>
+
+    <section class="ppsection">
+      <h2>Declaration <small>- as read</small></h2>
+      <pre id="rawJson"></pre>
+    </section>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/gh/FalconChristmas/fpp@master/www/js/fpp-privacy-lights.js" crossorigin="anonymous"></script>
+<script>
+(function () {
+"use strict";
+var $ = function (id) { return document.getElementById(id); };
+
+// The renderer comes from the FPP repo itself (see the note in <head>); if
+// that fetch failed there is nothing to render with.
+if (typeof FPPPluginPrivacy === "undefined") {
+  document.getElementById("msg").className = "ppmsg err";
+  document.getElementById("msg").textContent = "Couldn't load fpp-privacy-lights.js from the FPP repository (cdn.jsdelivr.net) - check your connection and reload.";
+  document.getElementById("go").disabled = true;
+  document.getElementById("goJson").disabled = true;
+  return;
+}
+
+// ---- theme toggle (persisted per browser, else follows the OS) -----------
+var root = document.documentElement;
+function applyTheme(t) { if (t) root.setAttribute("data-bs-theme", t); else root.removeAttribute("data-bs-theme"); refreshThemeBtn(); }
+function isDark() { var t = root.getAttribute("data-bs-theme"); return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches; }
+function refreshThemeBtn() { $("themeBtn").textContent = isDark() ? "Light" : "Dark"; }
+try { applyTheme(localStorage.getItem("pp-theme") || ""); } catch (e) { refreshThemeBtn(); }
+$("themeBtn").addEventListener("click", function () {
+  var t = isDark() ? "light" : "dark";
+  try { localStorage.setItem("pp-theme", t); } catch (e) {}
+  applyTheme(t);
+});
+
+// ---- helpers copied from plugins.php so the markup matches FPP's ----------
+function EscapeHtml(s) { return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;"); }
+function EscapeAttr(s) { return EscapeHtml(s); }
+function IsSafeHttpUrl(u) { try { var p = new URL(u); return p.protocol === "http:" || p.protocol === "https:"; } catch (e) { return false; } }
+function IsOfficialPlugin(data) {
+  var u = data && data.srcURL;
+  if (!u) return false;
+  try {
+    var parsed = new URL(u);
+    if (parsed.host.toLowerCase() !== "github.com") return false;
+    var seg = parsed.pathname.split("/").filter(function (x) { return x.length > 0; });
+    return seg.length > 0 && seg[0].toLowerCase() === "falconchristmas";
+  } catch (e) { return false; }
+}
+function PluginAuthorHtml(data) {
+  var u = data && data.srcURL;
+  if (!u) return "";
+  try {
+    var parsed = new URL(u);
+    var seg = parsed.pathname.split("/").filter(function (x) { return x.length > 0; });
+    if (seg.length === 0) return "";
+    var owner = seg[0];
+    var profile = (parsed.host.toLowerCase() === "github.com") ? "https://github.com/" + owner : parsed.origin + "/" + owner;
+    return '<a href="' + EscapeAttr(profile) + '" target="_blank" rel="noopener noreferrer">' + EscapeHtml(owner) + "</a>";
+  } catch (e) { return ""; }
+}
+// A preview is by definition not from pluginList.json: same label line FPP
+// shows for a plugin loaded from a pasted URL.
+function PluginPrivacyResult(data) {
+  return FPPPluginPrivacy.evaluate(data ? data.privacy : null, { unreviewed: true });
+}
+function PrivacyRowHtml(data) {
+  return '<span class="ms-auto d-inline-flex align-items-center small">' +
+    FPPPluginPrivacy.stripHtml(PluginPrivacyResult(data), { compact: true }) + "</span>";
+}
+// Label line, the author's summary, the strip and its lines, then the
+// author's `other` text - the same order as plugins.php. The headline of a
+// declared block is its worst chip's text again, so FPP shows it only for a
+// block with no disclosure (and as the card's tooltip).
+function PrivacyBlockHtml(r, prefix) {
+  var h = r.declared
+    ? '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; not verified by FPP</div>'
+    : '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">No disclosure</span> &middot; the author has not said what this plugin does with data</div>';
+  if (r.unreviewed && r.declared)
+    h += '<div class="small text-secondary mb-1">Loaded from a URL, not from the plugin list: this disclosure was not reviewed for the plugin list.</div>';
+  h += FPPPluginPrivacy.summaryHtml(r);
+  if (!r.declared) h += FPPPluginPrivacy.headlineHtml(r);
+  h += FPPPluginPrivacy.stripHtml(r, { prefix: prefix });
+  h += FPPPluginPrivacy.detailsHtml(r);
+  return h;
+}
+function PluginTrustHtml(data) {
+  if (data && IsOfficialPlugin(data))
+    return '<div class="d-flex gap-2 align-items-start p-2 mb-2 rounded border bg-success-subtle border-success-subtle text-success-emphasis"><i class="fas fa-circle-check mt-1"></i><div>' +
+      '<p class="fw-bold mb-1">Maintained by the FPP project &mdash; but it still runs as root.</p>' +
+      '<p class="mb-0">It can read and change any setting, including the privacy settings, and reach anything else on the network FPP is connected to.</p></div></div>';
+  var author = PluginAuthorHtml(data) || EscapeHtml((data && data.author) ? data.author : "the author");
+  return '<div class="d-flex gap-2 align-items-start p-2 mb-2 rounded border bg-danger-subtle border-danger-subtle text-danger-emphasis"><i class="fas fa-triangle-exclamation mt-1"></i><div>' +
+    '<p class="fw-bold mb-1">Warning: this plugin is untrusted third-party code that will run on your FPP as root.</p>' +
+    '<p class="mb-0">It can read and change any setting, including the privacy settings, reach anything else on the ' +
+    "network FPP is connected to, and do anything at all once installed &mdash; including things not listed below. " +
+    "This is inherently dangerous. The FPP project does not test, vet, or guarantee the quality or safety of plugins. " +
+    "Install at your own risk, and only if you trust <b>" + author + "</b>. Plugins marked " +
+    '<span class="badge text-bg-graceful"><i class="fas fa-certificate"></i> Official</span> are maintained by the FPP team; this one is not.</p>' +
+    "</div></div>";
+}
+
+// ---- render ---------------------------------------------------------------
+function render(data, sourceUrl) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("not a JSON object");
+  // Pasting just the privacy block is allowed: wrap it.
+  if (!("privacy" in data) && ("sends" in data || "collects" in data || "summary" in data))
+    data = { privacy: data };
+  data.name = data.name || data.repoName || "(unnamed plugin)";
+  data.repoName = data.repoName || "";
+  if (!data.srcURL && sourceUrl) {
+    var m = sourceUrl.match(/^https:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\//);
+    if (m) data.srcURL = "https://github.com/" + m[1] + "/" + m[2];
+  }
+
+  // Card, as plugins.php builds it (minus the category/version badges and
+  // the GitHub stats, which need the plugin list / GitHub API).
+  var official = IsOfficialPlugin(data);
+  var h = '<div class="card"><div class="card-body d-flex flex-column">';
+  h += '<div class="d-flex align-items-start gap-3 mb-1"><div class="min-w-0 flex-grow-1">';
+  h += '<h5 class="card-title pluginTitle mb-1">' + EscapeHtml(data.name) + "</h5>";
+  if (official) h += '<div><span class="badge text-bg-graceful"><i class="fas fa-certificate"></i> Official</span></div>';
+  h += "</div></div>";
+  var cardAuthorHtml = PluginAuthorHtml(data);
+  if (cardAuthorHtml) h += '<div class="text-secondary small mb-1 pluginAuthor"><i class="fas fa-user"></i> ' + cardAuthorHtml + "</div>";
+  h += '<p class="card-text pluginCardDesc small flex-grow-1">' + EscapeHtml(data.description || "") + "</p>";
+  h += '<div class="pluginCardActions d-flex flex-wrap gap-2 mt-2 align-items-center">' + PrivacyRowHtml(data) + "</div>";
+  h += "</div></div>";
+  $("card").innerHTML = h;
+
+  // Install dialog, as ConfirmInstall in plugins.php builds it. The
+  // "installing from a URL" developer callout is left out: it is about the
+  // install path, not the plugin.
+  var src = data.srcURL || "";
+  var body = PluginTrustHtml(data);
+  var r = PluginPrivacyResult(data);
+  body += PrivacyBlockHtml(r, "ci");
+  if (IsSafeHttpUrl(src)) body += '<div class="small text-secondary mt-2"><i class="fas fa-code"></i> Source: ' +
+    '<a href="' + EscapeAttr(src) + '" target="_blank" rel="noopener noreferrer">' + EscapeHtml(src) + "</a></div>";
+  $("dlgTitle").textContent = official ? "Install this plugin?" : "Install third-party plugin?";
+  $("confirmInstallDialog").innerHTML = body;
+  FPPPluginPrivacy.bind("confirmInstallDialog");
+  var btn = FPPPluginPrivacy.installButtonFor(r);
+  $("installBtn").textContent = btn.text;
+  $("installBtn").className = "btn " + btn.cls;
+
+  $("srcNote").innerHTML = sourceUrl
+    ? "Read from <a href=\"" + EscapeAttr(sourceUrl) + "\" target=\"_blank\" rel=\"noopener\">" + EscapeHtml(sourceUrl) + "</a>."
+    : "Rendered from pasted JSON.";
+  $("rawJson").textContent = data.privacy === undefined
+    ? '(no "privacy" block in this pluginInfo.json - see PLUGININFO_FORMAT.md in fpp-plugin-Template for the block to add)'
+    : JSON.stringify({ privacy: data.privacy }, null, 2);
+  $("out").classList.add("show");
+  $("out").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+var msg = $("msg");
+function setMsg(text, cls) { msg.textContent = text; msg.className = "ppmsg" + (cls ? " " + cls : ""); }
+
+// Accepts owner/repo, a github.com / raw.githubusercontent.com repo URL (the
+// default branch is looked up), or a direct URL to a pluginInfo.json anywhere
+// (only works if that host allows cross-origin reads, which raw.githubusercontent.com does).
+async function resolveUrl(raw) {
+  raw = raw.trim();
+  if (/^https?:\/\/.*pluginInfo\.json(\?.*)?$/i.test(raw) && !/^https?:\/\/(www\.)?github\.com\//i.test(raw)) return raw;
+  // github.com/owner/repo/blob/branch/pluginInfo.json -> raw URL, same branch.
+  var blob = raw.match(/^(?:https?:\/\/)?(?:www\.)?github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)\/(?:blob|raw)\/([^/]+)\/(.+pluginInfo\.json)$/i);
+  if (blob) return "https://raw.githubusercontent.com/" + blob[1] + "/" + blob[2] + "/" + blob[3] + "/" + blob[4];
+  var m = raw.match(/^(?:https?:\/\/)?(?:www\.)?(?:github\.com|raw\.githubusercontent\.com)\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?(?:\/.*)?$/)
+       || raw.match(/^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+?)(?:\.git)?$/);
+  if (!m) throw new Error("enter owner/repo, a github.com URL, or a direct pluginInfo.json URL");
+  var owner = m[1], repo = m[2];
+  setMsg("Looking up repo…");
+  var repoRes = await fetch("https://api.github.com/repos/" + owner + "/" + repo);
+  if (!repoRes.ok) throw new Error("repo lookup failed (HTTP " + repoRes.status + ") - is it public?");
+  var branch = (await repoRes.json()).default_branch || "main";
+  return "https://raw.githubusercontent.com/" + owner + "/" + repo + "/refs/heads/" + branch + "/pluginInfo.json";
+}
+
+async function previewFromUrl(raw) {
+  $("go").disabled = true;
+  try {
+    var url = await resolveUrl(raw);
+    setMsg("Reading pluginInfo.json…");
+    var res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error("couldn't fetch " + url + " (HTTP " + res.status + ")");
+    var text = await res.text();
+    var data;
+    try { data = JSON.parse(text); } catch (e) { throw new Error("pluginInfo.json is not valid JSON: " + e.message); }
+    render(data, url);
+    setMsg("", "ok");
+    try { history.replaceState(null, "", "?repo=" + encodeURIComponent(raw.trim())); } catch (e) {}
+  } catch (e) {
+    setMsg(e.message, "err");
+  } finally {
+    $("go").disabled = false;
+  }
+}
+
+$("form").addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  var raw = $("repo").value;
+  if (!raw.trim()) return setMsg("Enter your plugin's GitHub repo.", "err");
+  previewFromUrl(raw);
+});
+$("goJson").addEventListener("click", function () {
+  try {
+    var data = JSON.parse($("json").value);
+    render(data, null);
+    setMsg("");
+  } catch (e) {
+    setMsg("Not valid JSON: " + e.message, "err");
+  }
+});
+
+// ?repo=owner/repo deep link (for the submit page and bot comments).
+var q = new URLSearchParams(location.search).get("repo");
+if (q) { $("repo").value = q; previewFromUrl(q); }
+})();
+</script>
+</body>
+</html>

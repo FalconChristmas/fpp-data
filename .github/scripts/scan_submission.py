@@ -91,19 +91,25 @@ def already_listed(repo_name: str, plugin_list_path: str) -> bool:
 CLONE_TIMEOUT = 60  # seconds
 
 
-def clone_repo(owner: str, repo: str, dest: str) -> str | None:
-    """Shallow-clone into dest. Returns an error string, or None on success."""
+def clone_repo(owner: str, repo: str, dest: str, branch: str | None = None) -> str | None:
+    """Shallow-clone into dest. Returns an error string, or None on success.
+
+    `branch` is the one pluginInfo.json's versions[] names (lib.branch_for_major);
+    if it can't be cloned (typo'd/deleted branch - branch_findings() reports that
+    separately) fall back to the repo's default branch so the scan still runs."""
     url = f"https://github.com/{owner}/{repo}.git"
-    try:
-        proc = subprocess.run(
-            ["git", "clone", "--depth", "1", "--quiet", url, dest],
-            capture_output=True, text=True, timeout=CLONE_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return f"git clone of {owner}/{repo} timed out after {CLONE_TIMEOUT}s"
-    if proc.returncode != 0:
-        return f"git clone of {owner}/{repo} failed: {proc.stderr.strip()[:300]}"
-    return None
+    attempts = [["--branch", branch], []] if branch else [[]]
+    for extra in attempts:
+        try:
+            proc = subprocess.run(
+                ["git", "clone", "--depth", "1", "--quiet", *extra, url, dest],
+                capture_output=True, text=True, timeout=CLONE_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            return f"git clone of {owner}/{repo} timed out after {CLONE_TIMEOUT}s"
+        if proc.returncode == 0:
+            return None
+    return f"git clone of {owner}/{repo} failed: {proc.stderr.strip()[:300]}"
 
 
 def main():
