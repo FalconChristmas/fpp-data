@@ -481,6 +481,172 @@ def _is_comment_line(line: str) -> bool:
             or stripped.startswith("<!--") or stripped in ("*", "*/"))
 
 
+def _busy_wait_poll_hits(root: str):
+    """Yield (relpath, lineno, line) for an UNBOUNDED loop (`while(true)`/
+    `while(1)`/`for(;;)`, not any `while`) with a `sleep()` call in its next
+    10 lines, in a .php file that has no evidence of being CLI-only: no
+    php_sapi_name()/PHP_SAPI guard, no shebang, and not launched backgrounded
+    (nohup/setsid/trailing `&`) from any .sh script in the repo.
+
+    All three are real, common ways an FPP plugin's own author already rules
+    out web reachability - checking none of them false-positived on every
+    single real-world hit this rule had (remote-falcon, showpilot-plugin,
+    fpp-sms-control-too, fpp-SETIQ all guard or launch a `*_listener.php`/
+    `*-bg.php` daemon exactly this way; FPP-Plugin-Matrix-Message's loop was
+    also bounded (`while ($isLocked && $maxWait-- > 0)`), not unbounded, a
+    separate reason it wasn't a poll worth flagging at all - busy-wait-poll
+    false-positive audit, 2026-09). A 0% true-positive rate on the full
+    tracked-plugin corpus at the time this was tightened."""
+    # Anything that can launch the daemon detached: a .sh (nohup/setsid/`&`),
+    # a systemd unit's ExecStart=, PHP exec()/shell_exec()/popen() with a
+    # trailing `&`, Python subprocess.Popen(). Their text is pooled and the
+    # candidate .php file's basename looked for in it.
+    launch_line_rx = re.compile(r'\b(?:nohup|setsid|Popen|ExecStart|systemd-run)\b|@reboot\b|&\s*(?:["\']\s*[,)]|$)')
+    launcher_text = "\n".join(
+        l for p in _iter_files(root, (".sh", ".service", ".php", ".py"))
+        if not any(v in ("/" + os.path.relpath(p, root).lower()) for v in _VENDOR_DIRS)
+        for l in _read(p).splitlines() if launch_line_rx.search(l))
+    unbounded_rx = re.compile(r'\bwhile\s*\(\s*(?:true|1)\s*\)|\bfor\s*\(\s*;\s*;\s*\)', re.I)
+    for path in _iter_files(root, (".php",)):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        src = _read(path)
+        if src.startswith("#!"):
+            continue
+        if re.search(r'\b(?:php_sapi_name\s*\(\s*\)|PHP_SAPI)\s*(?:[!=]==?)\s*[\'"]cli[\'"]', src):
+            continue
+        fname = re.escape(os.path.basename(rel))
+        if re.search(r'(?:\b(?:nohup|setsid)\b[^\n]*\b' + fname + r'\b'
+                     r'|\b' + fname + r'\b[^\n]*&\s*(?:["\']\s*[,)]|$)'      # `... &` in shell, or `... &"` in exec()
+                     r'|^\s*ExecStart\s*=[^\n]*\b' + fname + r'\b'
+                     r'|(?:\bsystemd-run\b|@reboot\b)[^\n]*\b' + fname + r'\b'
+                     r'|\bPopen\s*\([^\n]*\b' + fname + r'\b)', launcher_text, re.M):
+            continue
+        lines = src.splitlines()
+        for i, line in enumerate(lines):
+            if _is_comment_line(line) or not unbounded_rx.search(line):
+                continue
+            window = "\n".join(lines[i:i + 10])
+            if re.search(r'\bsleep\s*\(', window):
+                yield rel, i + 1, line.strip()
+                break
+
+
+def _blocking_sleep_in_hook_hits(root: str):
+    """Yield (relpath, lineno, line) for a flat, unconditional `sleep N` in
+    one of FPP's four start/stop lifecycle hooks (preStart/postStart/
+    preStop/postStop - any extension; fpp_install.sh/fpp_uninstall.sh run
+    once at install/uninstall time, not on every fppd start/stop, so callers
+    already exclude those by name).
+
+    Two shapes are NOT actually blocking despite matching a naive sleep-in-
+    hook grep, and both are exactly what this finding's own remediation text
+    tells an author to do instead of a flat sleep - flagging them told an
+    author their correct fix was itself the defect (a 0% true-positive rate
+    on the full tracked-plugin corpus before this was tightened -
+    blocking-sleep-in-hook false-positive audit, 2026-09):
+      - the sleep is inside a shell function only ever invoked, elsewhere in
+        the same file, from within a backgrounded call (`nohup`/`setsid`, or
+        a bare trailing `&`) - the hook itself returns immediately
+        (fpp-plugin-AdvancedStats: `wait_for_broker` is only ever called
+        inside `( ... ) ... &`);
+      - the sleep sits in a short poll/retry loop that re-checks a real
+        liveness condition (`kill -0`, `pgrep`, `nc -z`) or is visibly
+        bounded (a numeric `for` loop, or a counter comparison like
+        `ticks < max`/`$i -lt 3`) rather than being a flat delay
+        (remote-falcon: `for i in 1 2 3; do kill -0 "$OLDPID" || break;
+        sleep 1; done`; showpilot-plugin: `while kill -0 ... && ticks <
+        max`)."""
+    # A sleep is "bounded" only when it sits in a LOOP (window has a
+    # while/until/for) that also re-checks liveness or a counter - a bare
+    # `pgrep ... | xargs kill` followed by `sleep 5` is still a flat delay.
+    loop_rx = re.compile(r'\b(?:while|until|for)\b')
+    bounded_rx = re.compile(
+        r'\bkill\s+-0\b|\bpgrep\b|\bpidof\b|\bnc\s+-z\b|\bcurl\s+-s\S*\s+.*-o\s*/dev/null'
+        r'|\bfor\s+\w+\s+in\s+(?:[\d\s]+;|\{\d+\.\.\d+\}|\$\(\s*seq\b)'
+        r'|\buntil\s+(?:!\s*)?\[\[?\s+(?:!\s+)?-[a-zA-Z]\s|\bwhile\s+(?:!\s*\[\[?\s+|\[\[?\s+!\s+)-[a-zA-Z]\s'   # until [ -S sock ] / while [ ! -e f ]
+        r'|\buntil\s+(?:curl|wget|nc|test|\[|systemctl\s+is-active|pgrep|pidof)\b'                   # until <probe>; do sleep
+        r'|\b\w+\s*(?:-lt|-le|-gt|-ge)\s*\$?\{?\w+\}?'
+        r'|\(\([^)]*[<>][^)]*\)\)|\[\[[^\]]*\s[<>]\s[^\]]*\]\]'   # (( i < n )) / [[ $i < $n ]], not `> file`
+        r'|(?:\|\||&&)\s*break\b')
+
+    def _hits_in(p, rel, note):
+        src = _read(p)
+        lines = src.splitlines()
+
+        # (start_line, end_line) for each shell function whose body only ever
+        # runs backgrounded elsewhere in this same file.
+        backgrounded_ranges = []
+        for name, _b0, _b1, start_line, end_line in _shell_functions(src):
+            call_rx = re.compile(r'\b' + re.escape(name) + r'\b')
+            for k, line in enumerate(lines):
+                if start_line <= k <= end_line:
+                    continue  # the definition/body itself, not a call site
+                code = line.split('#', 1)[0]
+                if not call_rx.search(code):
+                    continue
+                # Backgrounded either on the call's own line (nohup/setsid,
+                # or a bare trailing &), or the call sits inside a `( ...`
+                # subshell that closes with `) ... &` a few lines below -
+                # `wait_for_broker` called on its own line, the subshell's
+                # `) >> "$LOG_FILE" 2>&1 &` several lines later, is the real
+                # shape (fpp-plugin-AdvancedStats), not a one-liner.
+                same_line = (re.search(r'\b(?:nohup|setsid)\b', code)
+                             or code.rstrip().endswith('&'))
+                closes_backgrounded = any(
+                    re.match(r'^\s*\)', l.split('#', 1)[0]) and l.split('#', 1)[0].rstrip().endswith('&')
+                    for l in lines[k + 1:k + 15])
+                if same_line or closes_backgrounded:
+                    backgrounded_ranges.append((start_line, end_line))
+                    break
+
+        # Line ranges of `( ... ) &` subshells - a sleep inside runs detached.
+        bg_subshell = []
+        for k, line in enumerate(lines):
+            if re.match(r'^\s*\(\s*$', line.split('#', 1)[0]):
+                for e in range(k + 1, min(len(lines), k + 40)):
+                    c = lines[e].split('#', 1)[0]
+                    if re.match(r'^\s*\)', c):
+                        if c.rstrip().endswith('&'):
+                            bg_subshell.append((k, e))
+                        break
+        for i, line in enumerate(lines):
+            code = line.split('#', 1)[0]
+            if _is_comment_line(line) or not re.search(r'\bsleep\s+[0-9.]+', code):
+                continue
+            if code.rstrip().endswith('&') or re.search(r'\b(?:nohup|setsid)\b', code):
+                continue  # `sleep 5 &` / `(sleep 5; start) &` - not blocking
+            if any(s <= i <= e for s, e in bg_subshell):
+                continue
+            if any(s <= i <= e for s, e in backgrounded_ranges):
+                continue
+            window = "\n".join(l.split('#', 1)[0] for l in lines[max(0, i - 6):i + 1])
+            if loop_rx.search(window) and bounded_rx.search(window):
+                continue
+            yield rel, i + 1, line.strip(), note
+
+    # fppd runs exactly plugins/<name>/scripts/{preStart,postStart,preStop,
+    # postStop}.sh (scripts/functions runPreStartScripts etc.) - a file with a
+    # hook-like name anywhere else (backup/preStart.sh.orig, a monorepo
+    # subproject's copy) never executes on its own.
+    for hook in ("preStart", "postStart", "preStop", "postStop"):
+        rel = f"scripts/{hook}.sh"
+        p = os.path.join(root, rel)
+        if not os.path.isfile(p):
+            continue
+        # A hook that just `exec`s into the real script elsewhere in the repo
+        # hands the whole process over, so a blocking sleep in THAT script
+        # blocks fppd exactly the same way. Checked in addition to the
+        # wrapper, not instead of it.
+        scan = [(p, rel, "")]
+        t = _exec_delegation_target(p, root)
+        if t and t != rel:
+            scan.append((os.path.join(root, t), t, f" (the real script {rel} `exec`s into)"))
+        for sp, srel, note in scan:
+            yield from _hits_in(sp, srel, note)
+
+
 def _unescaped_html_attr_hits(root: str, exts=(".php",)):
     """Yield (relpath, lineno, line) where an `echo`/short-echo statement writes a known
     HTML attribute (value/action/href/src/placeholder) built by concatenating a PHP
@@ -788,21 +954,176 @@ def _config_dir_hits(root: str, exts=_CFG_SCAN_EXTS):
                 continue
             yield rel, i, line.strip(), fname, kind
 
+# limonade lifecycle hooks - www/api/controllers/plugin.php PluginApiReservedFunctions().
+_LIMONADE_RESERVED_NAMES = frozenset({
+    "configure", "initialize", "before", "autorender", "before_exit",
+    "before_sending_header", "after", "route_missing", "autoload_controller",
+    "not_found", "server_error",
+})
+_FPP_API_GLOBALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fpp_api_globals.txt")
+_fpp_api_globals_cache: frozenset[str] | None = None
+
+
+def _fpp_api_globals() -> frozenset[str]:
+    """Lower-cased names of every global PHP function FPP core defines on an
+    /api/* request (fpp_api_globals.txt, generated from the FPP tree - the
+    header says how). Empty if the file is missing, so the check degrades to
+    the curated generic list rather than failing."""
+    global _fpp_api_globals_cache
+    if _fpp_api_globals_cache is None:
+        names = set()
+        for l in _read(_FPP_API_GLOBALS_FILE).splitlines():
+            l = l.strip()
+            if l and not l.startswith("#"):
+                names.add(l.lower())
+        _fpp_api_globals_cache = frozenset(names)
+    return _fpp_api_globals_cache
+
+
+# PHP built-in functions a plugin author might plausibly try to declare -
+# "Cannot redeclare" at compile time, whatever FPP version.
+_PHP_BUILTIN_NAMES = frozenset({
+    "log", "reset", "exec", "system", "header", "settype", "gettype", "count", "sort",
+    "filter", "time", "date", "mail", "link", "unlink", "copy", "rename", "stat", "each",
+    "end", "next", "current", "key", "list", "array", "min", "max", "abs", "round",
+    "trim", "split", "join", "implode", "explode", "print", "echo", "empty", "isset",
+    "unset", "die", "exit", "sleep", "usleep", "file", "dir", "glob", "chdir", "mkdir",
+    "rmdir", "touch", "chmod", "chown", "readfile", "fopen", "fclose", "fread", "fwrite",
+    "serialize", "unserialize", "compact", "extract", "assert", "checkdate", "levenshtein",
+})
+
+# Short generic names that two plugins' api.php files could plausibly both pick.
+_GENERIC_API_NAMES = frozenset({
+    "status", "getstatus", "save", "update", "delete", "remove", "get", "set",
+    "init", "config", "log", "notify", "send", "check", "test", "reset",
+    "start", "stop", "run", "execute", "process", "handle", "callback",
+    "response", "request", "error", "success", "validate", "verify",
+})
+
+
+# Everything that can hide a brace in PHP source, as ONE alternation so the
+# leftmost match wins: a `//` inside a string ("http://...") must be string,
+# not comment, and a `"` inside a `//` comment must be comment, not string -
+# stripping them in two passes (comments first) turned every URL literal
+# inside a function into an unterminated string that swallowed braces up to
+# the next quote anywhere in the file. Strings can't span lines here (a PHP
+# string can, but a multi-line string in an api.php is a heredoc's job, and
+# a bounded miss beats an unbounded one). Heredoc/nowdoc bodies are blanked
+# whole. Every replacement keeps its newlines so stripped line numbers still
+# index the original.
+_PHP_OPAQUE_RX = re.compile(
+    r'<<<\s*(["\']?)([A-Za-z_]\w*)\1\s*\n.*?\n\s*\2\b'   # heredoc / nowdoc
+    r'|/\*.*?\*/'                                             # block comment
+    r'|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''             # single-line strings
+    r'|(?://|#)[^\n]*',                                        # line comment
+    re.S)
+
+
+def _php_strip_opaque(src: str) -> str:
+    """`src` with strings, comments and heredocs replaced by a same-line-count
+    blank (strings become `""` so `$a = "x";` still reads as a statement)."""
+    def _blank(m):
+        t = m.group(0)
+        if t[0] in "\"'":
+            return '""'
+        return "\n" * t.count("\n")
+    return _PHP_OPAQUE_RX.sub(_blank, src)
+
+
+_SHELL_FN_DEF_RX = re.compile(
+    r'(?m)^\s*(?:function\s+(\w+)\s*(?:\(\s*\))?|(\w+)\s*\(\s*\))\s*\{')
+
+
+def _shell_functions(src: str) -> list[tuple[str, int, int, int, int]]:
+    """Every `name() {`, `function name {` and `function name() {` in a shell
+    script as (name, body_start, body_end, start_line, end_line): character
+    offsets of the body (just inside the braces) and 0-based line numbers of
+    the definition's first and last line. Brace matching is naive (a `}` in a
+    string counts) - good enough for the install/hook scripts this is used on."""
+    out = []
+    for m in _SHELL_FN_DEF_RX.finditer(src):
+        name = m.group(1) or m.group(2)
+        depth, j = 1, m.end()
+        while j < len(src) and depth > 0:
+            if src[j] == '{':
+                depth += 1
+            elif src[j] == '}':
+                depth -= 1
+            j += 1
+        out.append((name, m.end(), j - 1, src.count('\n', 0, m.start()), src.count('\n', 0, j)))
+    return out
+
+
+def _api_php_top_level_hits(path: str):
+    """Yield (lineno, line) for a statement at brace depth 0 in a PHP file that
+    does something (echo/header/exec/switch/assigns FROM a superglobal, ...)
+    rather than just declaring functions/classes or pulling in FPP's helpers.
+    Strings, comments and heredocs are blanked first (see _php_strip_opaque)
+    so braces inside them don't skew the depth count."""
+    side = re.compile(
+        r'^\s*(echo\b|print\b|header\s*\(|http_response_code\s*\(|exec\s*\(|shell_exec\s*\(|'
+        r'passthru\s*\(|system\s*\(|proc_open\s*\(|switch\s*\(|foreach\s*\(|while\s*\(|'
+        r'die\b|exit\b|readfile\s*\(|file_put_contents\s*\(|'
+        r'\$\w+\s*=\s*\$_(GET|POST|REQUEST)\b)')
+    original = _read(path).splitlines()
+    src = _php_strip_opaque("\n".join(original))
+    depth = 0
+    for i, line in enumerate(src.splitlines(), 1):
+        if depth == 0 and side.match(line):
+            yield i, original[i - 1].strip()
+        depth += line.count('{') - line.count('}')
+
+
 def _log_naming_hits(root: str, exts=SCRIPT_EXT):
     """Yield (relpath, lineno, line) for a log filename built from logDirectory/LOGDIR
     that doesn't include the mandated "plugin-" prefix - e.g. `$pluginName.".log"` instead
-    of `"plugin-".$pluginName.".log"`."""
+    of `"plugin-".$pluginName.".log"`.
+
+    One hop of aliasing is followed within a file: a variable assigned from
+    LOGDIR/logDirectory (`LOG_DIR="${LOGDIR:-/home/fpp/media/logs}"`,
+    `$logDir = $settings['logDirectory']`, `logdir = os.environ.get('LOGDIR', ...)`)
+    is treated as the log directory on later lines, so a `.log` filename built from
+    that alias is checked too. Confirmed miss before this (fpp-plugin-SDCardRecover,
+    2026-09): `LOG_DIR="${LOGDIR:-...}"` on one line and
+    `LOG_FILE="$LOG_DIR/SDCardRecover.log"` on the next was invisible to the
+    same-line-only regex, and the mis-named log never gets rotated by FPP."""
     rx = re.compile(r'(logDirectory|LOGDIR)\b.*\.log\b', re.I)
+    alias_rx = re.compile(r'^\s*(?:local\s+|export\s+|var\s+|let\s+|const\s+)?\$?(\w+)\s*=\s*[^=].*?\b(logDirectory|LOGDIR)\b', re.I)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
         if _skippable(rel):
             continue
+        aliases = set()
         for i, line in enumerate(_read(path).splitlines(), 1):
             if _is_comment_line(line):
                 continue
+            if re.search(r'\b(?:fppd|fpp|fppinit|apache2(?:-\w+)?)\.log\b', line, re.I):
+                continue  # reading/tailing FPP's own log isn't naming one
             if rx.search(line) and "plugin-" not in line.lower():
                 yield rel, i, line.strip()
                 break
+            m = alias_rx.match(line)
+            if m and m.group(1).lower() not in ('logdir', 'logdirectory'):
+                aliases.add(m.group(1))
+                continue
+            if aliases and '.log' in line.lower() and 'plugin-' not in line.lower():
+                # `$ALIAS`/`${ALIAS}` (shell, PHP) or bare word `ALIAS` (Python, JS)
+                # used in an expression that NAMES a log file - an assignment,
+                # a redirect/tee target, or an open-for-write - not one that
+                # reads, tails or rotates logs. Reading FPP's own fppd.log via
+                # the alias isn't naming a log either.
+                if re.search(r'\b(?:fppd|fpp|fppinit|apache2(?:-\w+)?)\.log\b', line, re.I):
+                    continue
+                names_log = re.search(
+                    r'^\s*(?:local\s+|export\s+|var\s+|let\s+|const\s+|readonly\s+)?\$?\w+\s*=[^=]'
+                    r'|(?<![-=<&0-9\w])>>?\s*["\']?\$?\{?\w|\btee\b|\bfopen\s*\(|file_put_contents\s*\('
+                    r'|\bopen\s*\([^)]*["\'][aw]|FileHandler\s*\(|logging\.basicConfig\s*\(|createWriteStream\s*\(',
+                    line)
+                if names_log and any(
+                        re.search(r'\$\{?' + re.escape(a) + r'\b|(?<![\w$])' + re.escape(a) + r'\b', line)
+                        for a in aliases) and re.search(r'\.log\b', line, re.I):
+                    yield rel, i, line.strip()
+                    break
 
 
 def _missing_timeout_hits(root: str, exts=(".php", ".py", ".sh")):
@@ -1603,7 +1924,11 @@ def _priv_host_hits(root: str, own_owner: str | None, csp_adds: dict[str, set[st
         if host not in out or rank[where] > rank[out[host][3]]:
             out[host] = (rel, i, line.strip(), where, directive)
 
+    prev: list[str] = []   # the last few lines of the current file, for split tags
+    prev_rel = None
     for rel, i, line in _priv_lines(root):
+        if rel != prev_rel:
+            prev, prev_rel = [], rel
         where_file = "install" if _PRIV_INSTALL_HOOK_RX.search(rel) else "runtime"
         # Only a file the player's web server can serve to a browser makes a
         # browser-side load; `src=https://...` in a shell or Python file is a
@@ -1614,9 +1939,24 @@ def _priv_host_hits(root: str, own_owner: str | None, csp_adds: dict[str, set[st
             for host in csp:
                 if not _priv_host_exempt(host, "browser"):
                     add(host, rel, i, line, "browser")
+            prev.append(line)
+            del prev[:-6]
             continue
         for m in _PRIV_URL_RX.finditer(line):
             pre = line[:m.start()]
+            # A tag written over several lines (`<img\n    src="https://...">`)
+            # leaves this line with the attribute but no tag, so the directive
+            # would fall through to connect-src. Pull the tag opener in from the
+            # preceding lines when the attribute is one, and keep it only when it
+            # really is still open.
+            if not _PRIV_TAG_RX.search(pre) and (_PRIV_SRC_ATTR_RX.search(pre) or _PRIV_HREF_ATTR_RX.search(pre)):
+                joined = pre
+                for back in reversed(prev[-6:]):
+                    joined = back.strip() + " " + joined
+                    if "<" in back:
+                        break
+                if _PRIV_TAG_RX.search(joined):
+                    pre = joined
             ctx = _priv_url_context(pre)
             if ctx == "link":
                 continue
@@ -1637,6 +1977,8 @@ def _priv_host_hits(root: str, own_owner: str | None, csp_adds: dict[str, set[st
                 if not own_server and not _priv_csp_allows(csp_adds, directive, host):
                     where = "blocked"
             add(host, rel, i, line, where, directive)
+        prev.append(line)
+        del prev[:-6]
     return out
 
 
@@ -1887,9 +2229,14 @@ _PRIV_UNIT_FILE_RX = re.compile(
 
 
 def _priv_service_hits(root: str) -> dict[str, tuple[str, int, str]]:
-    """unit name -> hit for `systemctl enable/start <unit>` and for a unit/cron file
-    being installed under /etc/systemd or /etc/cron.d."""
-    out: dict[str, tuple[str, int, str]] = {}
+    """unit name -> FIRST hit for `systemctl enable/start <unit>` and for a
+    unit/cron file being installed under /etc/systemd or /etc/cron.d. See
+    _priv_service_hits_all for every hit."""
+    return {u: hits[0] for u, hits in _priv_service_hits_all(root).items()}
+
+
+def _priv_service_hits_all(root: str) -> dict[str, list[tuple[str, int, str]]]:
+    out: dict[str, list[tuple[str, int, str]]] = {}
     skip_rx = re.compile(r'\brm\s|\bunlink\b|systemctl\s+(?:disable|stop)\b')
     for rel, i, line in _priv_lines(root, (".sh", ".py", ".php")):
         # an uninstall script only ever removes (`crontab -l | grep -v x | crontab -`)
@@ -1901,12 +2248,12 @@ def _priv_service_hits(root: str) -> dict[str, tuple[str, int, str]]:
         if m:
             unit = m.group(1).lower().removesuffix(".service")
             if unit not in ("fppd", "fpp", "fppinit", "fpp_postinstall", "apache2", "nginx", "--now"):
-                out.setdefault(unit, (rel, i, line.strip()))
+                out.setdefault(unit, []).append((rel, i, line.strip()))
             continue
         m = _PRIV_UNIT_FILE_RX.search(line)
         if m and not _priv_in_prose(rel, line, m.start()) and (m.group(3) or re.search(r'\bcp\b|\binstall\b|\bln\s|\btee\b|>\s*["\']?/etc|file_put_contents|\bcat\b.*>', line)):
             unit = (m.group(1) or m.group(2) or "crontab").lower().removesuffix(".service")
-            out.setdefault(unit, (rel, i, line.strip()))
+            out.setdefault(unit, []).append((rel, i, line.strip()))
     return out
 
 
@@ -1922,6 +2269,71 @@ _PRIV_CORE_CFG_FILE_RX = re.compile(
 _PRIV_ETC_WRITE_RX = re.compile(
     r'''(?:\bsed\s+(?:-\S+\s+)*-i|(?<![-=<&0-9\w])>>?\s*|\btee\s+(?:-a\s+)?|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*(?!-)\S+\s+|file_put_contents\s*\(\s*|\bopen\s*\(\s*)['"]?(/etc/(?!systemd/|cron|apt/|sudoers|udev/|modules)[^'"\s;&|)<]+)''')
 _PRIV_SETTINGS_FILE_WRITE_RX = re.compile(r'''(\bsed\s+(?:-\S+\s+)*-i\b[^#\n]*|>>?\s*['"]?[^'"\s]*|\btee\s+(?:-a\s+)?['"]?[^'"\s]*)media/settings\b''')
+# Same write-sink-destination shape as _PRIV_ETC_WRITE_RX, aimed at FPP's other
+# shared media subdirectories instead of /etc - a file a plugin drops into
+# media/scripts (shows up in FPP's own Scripts UI, still schedulable after the
+# plugin is gone) or media/images/videos/etc (an orphaned asset) survives
+# uninstall exactly like a stray /etc file does, for the same reason: neither
+# lives inside the plugin's own directory, which is all FPP's uninstall
+# actually deletes. plugins/, plugindata/<repo>/, config/ and logs/ are a
+# plugin's own territory (not in this alternation at all, so never match) -
+# this is specifically the OTHER shared subdirectories. Confirmed real via
+# fpp-PictureFrame (cp .../CheckForNewPictureFrameImages.sh media/scripts/),
+# both shipping no fpp_uninstall.sh at all.
+_PRIV_MEDIA_WRITE_RX = re.compile(
+    r'''(?:\bsed\s+(?:-\S+\s+)*-i|(?<![-=<&0-9\w])>>?\s*|\btee\s+(?:-a\s+)?|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*(?!-)\S+\s+|file_put_contents\s*\(\s*|\bopen\s*\(\s*)'''
+    r'''['"]?(/home/fpp/media/(?:scripts|images|videos|sequences|music|effects|upload|playlists)/[^'"\s;&|)<]*)''')
+# One hop of variable aliasing, same pattern as _log_naming_hits: a variable
+# assigned a literal path under one of these subdirectories on an earlier
+# line is treated as that path on a later write-sink line too. Confirmed
+# real miss without this: fpp-jukebox assigns
+# `PLACEHOLDERIMAGE=/home/fpp/media/images/placeholder.jpg` on one line,
+# then `cp ... "${PLACEHOLDERIMAGE}"` on another - invisible to the same-
+# line-only regex above.
+_PRIV_MEDIA_DEST_ALIAS_RX = re.compile(
+    r'''^\s*(?:local\s+|export\s+|readonly\s+)?\$?(\w+)\s*=\s*["']?'''
+    r'''(/home/fpp/media/(?:scripts|images|videos|sequences|music|effects|upload|playlists)(?:/[^\s"']*)?)["']?\s*$''')
+
+
+def _priv_media_alias_sink_rx(name: str) -> "re.Pattern[str]":
+    """A write sink whose DESTINATION is `$name` / `${name}` / PHP `$name` -
+    the same argument-position rule _PRIV_MEDIA_WRITE_RX applies to a literal
+    path, so `cp "$PLACEHOLDER" ./assets/` (a read of the aliased path) doesn't
+    count. Quoted or not, braces or not."""
+    var = r'''["']?\$\{?''' + re.escape(name) + r'''\b'''
+    return re.compile(
+        r'\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*(?!-)\S+\s+' + var
+        + r'|(?<![-=<&0-9\w])>>?\s*' + var
+        + r'|\btee\s+(?:-a\s+)?' + var
+        + r'|\bsed\s+(?:-\S+\s+)*-i\b[^#\n]*\s' + var
+        + r'|(?:file_put_contents|open)\s*\(\s*' + var)
+
+
+def _priv_media_write_hits(root: str, exts=_CFG_SCAN_EXTS):
+    """Yield (relpath, lineno, line, path) for a write-sink destination that
+    lands in one of FPP's other shared media subdirectories, following one
+    hop of variable aliasing within the same file (see _PRIV_MEDIA_DEST_ALIAS_RX)."""
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        aliases: dict[str, tuple[str, "re.Pattern[str]"]] = {}
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = _PRIV_MEDIA_WRITE_RX.search(line)
+            if m and not _priv_in_prose(rel, line, m.start(1)):
+                yield rel, i, line.strip(), m.group(1)
+                continue
+            am = _PRIV_MEDIA_DEST_ALIAS_RX.match(line)
+            if am:
+                aliases[am.group(1)] = (am.group(2), _priv_media_alias_sink_rx(am.group(1)))
+                continue
+            for name, (target, sink_rx) in aliases.items():
+                sm = sink_rx.search(line)
+                if sm and not _priv_in_prose(rel, line, sm.start()):
+                    yield rel, i, line.strip(), target
+                    break
 
 
 def _priv_core_write_hits(root: str):
@@ -2179,7 +2591,11 @@ def _privacy_findings(root: str, info: dict | None, own_owner: str | None) -> li
     blocked = sorted((h, v) for h, v in hosts.items() if v[3] == "blocked")
     if blocked:
         h, v = blocked[0]
-        more = f" (+{len(blocked) - 1} more: {', '.join(x for x, _ in blocked[1:6])})" if len(blocked) > 1 else ""
+        # Name where each extra host is loaded from, not just the host: with the
+        # first hit sitting in an unused mockup file (fpp-jukebox locked.html,
+        # 2026-09) a bare host list hid that the others were on a live page.
+        more = (f" (+{len(blocked) - 1} more: {', '.join(f'{x} at {w[0]}:{w[1]}' for x, w in blocked[1:6])})"
+                if len(blocked) > 1 else "")
         declared_note = (" privacy.sends already names it - that entry describes traffic that does not happen."
                          if _priv_host_declared(h, declared_to) else "")
         # ManageApacheContentPolicy.sh knows seven keys; a directive it does not
@@ -2331,6 +2747,245 @@ def _privacy_findings(root: str, info: dict | None, own_owner: str | None) -> li
                        f"  - Confirm {'; '.join(asks)}{more}; if any of it has no public source, set `closedCode` to true"))
 
     return out
+
+
+# `set -e` placement (no-set-e). Only comments, blank lines, other `set`/`shopt`
+# calls, plain variable assignments (`FOO=bar`, `export FOO=bar`, `: "${FOO:=x}"`)
+# and `trap` are allowed to precede it - none of those is a step that can fail
+# and leave the install half-done. Everything else counts as an unguarded command.
+# `set -e`, `set -euo pipefail`, `set -o errexit`, `set -o pipefail -e`,
+# `set -o nounset -o errexit` - any mix of short and -o options with errexit
+# somewhere in it.
+_SET_E_RX = re.compile(r'^\s*set\s+(?:-o\s+\w+\s+|-[a-zA-Z]+\s+)*(?:-[a-zA-Z]*e[a-zA-Z]*\b|-o\s+errexit\b)')
+# A value that can follow FOO= and still be "just an assignment" (no command
+# run): a quoted string, a $(...)/`...` substitution, or a bare word - anything
+# that leaves the line with nothing else on it. `DEBIAN_FRONTEND=x apt-get ...`
+# (an env prefix on a real command) is NOT this: it has a command after it.
+_SET_E_ASSIGN_VALUE = (r'(?:"(?:[^"\\]|\\.)*"|\'[^\']*\'|\$\([^\n]*\)|`[^`\n]*`'
+                       r'|\([^)\n]*\)|[^\s"\'`()]|\\\s)*')
+_SET_E_PREAMBLE_RX = re.compile(
+    r'^\s*(?:'
+    r'(?:set|shopt|trap|umask|cd)\b'                          # other shell options / traps / cwd
+    r'|(?:export\s+|declare\s+[-\w ]*|typeset\s+[-\w ]*|readonly\s+|local\s+)?[A-Za-z_]\w*=' + _SET_E_ASSIGN_VALUE + r'\s*(?:#.*)?$'
+    r'|(?:export|readonly)\s+[A-Za-z_]\w*\s*$'                # export FOO (already assigned)
+    r'|:\s'                                                   # : "${FOO:=default}"
+    r'|(?:if|elif|while|until|for|case|select)\b'             # a condition is exempt from errexit by definition
+    r'|[\w|*"\'$\[\]{},.-]+\)\s*(?:;;)?\s*$'                    # a `case` arm label with no command on it
+    r'|(?:source|\.)\s+\S*(?:/opt/fpp/scripts/common|/common\b)' # FPP's own helpers - a fixed, known step
+    r')')
+_SET_E_SYNTAX = frozenset(('then', 'else', 'fi', 'do', 'done', 'esac', '{', '}', ';;', 'in'))
+
+
+def _set_e_position(body: str) -> tuple[int, list[tuple[int, str]]] | None:
+    """None when the script never enables errexit (`set -e`, `set -euo pipefail`,
+    `set -o errexit`, or `-e` on the shebang). Otherwise (lineno, unguarded) where
+    lineno is the line `set -e` sits on (0 for the shebang) and `unguarded` lists
+    the (lineno, text) of every top-level command that runs before it without its
+    own `|| true` / `|| exit` guard. Heredoc bodies and function bodies are not
+    commands that run at that point, so they are skipped. An empty list means
+    `set -e` is positioned correctly."""
+    lines = body.splitlines()
+    if lines and lines[0].startswith("#!") and re.search(r'\s-[a-zA-Z]*e', lines[0]):
+        return (0, [])
+    unguarded: list[tuple[int, str]] = []
+    heredoc = None      # (terminator, strip_tabs) while inside a heredoc body
+    depth = 0           # brace depth: >0 means inside a function body
+    cont_from = None    # first physical line of a `\`-continued logical line
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if heredoc is not None:
+            # `<<EOF` needs the terminator flush-left; only `<<-EOF` strips
+            # leading tabs, so an indented `EOF` inside a plain heredoc is body.
+            if (line.lstrip("\t") if heredoc[1] else line).rstrip("\n") == heredoc[0]:
+                heredoc = None
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        # A `\`-continued command is one command: judge it by its first line,
+        # guard it by its last (`apt-get install -y \` / `  foo || true`).
+        if cont_from is None and stripped.endswith("\\"):
+            cont_from = (i, stripped)
+            continue
+        if cont_from is not None:
+            if stripped.endswith("\\"):
+                continue
+            i, stripped = cont_from[0], cont_from[1].rstrip("\\").rstrip() + " ... " + stripped
+            cont_from = None
+        if depth == 0 and _SET_E_RX.match(line):
+            return (i, unguarded)
+        # `<<<` is a here-string and `1 << 3` is a shift - neither opens a
+        # heredoc (treating them as one swallowed the rest of the file and
+        # reported "has no set -e" on a script that plainly had one).
+        m = re.search(r'(?<!<)<<(?!<)(-?)\s*[\'"]?([A-Za-z_]\w*)[\'"]?',
+                      re.sub(r'\$\(\(.*?\)\)', '', line.split('#', 1)[0]))
+        if m:
+            heredoc = (m.group(2), m.group(1) == "-")
+        # A function definition line - `foo() {`, `function foo {`, `foo()` with
+        # the `{` on the next line, or a one-liner `foo() { echo hi; }` whose
+        # braces balance on the line - defines, it doesn't run.
+        is_fn_def = re.match(r'^(?:function\s+[A-Za-z_]\w*\s*(?:\(\s*\))?|[A-Za-z_]\w*\s*\(\s*\))\s*(?:\{.*)?$', stripped)
+        is_cmd = depth == 0 and not _SET_E_PREAMBLE_RX.match(stripped) \
+            and stripped not in _SET_E_SYNTAX \
+            and not is_fn_def \
+            and not re.search(r'\|\|\s*(?:true|:|exit\b[^|]*|\{[^}]*\bexit\b[^}]*\}|return\b[^|]*)\s*$', stripped)
+        depth += stripped.count("{") - stripped.count("}")
+        if is_cmd:
+            unguarded.append((i, stripped if len(stripped) <= 60 else stripped[:57] + "..."))
+    return None
+
+
+def _set_e_is_last(body: str, set_line: int) -> bool:
+    """True when nothing but blanks/comments follows the `set -e` on `set_line`."""
+    rest = body.splitlines()[set_line:]
+    return all(not l.strip() or l.strip().startswith("#") for l in rest)
+
+
+# A hook script that is nothing but a wrapper: it `exec`s into the real script
+# somewhere else in the repo (fpp-performance-capture's monorepo layout, where
+# the root fpp_install.sh is a 6-line stub that execs
+# fpp-plugins/<name>/fpp_install.sh). Because the trigger is specifically
+# `exec`, nothing in the wrapper runs afterwards and process control transfers
+# entirely - so a hook-scoped check that reads only the wrapper is reading the
+# wrong file, and running the SAME per-file check independently on the target is
+# exactly right. Deliberately narrow: only `exec bash|sh <dir>/<path>.sh`, where
+# <dir> is $PLUGIN_DIR/$SCRIPT_DIR (assigned from `dirname "$0"` earlier in the
+# same file) or an inline `$(cd "$(dirname "$0")" && pwd)`. No `source`/`.`, no
+# variable tracing, no recursion (depth 1, hard).
+# `exec [bash|sh] <dir>/<rel>.sh [args]` where <dir> is $PLUGIN_DIR/$SCRIPT_DIR
+# (assigned from dirname "$0" earlier), an inline `$(dirname "$0")`, or the
+# `$(cd "$(dirname "$0")" && pwd)` form. Interpreter optional; trailing "$@"
+# or other args allowed.
+_EXEC_DELEGATE_RX = re.compile(
+    r'^\s*exec\s+(?:(?:/bin/|/usr/bin/)?(?:bash|sh)\s+)?'
+    r'"?(?:\$\{?(?P<var>PLUGIN_DIR|SCRIPT_DIR)\}?'
+    r'|\$\(\s*dirname\s+"?\$0"?\s*\)'
+    r'|\$\(\s*(?:cd\s+"?)?\$\(\s*dirname\s+"?\$0"?[^)]*\)[^)]*\))'
+    r'/(?P<rel>[\w./-]+\.sh)"?(?:\s+[^;&|#\n]*)?\s*(?:;|&&|\|\||#|$)')
+_DIRNAME_ASSIGN_RX = re.compile(
+    r'^\s*(?:export\s+|declare\s+[-\w ]*|readonly\s+)?(?P<var>\w+)=\s*'
+    r'"?\$\(\s*(?:cd\s+"?)?(?:\$\(\s*)?dirname\s+"?\$0"?')
+
+
+def _exec_delegation_target(hook_path: str, root: str) -> str | None:
+    """Relpath (from `root`) of the script `hook_path` hands off to via
+    `exec bash .../x.sh`, or None. Resolved statically only: rejects `..` in the
+    path, a target that doesn't exist on disk, a target outside the plugin root,
+    and the hook resolving to itself."""
+    if not os.path.isfile(hook_path):
+        return None
+    body = _read(hook_path)
+    dirname_vars = set()
+    for line in body.splitlines():
+        if _is_comment_line(line):
+            continue
+        a = _DIRNAME_ASSIGN_RX.match(line)
+        if a:
+            dirname_vars.add(a.group("var"))
+        m = _EXEC_DELEGATE_RX.match(line)
+        if not m:
+            continue
+        var = m.group("var")
+        if var and var not in dirname_vars:
+            continue        # not provably the script's own directory
+        rel = m.group("rel")
+        if ".." in rel.split("/"):
+            return None
+        base = os.path.dirname(os.path.abspath(hook_path))
+        target = os.path.realpath(os.path.join(base, rel))
+        real_root = os.path.realpath(root)
+        if not os.path.isfile(target):
+            return None
+        if os.path.commonpath([target, real_root]) != real_root:
+            return None
+        if target == os.path.realpath(hook_path):
+            return None     # recursion guard
+        return os.path.relpath(target, real_root)
+    return None
+
+
+def _subshell_exit_swallow_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line) where a shell function that can `exit` is
+    invoked inside a command substitution on an assignment (VAR=$(fn ...) or
+    VAR=`fn ...`). `exit` inside `$( )`/backticks only ends the subshell, not
+    the calling script - a validator written "exit 1 on bad input" silently
+    becomes "assign an empty/partial string on bad input" instead when called
+    this way, and the caller has no way to tell the difference from a
+    legitimately-empty result."""
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        src = _read(path)
+        if not re.match(r'#!.*\b(?:ba|z|da|k)?sh\b', src[:200]) and not rel.endswith(".sh"):
+            continue  # shell semantics only
+        fn_names = []
+        for name, b0, b1, _s, _e in _shell_functions(src):
+            body = "\n".join(l.split('#', 1)[0] for l in src[b0:b1].splitlines())
+            # `exit` as a statement, or as the `|| exit 1` / `then exit 1` tail
+            # of a validator - all end the subshell, not the script.
+            if re.search(r'(?m)(?:^|;|\|\||&&|\bthen\b|\belse\b|\bdo\b)\s*exit\b', body):
+                fn_names.append(name)
+        if not fn_names:
+            continue
+        alt = "|".join(re.escape(n) for n in fn_names)
+        # VAR=$(fn ...), quoted or not, with or without local/export/declare/
+        # readonly. A line that then checks the status (`|| exit 1`, `|| return`,
+        # `&& ...`) is the CORRECT shape - the assignment's status is the
+        # substitution's - so it is skipped.
+        rx = re.compile(r'^\s*(?:local\s+|export\s+|declare\s+(?:-\w+\s+)*|readonly\s+)?\w+=["\']?'
+                        r'(?:\$\(\s*|`\s*)(?:' + alt + r')\b')
+        for i, line in enumerate(src.splitlines(), 1):
+            code = line.split('#', 1)[0]
+            if rx.search(code) and not re.search(r'\)["\']?\s*(?:\|\||&&)', code):
+                yield rel, i, line.strip()
+                break
+
+
+_CALLBACKS_SHLIB_OVERRIDE_RX = re.compile(r'c\+\+:((?:\.{0,2}/)?[\w][\w.+/-]*\.so(?:\.[\w.]+)?)')
+
+
+def _expected_shlib_names(root: str, repo: str) -> set[str]:
+    """The .so filename(s) fppd will actually try to dlopen() for this plugin:
+    `lib<repo>.so` by default, or the file named by a `c++:<file>` line in the
+    root callbacks script (any of the four extensions or extensionless), which
+    Plugins.cpp loadUserPlugin() honours in place of the derived name. Both are
+    accepted when an override exists (the override wins at runtime, but a
+    Makefile that builds the derived name too isn't wrong)."""
+    names = {f"lib{repo}.so"}
+    for fn in os.listdir(root) if os.path.isdir(root) else []:
+        if fn == "callbacks" or (fn.startswith("callbacks.") and fn.count(".") == 1):
+            for line in _read(os.path.join(root, fn)).splitlines():
+                if _is_comment_line(line):
+                    continue
+                for m in _CALLBACKS_SHLIB_OVERRIDE_RX.finditer(line.split('#', 1)[0]):
+                    names.add(os.path.basename(m.group(1)))
+    return names
+
+
+_MAKEFILE_SO = r'(lib[\w.+-]*?)(?:\.so|\.\$[({]SHLIB_EXT[)}])'
+_MAKEFILE_SHLIB_TARGET_RXS = (
+    re.compile(r'(?m)^\s*' + _MAKEFILE_SO + r'\s*:'),                        # libx.so: deps
+    re.compile(r'(?m)^\s*(?:all|default|plugin)\s*:\s*(?:[^\n]*?\s)?' + _MAKEFILE_SO + r'(?=\s|$)'),
+    re.compile(r'(?m)^\s*(?:TARGET|LIB|LIBRARY|SHLIB|PLUGIN|OUTPUT)\s*[:?+]?=\s*' + _MAKEFILE_SO + r'\s*$'),
+    re.compile(r'\s-o\s+' + _MAKEFILE_SO + r'(?=\s|$)'),
+)
+
+
+def _makefile_shlib_targets(makefile_text: str) -> set[str]:
+    """lib*.so filenames a Makefile BUILDS (rule targets, `all:` prerequisites,
+    a TARGET-style variable, or a `-o` output) - not ones it merely depends on
+    or deletes. `$(SHLIB_EXT)` is normalised to `.so`. Makefile variables in
+    the stem (`lib$(NAME).so`) can't be resolved, so such targets are ignored
+    rather than guessed at."""
+    code = "\n".join(l.split('#', 1)[0] for l in makefile_text.splitlines())
+    found: set[str] = set()
+    for rx in _MAKEFILE_SHLIB_TARGET_RXS:
+        for m in rx.finditer(code):
+            stem = m.group(1)
+            if '$' in stem:
+                continue
+            found.add(stem + ".so")
+    return found
 
 
 def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None = None,
@@ -2575,6 +3230,77 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"image doesn't ship), say so explicitly via `/submit` instead of adding a manager "
                    f"silently"))
 
+    # apt-get/apt install|remove|purge called directly from a plugin's own
+    # scripts, instead of through pluginInfo.json's declarative
+    # dependencies.packages (PLUGININFO_FORMAT.md "dependencies" - reference-
+    # counted per requesting plugin, which is what lets fpp_uninstall safely
+    # decide whether a package is still needed by someone else). A manual call
+    # is invisible to that refcount: two plugins apt-get installing the same
+    # package, then one `apt-get remove`-ing it on uninstall, silently takes it
+    # out from under the other. BLOCKER when the package is one with an
+    # update-initramfs hook (e2fsprogs, dosfstools, initramfs-tools, busybox) -
+    # removing/reinstalling those can regenerate the system's initramfs, a much
+    # bigger blast radius on a device that's expected to keep booting than an
+    # ordinary package; BEST_PRACTICE otherwise.
+    # .sh only: install/uninstall logic lives in shell hooks, not PHP/JS/Python
+    # UI code - restricting to it avoids matching e.g. a PHP page's help text
+    # that merely SUGGESTS an apt-get command to the user in an echoed string
+    # (confirmed false positive on Si4713_FM_RDS's plugin_setup.php otherwise).
+    #
+    # pluginInfo.schema.json is explicit that dependencies.packages is "FPP
+    # 10+" - it isn't read/installed at all on an older FPP major, so a plugin
+    # whose versions[] still covers one has no alternative to a manual apt-get
+    # call for that install: the declarative mechanism this finding is nudging
+    # toward literally doesn't exist there. Confirmed against the first real
+    # pass of this check: 17 of 18 hits were plugins that still declare pre-10
+    # support - false positives, not sloppiness - leaving exactly one genuine
+    # case (fpp-plugin-SDCardRecover, FPP10-only). So this only fires for a
+    # plugin whose EVERY versions[] entry is FPP 10+.
+    versions = (info or {}).get("versions") or []
+    covers_pre_10 = any(
+        (_major(v.get("minFPPVersion")) or 99) < 10
+        for v in versions if isinstance(v, dict) and v.get("minFPPVersion"))
+    # Options can come before the verb (`apt-get -y install`, the dominant idiom
+    # in the corpus) or after. An `echo "run: apt-get install ..."` is help text
+    # (skipped by the (?<!...) on the leading quote/echo), and fpp_uninstall.sh
+    # removing what fpp_install.sh installed is the right thing, not a finding.
+    # BEST_PRACTICE only (2026-09 review): the initramfs escalation this had
+    # didn't hold up - dosfstools has no initramfs hook, e2fsprogs is already on
+    # every image so its install runs no postinst, and `update-initramfs -u` is
+    # what every kernel update does anyway.
+    apt_rx = re.compile(r'\bapt(?:-get)?\s+(?:-\S+(?:\s+\S+)?\s+)*(?:install|remove|purge)\b')
+
+    def _apt_call(line: str) -> bool:
+        """True when the line RUNS apt (possibly after `;`/`&&`, under sudo, or
+        inside `bash -c "..."`) rather than merely printing text that mentions it."""
+        for seg in re.split(r'(?:;|&&|\|\|)', line):
+            seg = seg.strip()
+            m = apt_rx.search(seg)
+            if not m:
+                continue
+            before = seg[:m.start()]
+            if re.match(r'^\s*(?:echo|printf|print|cat)\b', seg) and 'bash -c' not in before:
+                continue
+            if re.search(r'["\']', before) and not re.search(r'\b(?:bash|sh)\s+-c\s+["\']', before):
+                continue  # `echo "run apt-get ..."` / a quoted string
+            return True
+        return False
+
+    hit = None if covers_pre_10 else next(
+        (h for h in _grep(root, apt_rx.pattern, exts=(".sh",))
+         if os.path.basename(h[0]) != "fpp_uninstall.sh" and _apt_call(h[2])),
+        None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "apt-manual-install",
+                   f"calls apt/apt-get install|remove|purge directly ({hit[0]}:{hit[1]}: `{hit[2]}`) "
+                   f"instead of declaring the package in pluginInfo.json's `dependencies.packages` - "
+                   f"that mechanism reference-counts installs per requesting plugin, so "
+                   f"fpp_uninstall.sh only removes a package once nobody else still needs it; a "
+                   f"manual apt-get call has no such tracking. This plugin declares FPP 10+ only, "
+                   f"where that mechanism exists.\n"
+                   f"  - Move it into pluginInfo.json's `dependencies.packages` array instead of "
+                   f"calling apt-get from a script"))
+
     # Reading/parsing FPP's raw core config directly (the settings file, channel
     # outputs) is fragile - use getSetting()/$settings/the API. Writing your OWN
     # config via WriteSettingToFile(key, val, pluginName) is fine and NOT flagged.
@@ -2623,7 +3349,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # install script also sets up an Apache ProxyPass - a strong signal the
     # service was designed to be internal-only, so the 0.0.0.0 bind exposes
     # its (often unauthenticated) routes directly on the LAN instead.
-    hit = first(r'\.(run|listen|bind)\s*\([^)]*0\.0\.0\.0', exts=(".py", ".js"))
+    hit = first(r'\.(run|run_app|listen|bind)\s*\([^)]*0\.0\.0\.0', exts=(".py", ".js"))
     if hit and first(r'ProxyPass', exts=(".sh", ".conf")):
         out.append(Finding(BLOCKER, "server-bind-all-interfaces",
                    f"daemon binds 0.0.0.0 despite an Apache ProxyPass for the same service "
@@ -2631,6 +3357,76 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"reached through Apache only.\n"
                    f"  - Bind to `127.0.0.1` instead so the routes aren't directly reachable on the "
                    f"LAN, bypassing whatever auth Apache would add"))
+    elif hit and not re.search(r'SOCK_DGRAM|createSocket\s*\(\s*["\']udp|\bdgram\.', "\n".join(
+            _read(os.path.join(root, hit[0])).splitlines()[max(0, hit[1] - 40):hit[1] + 2])):
+        # Same 0.0.0.0 bind, but with no paired ProxyPass to infer "designed to be
+        # internal-only" from. The only corpus hit for this branch was a service
+        # meant to be reached from other devices on the LAN (showpilot-plugin's
+        # audio/WebSocket server), and a UDP receiver (E1.31/ArtNet/OSC/
+        # multicast - skipped above) MUST bind every interface. FPP's UI
+        # password is off by default, so "the auth Apache would add" is usually
+        # nothing anyway. OPTIONAL: a prompt to confirm it's intended, not a
+        # finding the author has to argue with.
+        out.append(Finding(OPTIONAL, "server-bind-all-interfaces",
+                   f"daemon binds 0.0.0.0 ({hit[0]}:{hit[1]}: `{hit[2]}`) - reachable from every "
+                   f"device on the LAN, not just FPP's own UI.\n"
+                   f"  - Fine if other devices are meant to talk to it directly; if only FPP's own "
+                   f"pages use it, bind `127.0.0.1` instead"))
+
+    # A destructive block-device write (mkfs/dd/wipefs/parted/sfdisk onto
+    # /dev/sdX, /dev/mmcblkN, /dev/nvmeN) in a file that never references FPP's
+    # own storage device or media mount - a script that picks "the inserted SD
+    # card" generically has nothing stopping it from formatting the disk FPP
+    # boots from or stores shows on. BLOCKER: the failure mode is destroying
+    # the media the system runs on. Read-only tools (lsblk, fsck -n, blkid) and
+    # `dd of=/dev/null` aren't in the class, and the exclusion is checked in
+    # the SAME file as the hit - a `/home/fpp/media` in the log path of some
+    # other script says nothing about what this one targets.
+    _BLK_DEV = r'/dev/(?:sd[a-z]|mmcblk\d|nvme\d|disk/by-)'
+    blk_write_rx = re.compile(
+        r'\bmkfs(?:\.\w+)?\s[^\n]*' + _BLK_DEV
+        + r'|\bdd\s[^\n]*\bof=' + _BLK_DEV
+        + r'|\b(?:wipefs|sfdisk|sgdisk|parted|fdisk)\s[^\n]*' + _BLK_DEV
+        + r'|\b(?:mkfs(?:\.\w+)?|wipefs)\s[^\n]*(?:/dev/)?\$\{?(?:dev|device|disk|drive|sdcard|card|blockdev|blkdev|target_dev|dev_name)\}?\b'
+        + r'|\bdd\s[^\n]*\bof=(?:/dev/)?\$\{?(?:dev|device|disk|drive|sdcard|card|blockdev|blkdev|target_dev|dev_name)\}?\b'
+        + r'|\b(?:mkfs(?:\.\w+)?|wipefs)\s[^\n]*/dev/\$\{?\w+\}?'
+        + r'|\bdd\s[^\n]*\bof=/dev/\$\{?\w+\}?', re.I)
+    blk_excl_rx = re.compile(r'storageDevice|/home/fpp/media\b|findmnt\s|\bmountpoint\s|/proc/mounts|/etc/fstab', re.I)
+    blk_hit = None
+    for path in _iter_files(root, SCRIPT_EXT):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        if blk_excl_rx.search(text):
+            continue
+        # Python docstrings and shell heredocs are prose (a usage block
+        # saying "sudo dd if=fpp.img of=/dev/sdb" isn't a dd).
+        if rel.endswith(".py"):
+            text = re.sub(r'(?s)"""(?:[^"\\]|\\.|"(?!""))*"""|\'\'\'(?:[^\'\\]|\\.|\'(?!\'\'))*\'\'\'',
+                          lambda m: "\n" * m.group(0).count("\n"), text)
+        elif rel.endswith(".sh"):
+            text = re.sub(r'(?ms)<<-?\s*[\'"]?(\w+)[\'"]?[^\n]*\n.*?^\s*\1\s*$',
+                          lambda m: "\n" * m.group(0).count("\n"), text)
+        for i, line in enumerate(text.splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = blk_write_rx.search(line)
+            if m and not _priv_in_prose(rel, line, m.start()) \
+                    and not re.search(r'^\s*(?:echo|print|printf)\b|["\'][^"\']*\b(?:dd|mkfs)\b', line[:m.start() + 3]):
+                blk_hit = (rel, i, line.strip())
+                break
+        if blk_hit:
+            break
+    if blk_hit:
+        out.append(Finding(BLOCKER, "block-device-no-exclusion",
+                   f"writes to a raw block device with no reference to FPP's own storage device/media "
+                   f"mount anywhere in the same file ({blk_hit[0]}:{blk_hit[1]}: `{blk_hit[2]}`) - if "
+                   f"this picks its target generically (\"the inserted SD card\"), nothing here stops "
+                   f"it from formatting or overwriting the disk FPP itself is running from.\n"
+                   f"  - Read FPP's own storage device first (`findmnt -n -o SOURCE /home/fpp/media`, "
+                   f"or the `storageDevice` setting) and explicitly skip it before touching "
+                   f"anything under `/dev/`"))
 
     # Request-controlled value concatenated into a device path with no
     # allow-list check IN THAT SAME FILE (an allow-list living in some other
@@ -3080,21 +3876,78 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                                f"{os.path.relpath(p, root)} is not executable - commit it +x "
                                f"(git update-index --chmod=+x)"))
 
-    # install error handling
+    # install error handling. `set -e` only protects the commands that run AFTER
+    # it, so its position matters as much as its presence: a `set -e` on the last
+    # line (fpp-jukebox, 2026-09, added to satisfy the old presence-only grep)
+    # guards nothing. _set_e_position() reports where it sits and how many real
+    # commands precede it; the message names the first unguarded one so the
+    # author can see what the rule is actually about.
+    # A wrapper fpp_install.sh that just `exec`s into the real installer elsewhere
+    # in the repo hands over the whole process, so `set -e` on the wrapper guards
+    # nothing that happens after it: the target is checked as its own file, in
+    # addition to (not instead of) the wrapper.
     for cand in ("scripts/fpp_install.sh", "fpp_install.sh"):
         p = os.path.join(root, cand)
-        if os.path.isfile(p):
-            body = _read(p)
-            if not re.search(r'set\s+-e|set\s+-euo|\|\|\s*exit', body):
+        if not os.path.isfile(p):
+            continue
+        checked = [(cand, "")]
+        delegated = _exec_delegation_target(p, root)
+        if delegated:
+            checked.append((delegated, f" (the real installer {cand} `exec`s into)"))
+        for script, note in checked:
+            body = _read(os.path.join(root, script))
+            # A wrapper that only `exec`s into the real installer: a failed
+            # exec already ends a non-interactive bash, so `set -e` here
+            # guards nothing - the target is what's checked.
+            if delegated and script != delegated and all(
+                    not l.strip() or l.startswith("#") or _EXEC_DELEGATE_RX.match(l)
+                    or _DIRNAME_ASSIGN_RX.match(l) for l in body.splitlines()):
+                continue
+            pos = _set_e_position(body)
+            if pos is None and not re.search(r'\|\|\s*exit\b', body):
                 out.append(Finding(BEST_PRACTICE, "no-set-e",
-                           f"{cand} has no 'set -e' (or `|| exit`) - without it, bash keeps running "
-                           f"the rest of the script even after a command fails, so if an earlier "
-                           f"step errors out (e.g. a dependency install fails), later steps still "
-                           f"run against that broken state and the plugin ends up half-installed "
-                           f"with no visible error.\n"
-                           f"  - Add `set -e` (or `set -euo pipefail`) as the first line after the "
-                           f"shebang so the script stops immediately on the first failure instead"))
-            break
+                           f"{script}{note} has no `set -e` - without it, bash keeps running the rest of the "
+                           f"script even after a command fails, so if an earlier step errors out "
+                           f"(e.g. a dependency install fails), later steps still run against that "
+                           f"broken state and the plugin ends up half-installed with no visible error. "
+                           f"(This is not `exit`: `exit` ends the script where you put it; `set -e` "
+                           f"makes every command after it end the script if that command fails.)\n"
+                           f"  - Add the line `set -e` directly under the `#!/bin/bash` shebang - "
+                           f"before any other command - so the script stops on the first failure. "
+                           f"(Plain `set -e`: `-u` breaks scripts that reference `$SUDO` and the like "
+                           f"before sourcing /opt/fpp/scripts/common, and `pipefail` breaks common "
+                           f"`grep | ...` idioms.) Per-command `... || exit 1` guards are an "
+                           f"acceptable alternative"))
+            elif pos is not None and pos[1]:
+                set_line, unguarded = pos
+                first_line, first_cmd = unguarded[0]
+                n = len(unguarded)
+                out.append(Finding(BEST_PRACTICE, "no-set-e",
+                           f"{script}:{set_line}{note} has `set -e`, but it comes too late to do anything - "
+                           f"`set -e` only affects the commands that run AFTER it, and {n} command"
+                           f"{'s' if n != 1 else ''} already run{'s' if n == 1 else ''} before it "
+                           f"unguarded (first: line {first_line} `{first_cmd}`)"
+                           f"{' - as the last line of the script it protects nothing at all' if _set_e_is_last(body, set_line) else ''}.\n"
+                           f"  - Move `set -e` up to directly under the `#!/bin/bash` shebang, before "
+                           f"any other command. If a particular command is allowed to fail, append "
+                           f"`|| true` to that one line rather than delaying `set -e`"))
+        break
+
+    # A shell function that can `exit` gets called inside a command
+    # substitution on an assignment - `exit` there only ends the subshell, not
+    # the script, so a validator meant to stop the script on bad input instead
+    # silently becomes "the assigned variable is empty/partial".
+    hit = next(iter(_subshell_exit_swallow_hits(root)), None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "subshell-exit-swallowed",
+                   f"a shell function that can `exit` is called inside a command substitution on an "
+                   f"assignment ({hit[0]}:{hit[1]}: `{hit[2]}`) - `exit` inside `$( )`/backticks only "
+                   f"ends the subshell, not the calling script, so a validator written to stop on bad "
+                   f"input silently becomes \"assign an empty/partial value\" instead when called "
+                   f"this way.\n"
+                   f"  - Call the function directly (not inside `$()`), and check its exit status "
+                   f"with `$?`/`||` instead of relying on its output; or have it `return` non-zero "
+                   f"without ever calling `exit`"))
 
     # A plugin that ships commands/descriptions.json (command types) or a native
     # lib<repoName>.so (a Makefile at the plugin root - FPP's own core-upgrade
@@ -3247,6 +4100,13 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
             is already covered by its own slot - PLUGIN_GUIDELINES.md's "native
             (C++) plugins" section)."""
             existing = [c for c in cands if os.path.isfile(os.path.join(root, c))]
+            # A wrapper that `exec`s into the real script elsewhere in the repo:
+            # the flag can legitimately live in the target, so check it too (in
+            # addition to the wrapper, not instead of it).
+            for c in list(existing):
+                t = _exec_delegation_target(os.path.join(root, c), root)
+                if t and t not in existing:
+                    existing.append(t)
             if any(restart_flag_rx.search(_read(os.path.join(root, c))) for c in existing):
                 return None
             if existing:
@@ -3450,6 +4310,140 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"(WriteSettingToFile/setPluginJSON); anything else: write it to "
                        f"`/home/fpp/media/plugindata/{repo}/` (`mkdir -p` it in scripts/fpp_install.sh)"))
 
+    # A file named api.php in the plugin root is not just another page: FPP core's
+    # collectPluginEndpoints() (www/api/controllers/plugin.php:3754) require_once's
+    # it on EVERY /api/* request, expecting it to only declare a
+    # getEndpoints<repoName>() registrar whose routes mount under
+    # /api/plugin/<repoName>/... A plugin that uses that filename for something
+    # else - a page-style AJAX dispatcher reached via plugin.php?page=api.php -
+    # gets loaded on every API call anyway. Confirmed on a live FPP 10 box
+    # (fpp-plugin-SDCardRecover, 2026-09): its api.php did a top-level
+    # require_once "config.php" that can't resolve from www/api/'s cwd, which PHP
+    # 8 surfaces as a catchable Error, so core skipped the plugin - but logged two
+    # lines to media/logs/apache2-error.log per API request (that log ships in
+    # support zips; FPP's status page polls ~1/s). Had the require resolved, the
+    # top-level http_response_code(400) + JSON echo would have prefixed every API
+    # response instead. Even a harmless api.php with no registrar costs one
+    # "no callable getEndpoints* function found" error_log line per request
+    # (plugin.php:3817). The author had documented at length why the getEndpoints
+    # convention "doesn't apply" - confused with the C++ /plugin-apis/ route.
+    #
+    # Two signals: no `function getEndpoints...(` declared at all, and/or a
+    # depth-0 side-effect statement (echo/header/exec/switch/superglobal read).
+    # Validated 2026-09 against the local catalog mirror: all 8 api.php files
+    # there declare a registrar and have 0 top-level side effects.
+    api_php = os.path.join(root, "api.php")
+    if os.path.isfile(api_php):
+        api_src = _read(api_php)
+        api_code = _php_strip_opaque(api_src)
+        # PHP function names are case-insensitive and core resolves the
+        # registrar with is_callable()/stripos(), so match the same way.
+        registrars = re.findall(r'(?im)^\s*function\s+(getEndpoints\w*)\s*\(', api_code)
+        has_registrar = bool(registrars)
+        # FPP 9.x (www/api/index.php) calls exactly `getEndpoints<repoName minus
+        # dashes>` with no fallback - a registrar under any other name is a
+        # fatal on every /api/* request there. Master falls back to any
+        # getEndpoints* the file defined, so the exact name only matters while
+        # versions[] still covers a pre-10 major (same test apt-manual-install
+        # uses).
+        exact_registrar = "getendpoints" + repo.replace("-", "").lower()
+        _vers = (info or {}).get("versions") or []
+        _covers_pre_10 = any(
+            (_major(v.get("minFPPVersion")) or 99) < 10
+            for v in _vers if isinstance(v, dict) and v.get("minFPPVersion"))
+        wrong_name = (has_registrar and _covers_pre_10
+                      and exact_registrar not in {n.lower() for n in registrars})
+        top_hit = next(iter(_api_php_top_level_hits(api_php)), None)
+        if not has_registrar or top_hit or wrong_name:
+            why = []
+            if not has_registrar:
+                why.append("declares no `getEndpoints…()` function")
+            if wrong_name:
+                why.append(f"names its registrar `{registrars[0]}()` but pluginInfo.json still "
+                           f"declares FPP 9 support, where core calls exactly "
+                           f"`getEndpoints{repo.replace('-', '')}()` with no fallback")
+            if top_hit:
+                why.append(f"runs code at top level (api.php:{top_hit[0]}: `{top_hit[1][:80]}`)")
+            out.append(Finding(BLOCKER, "api-php-not-a-registrar",
+                       f"`api.php` {' and '.join(why)} - FPP core require_once's every installed "
+                       f"plugin's api.php on EVERY /api/* request (www/api/controllers/plugin.php, "
+                       f"collectPluginEndpoints()) and expects it to only declare a "
+                       f"`getEndpoints{repo.replace('-', '')}()` registrar for routes under "
+                       f"/api/plugin/{repo}/...\n"
+                       f"  - Anything else in that file executes (or fails to load, with an error_log "
+                       f"line) on every API call from every page, for every user of this plugin - "
+                       f"not just when the plugin's own page is open\n"
+                       f"  - Either rename the file (e.g. `ajax.php`, reached the same way via "
+                       f"plugin.php?page=ajax.php&nopage=1) or turn it into a real registrar: "
+                       f"declare only functions, with getEndpoints…() returning "
+                       f"[['method'=>'GET','endpoint'=>'status','callback'=>'myPluginStatus'], ...]"))
+
+        # Every other installed plugin's api.php is require_once'd into the same
+        # request too (the same fact api-php-not-a-registrar above is built on),
+        # so a plain, GENERIC-named top-level `function`/`class` declared here -
+        # anything besides the getEndpoints…() registrar itself - collides the
+        # moment another plugin's api.php declares the same name. Core (master,
+        # PluginApiFunctionConflicts()) now catches a name that already exists
+        # and skips the whole plugin's API with an error_log line rather than
+        # fataling; FPP 9 fatals with "Cannot redeclare". Two tiers:
+        #   BLOCKER - one of limonade's lifecycle hooks (PluginApiReservedFunctions()
+        #     in plugin.php: configure/initialize/before/after/...). Core refuses
+        #     to load an api.php declaring one at all, because the framework
+        #     call_if_exists()es them on EVERY request and a plugin defining
+        #     autoload_controller() decides whether FPP's own controllers load.
+        #   BEST_PRACTICE - a curated list of short generic names (not "doesn't
+        #     contain the repo slug", which false-positived on every plugin
+        #     using its own abbreviation - fah_deleteStream, hacLog). This can't
+        #     prove another plugin uses the name, only that nothing prevents it.
+        # Only depth-0 declarations count: a class METHOD can't collide with a
+        # global, whatever it's called.
+        top_decls = []
+        depth = 0
+        for line in api_code.splitlines():
+            m = re.match(r'^\s*(?:abstract\s+|final\s+)?(?:function|class)\s+(\w+)', line)
+            if depth == 0 and m and not re.match(r'getEndpoints\w*$', m.group(1), re.I):
+                top_decls.append(m.group(1))
+            depth += line.count('{') - line.count('}')
+        reserved = [n for n in top_decls if n.lower() in _LIMONADE_RESERVED_NAMES]
+        core_clash = [n for n in top_decls if n.lower() in _fpp_api_globals() or n.lower() in _PHP_BUILTIN_NAMES]
+        generic = [n for n in top_decls if n.lower() in _GENERIC_API_NAMES]
+        if reserved:
+            out.append(Finding(BLOCKER, "api-php-namespace-collision",
+                       f"`api.php` declares `{reserved[0]}()`, a lifecycle hook of the limonade "
+                       f"framework FPP's API runs on (configure/initialize/before/after/"
+                       f"autoload_controller/...) - the framework calls these on EVERY /api/* "
+                       f"request, so a plugin defining one silently takes over part of request "
+                       f"handling for every API call; FPP core refuses to register an api.php that "
+                       f"declares any of them (PluginApiReservedFunctions() in "
+                       f"www/api/controllers/plugin.php).\n"
+                       f"  - Rename it (e.g. `{repo.replace('-', '')}_{reserved[0]}`)"))
+        elif core_clash:
+            # Not a "might collide" - it DOES: this name is defined by FPP's own
+            # common.php/config.php/api controllers on every /api/* request,
+            # before any plugin api.php is loaded. FPP 9: fatal "Cannot
+            # redeclare" for every API call; 10+: PluginApiFunctionConflicts()
+            # skips this plugin's whole API with an error_log line.
+            is_builtin = core_clash[0].lower() in _PHP_BUILTIN_NAMES and core_clash[0].lower() not in _fpp_api_globals()
+            out.append(Finding(BLOCKER, "api-php-namespace-collision",
+                       f"`api.php` declares `{core_clash[0]}()`, which "
+                       + ("is a PHP built-in function" if is_builtin else
+                          "FPP core already defines on every /api/* request (www/common.php, "
+                          "config.php or an api controller)") + " - "
+                       f"FPP 9 fatals with \"Cannot redeclare {core_clash[0]}()\" on every API call "
+                       f"for every user of this plugin; FPP 10+ refuses to register this plugin's "
+                       f"API at all (PluginApiFunctionConflicts()).\n"
+                       f"  - Rename it (e.g. `{repo.replace('-', '')}_{core_clash[0]}`)"))
+        elif generic:
+            out.append(Finding(BEST_PRACTICE, "api-php-namespace-collision",
+                       f"`api.php` declares a generic, unprefixed `{generic[0]}` at top level - "
+                       f"api.php is require_once'd for EVERY installed plugin on every /api/* "
+                       f"request, so a same-named function/class in another plugin's api.php is a "
+                       f"collision the moment both are installed together: FPP 9 fatals with "
+                       f"\"Cannot redeclare\", FPP 10+ skips one plugin's whole API with only an "
+                       f"error_log line.\n"
+                       f"  - Prefix it (e.g. `{repo.replace('-', '')}_{generic[0]}`) or move it into "
+                       f"a required file that isn't loaded globally"))
+
     # Log filename doesn't start with the mandated "plugin-" prefix - it still
     # lands in the right directory, just under a name FPP's log viewer/Support
     # Zip convention doesn't expect, and it isn't namespaced against collisions.
@@ -3551,6 +4545,39 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"plugins may not advertise anything inside the FPP UI, including products, "
                    f"vendors, things for sale, or other plugins (yours or anyone else's).\n"
                    f"  - If this is genuinely ad/promotional content, remove it"))
+
+    # Decoding and executing an encoded/compressed payload at runtime is worth
+    # flagging on its own - it's also the most direct way the donation/phone-
+    # home/advertising checks just above get evaded (a base64'd PayPal link, a
+    # gzinflate'd tracking call this tool can't grep for as plain text).
+    # BEST_PRACTICE: this doesn't know whether the payload is malicious or just
+    # unusually packaged, only that a human should read it by hand instead of
+    # trusting the greps above to have seen everything.
+    # Two shapes: decode-and-EXECUTE (eval/assert/exec/`| bash` over a decoder),
+    # and a long base64 LITERAL in the source being decoded - the payload is
+    # shipped inside the code, whatever is then done with it. A base64_decode
+    # of a runtime value (an uploaded data-URL image, a setting) is neither.
+    exec_hit = (first(r'\b(?:eval|assert)\s*\(\s*(?:["\']\?>["\']\s*\.\s*)?'
+                      r'(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev)\s*\(', exts=(".php",))
+                or first(r'\b(?:exec|eval)\s*\(\s*(?:base64\.b64decode|zlib\.decompress|codecs\.decode)\s*\(',
+                         exts=(".py",))
+                or first(r'\bbase64\s+(?:-d|--decode)\b[^|\n]*\|\s*(?:sudo\s+)?(?:bash|sh|python3?|perl)\b',
+                         exts=(".sh",))
+                or first(r'\beval\s*\(\s*atob\s*\(|new\s+Function\s*\(\s*atob\s*\(', exts=(".js",)))
+    literal_hit = None if exec_hit else first(
+        r'\b(?:base64_decode|base64\.b64decode|atob)\s*\(\s*["\']'
+        r'(?!iVBORw0K|/9j/|R0lGOD|PHN2Zy|UklGR|Qk[0-9A-Za-z]|AAABAA)[A-Za-z0-9+/=\s]{60,}["\']',   # not PNG/JPEG/GIF/SVG/WEBP/BMP/ICO
+        exts=(".php", ".py", ".js"))
+    hit = exec_hit or literal_hit
+    if hit:
+        what = ("decodes and executes an encoded/compressed payload at runtime" if exec_hit
+                else "ships an encoded payload inside the source and decodes it at runtime")
+        out.append(Finding(BEST_PRACTICE, "obfuscated-code",
+                   f"{what} ({hit[0]}:"
+                   f"{hit[1]}: `{hit[2][:100]}`) - this is also how a donation link, phone-home call, or ad "
+                   f"could evade the checks above (base64/gzinflate'd instead of plain text).\n"
+                   f"  - Ship the code plainly instead of encoding/compiling it at runtime, so it's "
+                   f"actually reviewable; if there's a genuine reason for it, explain via `/submit`"))
 
     # A plugin that sets up/depends on a third-party tunneling or remote-access
     # service (Dataplicity, ngrok, Cloudflare Tunnel, Tailscale, ZeroTier, ...) has
@@ -3686,15 +4713,133 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    "  - Add a local icon.png (128x128 or 256x256, repo root) so it renders offline "
                    "once installed; keep iconURL as the pre-install fallback"))
 
-    # installs a systemd unit but ships no uninstall script
-    if first(r'/etc/systemd/system/|systemctl\s+enable') and \
-       not (os.path.isfile(os.path.join(root, "scripts/fpp_uninstall.sh")) or
+    # Release notes (FPP 10+): the Plugin Manager only offers a Release Notes
+    # icon/link when pluginInfo.json says how to get them (releaseNotesStyle).
+    # Omitted or "none" means users see nothing before/after an update - not a
+    # defect, so OPTIONAL, but worth a nudge since most plugins can just say
+    # "gitHistory" (the commits an update would bring in) with no other work.
+    # Only checked when info is present at all - the schema/plugininfo blockers
+    # already cover a missing or unreadable pluginInfo.json.
+    if info is not None:
+        rns = info.get("releaseNotesStyle")
+        if not rns or rns == "none":
+            has_script = os.path.isfile(os.path.join(root, "scripts", "fpp_releasenotes.sh"))
+            out.append(Finding(OPTIONAL, "no-release-notes-style",
+                       f"pluginInfo.json has no `releaseNotesStyle`"
+                       f"{' (it is \"none\")' if rns == 'none' else ''} - FPP 10+'s Plugin Manager "
+                       f"shows a Release Notes link only when this says where to get them, so users "
+                       f"currently see nothing about what an update changes.\n"
+                       f"  - Add `\"releaseNotesStyle\": \"gitHistory\"` (the commits between the "
+                       f"installed clone and the branch tip - no extra work), or `\"gitRelease\"` if "
+                       f"you publish GitHub Releases with notes"
+                       + (f", or `\"script\"` since scripts/fpp_releasenotes.sh already exists"
+                          if has_script else "")
+                       + "; see the `releaseNotesStyle` entry in pluginInfo.schema.json"))
+
+    # fpp_install.sh creates state OUTSIDE the plugin's own directory - a
+    # systemd unit, a cron entry, a sudoers/udev/kernel-module rule, or a
+    # write to /etc or one of FPP's own config files/settings - but the
+    # plugin ships no fpp_uninstall.sh at all to revert any of it. FPP's
+    # uninstall (scripts/uninstall_plugin, core) deletes only the plugin's
+    # own directory - anything reaching outside it needs fpp_uninstall.sh to
+    # actually go away, and a plugin with none has no chance of reverting
+    # anything, whatever shape that state takes.
+    #
+    # Generalizes what used to be a systemd-only version of this check to
+    # every "reaches outside the plugin directory" signal the privacy checks
+    # already detect (_priv_service_hits/_priv_privilege_hits/
+    # _priv_core_write_hits, reused rather than reimplemented - each already
+    # skips rm/disable/uninstall-shaped lines and is tuned for a low false-
+    # positive rate there), plus a fourth, install-hook-specific source:
+    # _PRIV_MEDIA_WRITE_RX catches a file dropped into one of FPP's OTHER
+    # shared media subdirectories (media/scripts, media/images, ...) - an
+    # orphaned script that stays schedulable in FPP's own Scripts UI, or a
+    # stray asset, after the plugin is gone (real, not hypothetical:
+    # fpp-PictureFrame, fpp-jukebox). Deliberately existence-only (no
+    # fpp_uninstall.sh at all, not "exists but its cleanup isn't literally
+    # matchable") - cron-no-uninstall below already owns that narrower,
+    # regex-blind-spot-prone case for cron specifically; a plugin missing
+    # uninstall entirely can trip both, which is fine.
+    if not (os.path.isfile(os.path.join(root, "scripts/fpp_uninstall.sh")) or
             os.path.isfile(os.path.join(root, "fpp_uninstall.sh"))):
-        out.append(Finding(BLOCKER, "no-uninstall",
-                   "creates a systemd service but ships no fpp_uninstall.sh to remove it.\n"
-                   "  - Add one that mirrors the install, e.g. `systemctl disable --now <unit> && "
-                   "rm -f /etc/systemd/system/<unit>`, so removing the plugin doesn't leave an "
-                   "orphaned service behind"))
+        # The _priv_* helpers walk the WHOLE tree, so a nested file that happens
+        # to be named fpp_install.sh is already seen by the basename filter. A
+        # root fpp_install.sh that just `exec`s into the real installer
+        # elsewhere in the repo is the same thing logically but need not share
+        # the filename, so the target is accepted by path as well (in addition
+        # to the wrapper, not instead of it).
+        deleg_rels = set()
+        for _c in ("scripts/fpp_install.sh", "fpp_install.sh"):
+            _t = _exec_delegation_target(os.path.join(root, _c), root)
+            if _t:
+                deleg_rels.add(_t)
+
+        def _from_install_hook(rel: str) -> bool:
+            return os.path.basename(rel) == "fpp_install.sh" or rel in deleg_rels
+
+        # Two tiers. An ARTIFACT the plugin itself created outside its dir - a
+        # unit/cron file, an /etc file, a sudoers/udev/modules entry, a file
+        # dropped into media/scripts etc. - is orphaned for good when the dir is
+        # deleted: BLOCKER. A STATE CHANGE to something that already existed -
+        # `systemctl enable smbd` (Debian's own unit; fpp-PictureFrame does this
+        # and it's FPP's own Service_smbd_nmbd toggle), an FPP setting, a group
+        # membership, setcap - is a real "reaches outside" fact worth an
+        # uninstall step, but reverting it can be wrong (switching off a file
+        # share the user relies on), so BEST_PRACTICE.
+        created, changed = [], []
+        repo_units = {os.path.basename(f).lower()
+                      for f in _iter_files(root, (".service", ".timer", ".socket"))}
+        for unit, hits in _priv_service_hits_all(root).items():
+            hook_hits = [h for h in hits if _from_install_hook(h[0])]
+            if not hook_hits:
+                continue
+            ships_unit = (any(_PRIV_UNIT_FILE_RX.search(h[2]) for h in hook_hits)
+                          or any(f"{unit}{ext}" in repo_units for ext in (".service", ".timer", ".socket")))
+            hit = next((h for h in hook_hits if _PRIV_UNIT_FILE_RX.search(h[2])), hook_hits[0])
+            (created if ships_unit else changed).append(
+                (f"{'service/cron entry' if ships_unit else 'enables system service'} `{unit}`", hit))
+        for kind, hit in _priv_privilege_hits(root).items():
+            if _from_install_hook(hit[0]):
+                # A FILE under /etc (sudoers.d, udev rules.d, modules-load.d)
+                # is an artifact; a bare `modprobe x` / `udevadm control
+                # --reload` / `dtoverlay` is gone at reboot - nothing to revert.
+                artifact = (kind in ("sudoers", "udev rule", "kernel module")
+                            and re.search(r'/etc/(?:sudoers|udev|modules)', hit[2]) is not None)
+                (created if artifact else changed).append((f"privilege change ({kind})", hit))
+        seen_targets = set()
+        for hit in _priv_core_write_hits(root):
+            if _from_install_hook(hit[0]) and hit[3] not in seen_targets:
+                seen_targets.add(hit[3])
+                (created if hit[3].startswith("/etc/") else changed).append(
+                    (f"write to `{hit[3]}`", hit[:3]))
+        for rel, i, line, target in _priv_media_write_hits(root):
+            if _from_install_hook(rel):
+                created.append((f"file dropped in `{target}`", (rel, i, line)))
+        # One line per kind - PictureFrame copies two scripts into media/scripts
+        # and writes the same setting twice; listing each is noise.
+        _seen_kinds: set[str] = set()
+        external = [(k, h) for k, h in created + changed
+                    if not (k in _seen_kinds or _seen_kinds.add(k))]
+        if external:
+            kinds = ", ".join(k for k, _ in external[:4])
+            more = f" (+{len(external) - 4} more)" if len(external) > 4 else ""
+            first_hit = external[0][1]
+            where = (f" (in {first_hit[0]}, the real installer it `exec`s into)"
+                     if first_hit[0] in deleg_rels else "")
+            out.append(Finding(BLOCKER if created else BEST_PRACTICE, "no-uninstall",
+                       f"fpp_install.sh{where} {'creates state' if created else 'changes system state'} "
+                       f"outside the plugin's own directory - {kinds}{more} "
+                       f"({first_hit[0]}:{first_hit[1]}: `{first_hit[2]}`) - but ships no "
+                       f"fpp_uninstall.sh to revert any of it.\n"
+                       f"  - Add fpp_uninstall.sh that reverts each install step above (e.g. "
+                       f"`systemctl disable --now <unit> && rm -f /etc/systemd/system/<unit>` for a "
+                       f"service the plugin installed, `crontab -l | grep -v <marker> | crontab -` "
+                       f"for cron, `rm -f` for a file dropped elsewhere), so removing the plugin "
+                       f"doesn't leave it behind - FPP's uninstall only deletes the plugin's own "
+                       f"directory"
+                       + ("" if created else
+                          "\n  - For a pre-existing service or an FPP setting the user may rely on, "
+                          "reverting only what the plugin itself turned on is enough")))
 
     # Generalizes the systemd check above to cron: registers a cron entry
     # (directly, or via python-crontab/similar) but fpp_uninstall.sh never
@@ -3704,7 +4849,15 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     if cron_hit:
         uninstall_p = next((p for p in (os.path.join(root, "scripts/fpp_uninstall.sh"),
                                          os.path.join(root, "fpp_uninstall.sh")) if os.path.isfile(p)), None)
+        # A wrapper fpp_uninstall.sh that just `exec`s into the real uninstaller
+        # elsewhere in the repo hands the whole process over, so the cron
+        # cleanup can legitimately live in the target: check that body too (in
+        # addition to the wrapper's, not instead of it - either one having the
+        # cleanup satisfies this).
+        uninstall_deleg = _exec_delegation_target(uninstall_p, root) if uninstall_p else None
         uninstall_body = _read(uninstall_p) if uninstall_p else ""
+        if uninstall_deleg:
+            uninstall_body += "\n" + _read(os.path.join(root, uninstall_deleg))
         # Recognize the idiomatic (and correct) removal pattern too: `crontab -l
         # | grep -v <marker> | crontab -` replaces the crontab with everything
         # EXCEPT the matched entry - this is more common, and safer, than a
@@ -3715,8 +4868,11 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         has_cleanup = re.search(r'remove_all|crontab\s+-r|\brm\b.*cron\.d/|cron\.d/.*\brm\b', uninstall_body) \
             or re.search(r'crontab\s+-l.*\|.*grep\s+-v.*\|.*crontab\s+-', uninstall_body)
         if not has_cleanup:
+            never = (f"neither fpp_uninstall.sh nor {uninstall_deleg} (the real uninstaller it "
+                     f"`exec`s into) removes it" if uninstall_deleg
+                     else "fpp_uninstall.sh never removes it")
             out.append(Finding(BLOCKER, "cron-no-uninstall",
-                       f"registers a cron entry but fpp_uninstall.sh never removes it ({cron_hit[0]}:"
+                       f"registers a cron entry but {never} ({cron_hit[0]}:"
                        f"{cron_hit[1]}: `{cron_hit[2]}`).\n"
                        f"  - Add cleanup to fpp_uninstall.sh (e.g. `crontab -l | grep -v <marker> | "
                        f"crontab -`, or the removal call for whatever cron library you used to "
@@ -3752,26 +4908,23 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # by that long, every time - guideline 2.6 again, same class as
     # blocking-build-in-hook. fpp_install.sh/fpp_uninstall.sh are excluded: they
     # run once at install/uninstall time, not on every fppd start/stop.
-    hit = None
-    for dirpath, dirnames, filenames in os.walk(root):
-        if ".git" in dirnames:
-            dirnames.remove(".git")
-        for fn in filenames:
-            if fn.startswith(("preStart", "postStart", "preStop", "postStop")):
-                p = os.path.join(dirpath, fn)
-                for i, line in enumerate(_read(p).splitlines(), 1):
-                    if _is_comment_line(line):
-                        continue
-                    if re.search(r'\bsleep\s+[0-9.]+', line):
-                        hit = (os.path.relpath(p, root), i, line.strip())
-                        break
-                if hit:
-                    break
-        if hit:
-            break
-    if hit:
+    #
+    # Originally any sleep anywhere in the file, no check for whether it was
+    # actually reachable synchronously - a false-positive audit found it
+    # firing exclusively on the two patterns its own remediation text
+    # recommends (a backgrounded wait-for-ready helper, a bounded liveness-
+    # polling retry loop), never on a genuinely flat blocking delay. See
+    # _blocking_sleep_in_hook_hits() for what now suppresses a hit.
+    sleep_hits = list(_blocking_sleep_in_hook_hits(root))
+    if sleep_hits:
+        hit = sleep_hits[0]
+        # Name every flat sleep, not just the first - an author who fixes one
+        # and gets the same finding back on the next line has been told nothing.
+        also = ("; also " + ", ".join(f"{h[0]}:{h[1]}" for h in sleep_hits[1:4])
+                + (f" (+{len(sleep_hits) - 4} more)" if len(sleep_hits) > 4 else "")
+                if len(sleep_hits) > 1 else "")
         out.append(Finding(BEST_PRACTICE, "blocking-sleep-in-hook",
-                   f"unconditional sleep in a lifecycle hook ({hit[0]}:{hit[1]}: `{hit[2]}`) - this "
+                   f"unconditional sleep in a lifecycle hook ({hit[0]}:{hit[1]}{hit[3]}: `{hit[2]}`{also}) - this "
                    f"blocks fppd startup/shutdown for that long on every run.\n"
                    f"  - If you're waiting on a background process, poll for the actual condition "
                    f"(e.g. the PID file existing, or the port accepting connections) with a short "
@@ -3856,32 +5009,23 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"  - Remove it, or narrow it to a specific error_reporting level you actually "
                    f"intend to suppress"))
 
-    # Synchronous busy-wait poll loop (a sleep() inside a while/do loop) in a
-    # PHP file - if that file is directly reachable as a page (not just a CLI
-    # script), it ties up an Apache/PHP-FPM worker for the whole poll duration.
-    # BEST_PRACTICE, not OPTIONAL: genuinely needs real parsing to tell a page
-    # from a CLI-only script reliably, so this can't prove reachability - same
-    # "flag for a human to check reachability rather than treat as proven"
-    # reasoning as destructive-no-csrf/device-path-no-allowlist above (both
-    # BEST_PRACTICE), not a cosmetic/polish item like the true OPTIONAL findings
-    # (no-icon, no-readme, no-resource-hints) - the underlying concern here is a
-    # real reliability issue (worker exhaustion), same class as
+    # Synchronous busy-wait poll loop (an unbounded while(true)/for(;;) with a
+    # sleep() call) in a PHP file that shows no sign of being CLI-only - if
+    # this file is directly reachable as a page (not just a background
+    # daemon), it ties up an Apache/PHP-FPM worker for the whole poll
+    # duration. BEST_PRACTICE, not OPTIONAL: the underlying concern is a real
+    # reliability issue (worker exhaustion), same class as
     # blocking-sleep-in-hook, if the precondition holds.
-    hit = None
-    for path in _iter_files(root, (".php",)):
-        rel = os.path.relpath(path, root)
-        if _skippable(rel):
-            continue
-        lines = _read(path).splitlines()
-        for i, line in enumerate(lines):
-            if _is_comment_line(line) or not re.search(r'\b(while|do)\s*[({]', line):
-                continue
-            window = "\n".join(lines[i:i + 10])
-            if re.search(r'\bsleep\s*\(', window):
-                hit = (rel, i + 1, line.strip())
-                break
-        if hit:
-            break
+    #
+    # Originally any `while`/`do` loop with a sleep() nearby, no CLI-guard
+    # check at all - a false-positive audit found it landing on every one of
+    # its real-world hits, ALL of them background *_listener.php/*-bg.php
+    # daemons (remote-falcon, showpilot-plugin, fpp-sms-control-too,
+    # fpp-SETIQ), several with their own explicit `php_sapi_name() !== 'cli'`
+    # guard the old check never looked for, plus one bounded retry-wait loop
+    # (FPP-Plugin-Matrix-Message) that was never an unbounded poll in the
+    # first place. See _busy_wait_poll_hits() for what now suppresses a hit.
+    hit = next(iter(_busy_wait_poll_hits(root)), None)
     if hit:
         out.append(Finding(BEST_PRACTICE, "busy-wait-poll",
                    f"busy-wait poll loop with sleep() ({hit[0]}:{hit[1]}: `{hit[2]}`) - if this file "
@@ -3897,10 +5041,30 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # a proven defect - a documentation-adherence nudge, not a bug report.
     # minMemoryMB/minCpuCores are top-level pluginInfo.json fields (describe the
     # plugin as a whole, no per-version override) - NOT nested in versions[].
+    #
+    # A Makefile/CMakeLists.txt's mere existence used to be enough on its own to
+    # trigger this - dropped (2026-09-19) because every native FPP plugin ships
+    # one just to build its .so, so that half of the check was really detecting
+    # "written in C++", not "compute/memory heavy" (~22% false-positive rate
+    # across the plugin corpus, firing on trivially light native plugins like
+    # fpp-midi/fpp-osc/fpp-brightness that just happen to be C++). A build file
+    # is still a signal, but only when it links a genuinely heavy library -
+    # ffmpeg/opencv/libcamera - not merely for existing. The source/script scan
+    # for the same libraries is widened past .cpp/.c/.h/.hpp/.py to .sh/.php/.js
+    # too, since the common real case here is a plugin shelling out to the
+    # ffmpeg binary rather than linking against it, which the old exts list
+    # couldn't see at all.
     has_hint = bool((info or {}).get("minMemoryMB") or (info or {}).get("minCpuCores"))
+    heavy_lib_rx = r'\b(ffmpeg|opencv|libcamera|videocapture|tensorflow|tflite|torch|mediapipe|gstreamer)\b'
+    build_files = [p for p in _iter_files(root)
+                   if os.path.basename(p).lower() in ("makefile", "cmakelists.txt")]
+    links_heavy_lib = any(
+        re.search(r'-lav(?:codec|format|util)\b|-lswscale\b|-lopencv|pkg-config[^\n]*'
+                  r'(?:opencv|libav|libcamera)', _read(p), re.I)
+        for p in build_files)
     looks_heavy = (not has_hint) and (
-        any(n.lower() in ("makefile", "cmakelists.txt") for n in lower)
-        or first(r'\b(ffmpeg|opencv|libcamera|videocapture)\b', exts=(".cpp", ".c", ".h", ".hpp", ".py")))
+        links_heavy_lib
+        or first(heavy_lib_rx, exts=(".cpp", ".c", ".h", ".hpp", ".py", ".sh", ".php", ".js")))
     if looks_heavy:
         out.append(Finding(OPTIONAL, "no-resource-hints",
                    "looks potentially compute/memory heavy (native build / video-capture-shaped code) "
@@ -4041,6 +5205,43 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        "reports success, only the memory is never returned.\n"
                        "  - Verify with `nm -D lib<repoName>.so | awk '$2==\"u\"'` after a build; a "
                        "non-empty result means this plugin needs the flag"))
+
+        # FPP's plugin loader (src/Plugins.cpp loadUserPlugin) dlopen()s a
+        # native plugin's .so from the plugin dir by one of exactly two names:
+        # `lib<dirName>.so` by default, or whatever file the callbacks script
+        # names with `c++:<file>` (an override honoured since 2019). A Makefile
+        # whose BUILD TARGET is some other lib*.so means the artifact never
+        # matches either, so the plugin never loads - fppd does log "Failed to
+        # find shlib" and raises a "Could not load plugin" warning banner, but
+        # the plugin itself is inert. BLOCKER: not degraded, non-functional.
+        # Only build targets count (`all: libx.so`, `libx.so:` rule, `TARGET =`,
+        # `-o libx.so`) - a `$(SRCDIR)/libfpp.so` dependency or a `rm -f` in
+        # clean isn't what the plugin builds. `$(SHLIB_EXT)` is how every
+        # first-party Makefile spells the extension, so it's normalised to .so.
+        # The comparison is case-sensitive: dlopen() on ext4 is.
+        expected = _expected_shlib_names(root, repo)
+        built = _makefile_shlib_targets(makefile_text)
+        # Only when the callbacks script actually tells fppd to dlopen()
+        # something - a script plugin whose Makefile builds a ctypes helper
+        # .so is never loaded by fppd at all.
+        prints_cpp = bool(first(r'''(echo|print|printf)\s*\(?\s*["']c\+\+''', exts=(".sh", ".pl", ".php", ".py")))
+        if prints_cpp and built and not (built & expected):
+            wrong = sorted(built)[0]
+            exp = sorted(expected)[0]
+            case_only = wrong.lower() == exp.lower()
+            out.append(Finding(BLOCKER, "so-name-mismatch",
+                       f"Makefile builds `{wrong}`, which doesn't match `{exp}` - FPP's plugin "
+                       f"loader (Plugins.cpp loadUserPlugin) dlopen()s a native plugin from its "
+                       f"directory as `lib<repoName>.so` (repoName `{repo}`) unless the callbacks "
+                       f"script prints `c++:<file>` to name a different one, so a build that "
+                       f"produces any other filename never loads - fppd logs \"Failed to find "
+                       f"shlib\" and shows a \"Could not load plugin\" warning, and the plugin is "
+                       f"inert.\n"
+                       + (f"  - The names differ only in case - dlopen() is case-sensitive on the "
+                          f"Pi's filesystem, so this still fails\n" if case_only else "")
+                       + f"  - Rename the Makefile's build target to `{exp}`, or have the callbacks "
+                       f"script print `c++:{wrong}` so fppd loads the file the build actually "
+                       f"produces"))
 
     # A plugin registering HTTP routes but shipping no apiDocs.json (FPP commit
     # 006f389dc) - not wrong, but every route it serves shows up under "Undocumented

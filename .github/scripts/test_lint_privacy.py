@@ -754,5 +754,34 @@ class Schema(unittest.TestCase):
 
 
 
+
+class SplitTagDirective(unittest.TestCase):
+    """A tag whose src=/href= sits on a continuation line still gets the
+    directive of its tag, not connect-src (fpp-jukebox locked.html:46, 2026-09)."""
+
+    def hits(self, text: str, rel: str = "page.php"):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, os.path.dirname(rel)) or tmp, exist_ok=True)
+            with open(os.path.join(tmp, rel), "w") as f:
+                f.write(text)
+            return {h: (v[3], v[4]) for h, v in L._priv_host_hits(tmp, None, {}, False).items()}
+
+    def test_img_split_over_lines_is_img_src(self):
+        self.assertEqual(self.hits('<img class="x"\n     alt="y"\n     src="https://placehold.co/500x500">\n'),
+                         {"placehold.co": ("blocked", "img-src")})
+
+    def test_script_split_over_lines_is_script_src(self):
+        self.assertEqual(self.hits('<script\n    src="https://code.jquery.com/jquery.js"></script>\n'),
+                         {"code.jquery.com": ("blocked", "script-src")})
+
+    def test_anchor_split_over_lines_stays_a_link(self):
+        self.assertEqual(self.hits('<a class="btn"\n   href="https://example.com/docs">docs</a>\n'), {})
+
+    def test_closed_tag_on_earlier_line_is_not_pulled_in(self):
+        # the <img> is complete; the bare src= below belongs to nothing we can see
+        out = self.hits('<img src="x.png">\nvar u = "https://api.example.com/v1";\n')
+        self.assertEqual(out.get("api.example.com", (None, None))[1], None)
+
+
 if __name__ == "__main__":
     unittest.main()

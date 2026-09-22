@@ -1,0 +1,47 @@
+# Runs the linter's own unit tests (test_lint_plugin.py, test_lint_privacy.py)
+# on every PR or push that touches the automation scripts, so a regression in a
+# lint rule is caught here rather than on the next real plugin submission scan.
+#
+# HOW TO READ THIS:
+#   on:        a PR or push to main/master touching .github/scripts/** (or this file)
+#   jobs:      one job "unit-tests" on a fresh Ubuntu VM
+#   steps:     check out, set up Python, run `python -m unittest` in the scripts dir
+
+name: ZZ - Automation - Lint script unit tests
+
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/**"
+      - ".github/schema/**"
+      - ".github/workflows/lint-script-tests.yml"
+  push:
+    branches: [main, master]
+    paths:
+      - ".github/scripts/**"
+      - ".github/schema/**"
+      - ".github/workflows/lint-script-tests.yml"
+
+# Least-privilege: read the repo. Nothing else.
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install --quiet jsonschema
+
+      # -v so a failing test's name is visible in the step log without expanding.
+      - name: Run unit tests
+        working-directory: .github/scripts
+        run: python -m unittest -v test_lint_plugin test_lint_privacy
