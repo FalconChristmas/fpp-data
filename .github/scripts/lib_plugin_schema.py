@@ -204,6 +204,23 @@ def parse_raw_github_repo(url: str) -> Optional[tuple[str, str]]:
     return (m.group(1), m.group(2)) if m else None
 
 
+# pluginList.json entries that are reference material, not a distributed plugin,
+# so major-release scans (new_major_release_scan.py) shouldn't file a tracking
+# issue for them - fpp-plugin-Template deliberately ships placeholder
+# ask-for-money/phone-home text and an unedited privacy block for authors to
+# copy from, which the linter is supposed to flag on a real plugin, not on the
+# template itself (fpp-data#200).
+EXCLUDE_FROM_MAJOR_RELEASE_SCAN = {"fpp-plugin-Template"}
+
+
+def filter_excluded(entries: list) -> list:
+    """Drop pluginList entries in EXCLUDE_FROM_MAJOR_RELEASE_SCAN (case-insensitive
+    on entry name), for the major-release scan/tracking-issue pipeline only -
+    other tools (scan_submission.py, clone_plugins.py's general use) are unaffected."""
+    excluded = {n.lower() for n in EXCLUDE_FROM_MAJOR_RELEASE_SCAN}
+    return [e for e in entries if (e[0] if e else "").lower() not in excluded]
+
+
 def filter_by_owner(entries: list, only_owner: Optional[str]) -> list:
     """Keep only pluginList entries whose repo owner matches `only_owner` (case-insensitive).
 

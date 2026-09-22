@@ -442,6 +442,7 @@ def main():
         with open(args.schema, encoding="utf-8") as f:
             schema = json.load(f)
     entries = lib.load_pluginlist(args.plugin_list)
+    entries = lib.filter_excluded(entries)
     entries = lib.filter_by_owner(entries, args.only_owner)
     entries = lib.apply_limit(entries, args.limit, args.seed)
 

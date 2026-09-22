@@ -142,6 +142,20 @@ def main():
             existing[new_name] = iss
             adopted += 1
 
+    def _set_status_label(iss, status_label):
+        """Surgical status:<...> swap - remove other status:* labels, add this one
+        (plus the round label), touch nothing else (needs-manual-review etc. survive)."""
+        current = [l["name"] for l in (iss.get("labels") or [])
+                   if isinstance(l, dict) and (l.get("name") or "").startswith("status:")]
+        for old in current:
+            if old != status_label:
+                try:
+                    _req("DELETE", f"{API}/repos/{repo}/issues/{iss['number']}/labels/{old}", token)
+                except urllib.error.HTTPError:
+                    pass  # already gone - fine
+        _req("POST", f"{API}/repos/{repo}/issues/{iss['number']}/labels", token,
+             {"labels": [label, status_label]})
+
     created = updated = relabeled = noop = 0
     for r in plugins:
         name = r["name"]
@@ -207,8 +221,12 @@ def main():
             if args.dry_run:
                 print(f"[dry-run] UPDATE #{iss['number']} {name} [{r['status']}]")
             else:
+                # Body only - labels are swapped surgically below so a
+                # needs-manual-review (or anything else a human set) isn't wiped
+                # by a full labels=[...] replace, same rule reconcile mode follows.
                 _req("PATCH", f"{API}/repos/{repo}/issues/{iss['number']}", token,
-                     {"body": body, "labels": [label, f"status:{r['status']}"]})
+                     {"body": body})
+                _set_status_label(iss, f"status:{r['status']}")
             updated += 1
         else:
             if args.dry_run:

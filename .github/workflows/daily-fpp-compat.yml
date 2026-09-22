@@ -118,8 +118,9 @@ jobs:
           #        every other auto-generated removal PR. Otherwise, plain reminder -
           #        no further escalation defined past 7.
           #
-          # The whole ladder is skipped once the owner has used `/submit` - from then
-          # on it's waiting on a maintainer, not the author.
+          # The whole ladder is skipped once it's waiting on a maintainer rather than
+          # the author: an accepted `/submit`, ANY `/submit` comment from a human, or a
+          # needs-manual-review label that this ladder didn't set itself.
           #
           # Reminder count is read back from prior "new-major-release-stale-nudge:N"
           # marker comments (max N seen), not a running counter anywhere else, so this
@@ -161,14 +162,33 @@ jobs:
               // whose author never replied at all. A `/recheck` or plain reply alone
               // does NOT stop it: the findings are still the author's to fix, so keep
               // nudging until they either clear them or `/submit`.
-              if (comments.some(c => c.body && c.body.includes("at the owner's request via `/submit`"))) {
-                core.info(`#${issue.number}: skipping reminders - owner used /submit, awaiting a maintainer.`);
-                continue;
-              }
               let sentCount = 0;
               for (const c of comments) {
                 const m = c.body && c.body.match(NUDGE_MARKER_RE);
                 if (m) sentCount = Math.max(sentCount, parseInt(m[1], 10));
+              }
+              // Three independent "a human is on this" signals, any one of which
+              // stops the ladder. The original check was only (1), and authors still
+              // got reminded while waiting on us (2026-09 review):
+              //  (1) the bot's own accepted-/submit comment (recheck workflow);
+              //  (2) ANY non-bot comment containing a bare `/submit` - the recheck
+              //      workflow only ACCEPTS /submit from the resolved repo owner, so a
+              //      co-maintainer's or org member's /submit produced no (1) and the
+              //      author kept getting pestered even though they'd clearly handed
+              //      it to us. Reminding on a rejected /submit is never right;
+              //  (3) needs-manual-review set by someone other than this ladder -
+              //      i.e. present while reminder 4 (the only rung that sets it) has
+              //      not been sent - so a maintainer who labelled it by hand also
+              //      pauses it. Once rung 4 HAS fired the label proves nothing, so
+              //      rungs 5-7 still go out for a genuinely silent author.
+              const botAccepted = comments.some(c => c.body && c.body.includes("at the owner's request via `/submit`"));
+              const anySubmit = comments.some(c => c.user && c.user.type !== 'Bot'
+                                                   && /(?:^|\s)\/submit(?:\s|$)/.test(c.body || ''));
+              const hasManualReview = (issue.labels || []).some(l => (typeof l === 'object' ? l.name : l) === 'needs-manual-review');
+              if (botAccepted || anySubmit || (hasManualReview && sentCount < 4)) {
+                core.info(`#${issue.number}: skipping reminders - awaiting a maintainer `
+                          + `(accepted /submit: ${botAccepted}, any /submit: ${anySubmit}, manual-review label: ${hasManualReview}).`);
+                continue;
               }
               const nextN = sentCount + 1;
               const dueDay = nextN * REMINDER_INTERVAL_DAYS;
