@@ -7,10 +7,11 @@
 <title>Plugin preview - Falcon Player</title>
 <!--
   Renders a plugin's pluginInfo.json the way FPP's Plugin Manager will show it:
-  the card in the plugin list (six privacy dots) and the install dialog (trust
-  callout, label line, the author's summary, six chips with their detail lines,
-  the author's `other` text, install button; FPP's headline is shown only for a
-  block with no disclosure - for a declared block it is the card's tooltip).
+  the card in the plugin list (six privacy dots) and the install dialog (the
+  "name by author" line, label line, the author's summary, six chips whose
+  detail lines are their tooltips, and a collapsed "Full disclosure" holding
+  those lines and the author's `other` text; FPP's headline is shown only for
+  a block with no disclosure - for a declared block it is the card's tooltip).
   The colours and every sentence come from
   fpp-privacy-lights.js, the SAME script FPP itself runs, loaded straight from
   the FPP repo (www/js/fpp-privacy-lights.js on master) via jsDelivr - nothing
@@ -93,11 +94,7 @@ p{margin-top:0;margin-bottom:1rem}
 .text-bg-graceful{background:var(--bs-primary-bg-subtle);color:var(--bs-primary-text-emphasis);border:1px solid var(--bs-primary-border-subtle)}
 .pluginPrivacyChip{font-family:inherit;font-size:.8em;padding:.45em .8em;background-clip:padding-box}
 button.pluginPrivacyChip{cursor:pointer}
-.pluginPrivacyChip[aria-expanded="true"]{box-shadow:inset 0 0 0 1px currentColor}
-.pluginPrivacyChip[data-level="r"]{cursor:default}
-.pluginPrivacyChip[data-level="n"]{border-style:dashed!important}
 .pluginPrivacyChip:focus-visible{outline:2px solid var(--bs-link-color);outline-offset:2px}
-.pluginPrivacyChip[aria-expanded="true"] .fa-caret-right{transform:rotate(90deg)}
 /* modal (Bootstrap 5.3) */
 .modal-content{position:relative;display:flex;flex-direction:column;width:100%;color:var(--bs-body-color);background-color:var(--bs-body-bg);background-clip:padding-box;border:1px solid var(--bs-border-color-translucent);border-radius:.5rem;box-shadow:var(--pp-shadow)}
 .modal-header{display:flex;flex-shrink:0;align-items:center;padding:1.5rem 1.5rem;border-bottom:1px solid var(--bs-border-color)}
@@ -186,9 +183,9 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
     <section class="ppsection">
       <h2>Install dialog</h2>
       <div class="ppmodalwrap"><div class="modal-content" role="dialog" aria-labelledby="dlgTitle">
-        <div class="modal-header"><h5 class="modal-title" id="dlgTitle">Install third-party plugin?</h5><button type="button" class="btn-close" aria-label="Close" tabindex="-1"></button></div>
+        <div class="modal-header"><h5 class="modal-title" id="dlgTitle">Install plugin?</h5><button type="button" class="btn-close" aria-label="Close" tabindex="-1"></button></div>
         <div class="modal-body" id="confirmInstallDialog"></div>
-        <div class="modal-footer"><button type="button" class="btn" id="installBtn">Install</button><button type="button" class="btn btn-secondary">Cancel</button></div>
+        <div class="modal-footer"><button type="button" class="btn btn-success" id="installBtn">Install</button><button type="button" class="btn btn-secondary">Cancel</button></div>
       </div></div>
       <div class="ppnote">
         <p>This is what the author <b>declared</b>, rendered by FPP. Nothing here is checked against the plugin's code: the listing check that does that (<code>lint_plugin.py</code>) runs when you <a href="../submit_new_plugin/">submit the plugin</a>, and a contradiction between the code and this block is a blocker there.</p>
@@ -266,8 +263,9 @@ function PrivacyRowHtml(data) {
   return '<span class="ms-auto d-inline-flex align-items-center small">' +
     FPPPluginPrivacy.stripHtml(PluginPrivacyResult(data), { compact: true }) + "</span>";
 }
-// Label line, the author's summary, the strip and its lines, then the
-// author's `other` text - the same order as plugins.php. The headline of a
+// Label line, the author's summary, the strip, then "Full disclosure"
+// (every chip's line and the author's `other` text) - the same order as
+// plugins.php. The headline of a
 // declared block is its worst chip's text again, so FPP shows it only for a
 // block with no disclosure (and as the card's tooltip).
 function PrivacyBlockHtml(r, prefix) {
@@ -279,23 +277,16 @@ function PrivacyBlockHtml(r, prefix) {
   h += FPPPluginPrivacy.summaryHtml(r);
   if (!r.declared) h += FPPPluginPrivacy.headlineHtml(r);
   h += FPPPluginPrivacy.stripHtml(r, { prefix: prefix });
-  h += FPPPluginPrivacy.detailsHtml(r);
+  h += FPPPluginPrivacy.detailsHtml(r, { prefix: prefix });
   return h;
 }
-function PluginTrustHtml(data) {
-  if (data && IsOfficialPlugin(data))
-    return '<div class="d-flex gap-2 align-items-start p-2 mb-2 rounded border bg-success-subtle border-success-subtle text-success-emphasis"><i class="fas fa-circle-check mt-1"></i><div>' +
-      '<p class="fw-bold mb-1">Maintained by the FPP project &mdash; but it still runs as root.</p>' +
-      '<p class="mb-0">It can read and change any setting, including the privacy settings, and reach anything else on the network FPP is connected to.</p></div></div>';
-  var author = PluginAuthorHtml(data) || EscapeHtml((data && data.author) ? data.author : "the author");
-  return '<div class="d-flex gap-2 align-items-start p-2 mb-2 rounded border bg-danger-subtle border-danger-subtle text-danger-emphasis"><i class="fas fa-triangle-exclamation mt-1"></i><div>' +
-    '<p class="fw-bold mb-1">Warning: this plugin is untrusted third-party code that will run on your FPP as root.</p>' +
-    '<p class="mb-0">It can read and change any setting, including the privacy settings, reach anything else on the ' +
-    "network FPP is connected to, and do anything at all once installed &mdash; including things not listed below. " +
-    "This is inherently dangerous. The FPP project does not test, vet, or guarantee the quality or safety of plugins. " +
-    "Install at your own risk, and only if you trust <b>" + author + "</b>. Plugins marked " +
-    '<span class="badge text-bg-graceful"><i class="fas fa-certificate"></i> Official</span> are maintained by the FPP team; this one is not.</p>' +
-    "</div></div>";
+// "Name by Author [Official]", the line that heads the install dialog.
+function PluginByLineHtml(data) {
+  var author = PluginAuthorHtml(data) || EscapeHtml(data.author || "");
+  return '<div class="mb-2"><b>' + EscapeHtml(data.name) + "</b>" +
+    (author ? ' <span class="text-secondary">by ' + author + "</span>" : "") +
+    (IsOfficialPlugin(data) ? ' <span class="badge text-bg-graceful"><i class="fas fa-certificate"></i> Official</span>' : "") +
+    "</div>";
 }
 
 // ---- render ---------------------------------------------------------------
@@ -326,21 +317,19 @@ function render(data, sourceUrl) {
   h += "</div></div>";
   $("card").innerHTML = h;
 
-  // Install dialog, as ConfirmInstall in plugins.php builds it. The
+  // Install dialog, as ShowInstallDialog in plugins.php builds it. The
   // "installing from a URL" developer callout is left out: it is about the
-  // install path, not the plugin.
+  // install path, not the plugin. The Install button is always "Install"
+  // here; FPP turns it into "Install anyway" only for its own device and
+  // version checks, never for the privacy lights.
   var src = data.srcURL || "";
-  var body = PluginTrustHtml(data);
+  var body = PluginByLineHtml(data);
   var r = PluginPrivacyResult(data);
   body += PrivacyBlockHtml(r, "ci");
   if (IsSafeHttpUrl(src)) body += '<div class="small text-secondary mt-2"><i class="fas fa-code"></i> Source: ' +
     '<a href="' + EscapeAttr(src) + '" target="_blank" rel="noopener noreferrer">' + EscapeHtml(src) + "</a></div>";
-  $("dlgTitle").textContent = official ? "Install this plugin?" : "Install third-party plugin?";
   $("confirmInstallDialog").innerHTML = body;
   FPPPluginPrivacy.bind("confirmInstallDialog");
-  var btn = FPPPluginPrivacy.installButtonFor(r);
-  $("installBtn").textContent = btn.text;
-  $("installBtn").className = "btn " + btn.cls;
 
   $("srcNote").innerHTML = sourceUrl
     ? "Read from <a href=\"" + EscapeAttr(sourceUrl) + "\" target=\"_blank\" rel=\"noopener\">" + EscapeHtml(sourceUrl) + "</a>."

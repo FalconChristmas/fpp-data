@@ -85,10 +85,6 @@ p{margin-top:0;margin-bottom:1rem}
 .badge{--bs-badge-padding-x:.65em;--bs-badge-padding-y:.35em;--bs-badge-font-size:.75em;--bs-badge-font-weight:700;--bs-badge-border-radius:.375rem;display:inline-block;padding:var(--bs-badge-padding-y) var(--bs-badge-padding-x);font-size:var(--bs-badge-font-size);font-weight:var(--bs-badge-font-weight);line-height:1;text-align:center;white-space:nowrap;vertical-align:baseline;border-radius:var(--bs-badge-border-radius)}
 .pluginPrivacyChip{font-family:inherit;font-size:.8em;padding:.45em .8em;background-clip:padding-box}
 button.pluginPrivacyChip{cursor:pointer}
-.pluginPrivacyChip[aria-expanded="true"]{box-shadow:inset 0 0 0 1px currentColor}
-.pluginPrivacyChip[data-level="r"]{cursor:default}
-.pluginPrivacyChip[data-level="n"]{border-style:dashed!important}
-.pluginPrivacyChip[aria-expanded="true"] .fa-caret-right{transform:rotate(90deg)}
 details>summary{cursor:pointer}
 pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.8rem;line-height:1.4;background:var(--bs-tertiary-bg);border:1px solid var(--bs-border-color);border-radius:.375rem;padding:.75rem;overflow-x:auto;white-space:pre;margin:0}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.875em;color:inherit;background:var(--bs-tertiary-bg);padding:.05em .3em;border-radius:.25rem}
@@ -152,7 +148,6 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
 .tbl th{color:var(--bs-secondary-color);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.03em}
 .out{position:relative} .out .copy{position:absolute;top:.5rem;right:.5rem}
 .preview{border:1px solid var(--bs-border-color-translucent);border-radius:.5rem;padding:1rem;background:var(--bs-body-bg);box-shadow:var(--pp-shadow)}
-.installbtn{margin-top:.75rem;text-align:right}
 @media (max-width:480px){.panel{padding:1rem}}
 </style>
 </head>
@@ -280,7 +275,6 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
       <div id="previewWrap">
         <h3 class="small text-uppercase text-secondary mb-1">How FPP will show it</h3>
         <div class="preview" id="preview"></div>
-        <div class="installbtn"><span class="btn" id="installBtn">Install</span></div>
       </div>
       <label>The <code>privacy</code> block</label>
       <div class="out"><button type="button" class="btn btn-outline btn-sm copy" data-copy="blockOut">Copy</button><pre id="blockOut"></pre></div>
@@ -594,22 +588,18 @@ function renderResult() {
   var pv = $("preview");
   if (typeof FPPPluginPrivacy === "undefined") {
     pv.innerHTML = '<div class="small text-secondary">The live preview needs FPP\'s own renderer (<code>fpp-privacy-lights.js</code>), which could not be loaded from the FPP repository. The block below is still complete.</div>';
-    $("installBtn").hidden = true;
     return;
   }
   var r = FPPPluginPrivacy.evaluate(block, { unreviewed: true });
   var h = '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; not verified by FPP</div>';
-  // Same order as FPP's install dialog: summary, strip, other. The headline
+  // Same order as FPP's install dialog: summary, strip, Full disclosure
+  // (every chip's line and the author's `other` text). The headline
   // is shown only for a block with no disclosure (and as the card tooltip).
   h += FPPPluginPrivacy.summaryHtml(r);
   if (!r.declared) h += FPPPluginPrivacy.headlineHtml(r);
-  h += FPPPluginPrivacy.stripHtml(r, { prefix: "pv" }) + FPPPluginPrivacy.detailsHtml(r);
+  h += FPPPluginPrivacy.stripHtml(r, { prefix: "pv" }) + FPPPluginPrivacy.detailsHtml(r, { prefix: "pv" });
   pv.innerHTML = h;
   FPPPluginPrivacy.bind("preview");
-  var btn = FPPPluginPrivacy.installButtonFor(r);
-  $("installBtn").hidden = false;
-  $("installBtn").textContent = btn.text;
-  $("installBtn").className = "btn " + btn.cls;
 }
 
 // ---- events ---------------------------------------------------------------
