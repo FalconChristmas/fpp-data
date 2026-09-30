@@ -254,10 +254,10 @@ function PluginAuthorHtml(data) {
     return '<a href="' + EscapeAttr(profile) + '" target="_blank" rel="noopener noreferrer">' + EscapeHtml(owner) + "</a>";
   } catch (e) { return ""; }
 }
-// A preview is by definition not from pluginList.json: same label line FPP
-// shows for a plugin loaded from a pasted URL.
+// Rendered as FPP will show it once listed, which is what an author is
+// checking here (a pasted-URL install gets a different label line).
 function PluginPrivacyResult(data) {
-  return FPPPluginPrivacy.evaluate(data ? data.privacy : null, { unreviewed: true });
+  return FPPPluginPrivacy.evaluate(data ? data.privacy : null);
 }
 function PrivacyRowHtml(data) {
   return '<span class="ms-auto d-inline-flex align-items-center small">' +
@@ -271,11 +271,9 @@ function PrivacyRowHtml(data) {
 function PrivacyBlockHtml(r, prefix) {
   // No block at all: FPP's red warning in place of the label line.
   var h = r.declared
-    ? '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; not verified by FPP</div>'
+    ? '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; checked automatically against its code for the plugin list</div>'
     : '<div class="d-flex gap-2 align-items-start p-2 mb-2 rounded border bg-danger-subtle border-danger-subtle text-danger-emphasis"><i class="fas fa-triangle-exclamation mt-1"></i><div>' +
       "<b>" + EscapeHtml(r.headline.text) + ".</b> " + EscapeHtml(r.headline.explain || "") + "</div></div>";
-  if (r.unreviewed && r.declared)
-    h += '<div class="small text-secondary mb-1">Loaded from a URL, not from the plugin list: this disclosure was not reviewed for the plugin list.</div>';
   h += FPPPluginPrivacy.summaryHtml(r);
   h += FPPPluginPrivacy.stripHtml(r, { prefix: prefix });
   h += FPPPluginPrivacy.detailsHtml(r, { prefix: prefix });

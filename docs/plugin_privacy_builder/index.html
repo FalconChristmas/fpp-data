@@ -253,7 +253,7 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
       <label class="choice"><input type="radio" name="closedCode" value="false"> Yes - everything is in the repo, from a public package source, or an open-source project's own release (its .deb from GitHub releases, say)
         <span class="d">Green: "Author says all its software can be checked". (A <code>download</code> system change still makes this amber.)</span></label>
       <label class="choice"><input type="radio" name="closedCode" value="true"> No - something that runs cannot be read: a prebuilt binary with no public source, a downloaded .so, a vendor installer or an obfuscated script
-        <span class="d">Red: "Includes software that can't be checked", and the headline becomes "Part of this plugin is a black box".</span></label>
+        <span class="d">Red: "Includes closed-source software", which also becomes the headline. It is disclosure, not a fault: it does not change FPP's Install button.</span></label>
       <div class="err" id="closedCodeErr"></div>
     </section>
 
@@ -590,8 +590,8 @@ function renderResult() {
     pv.innerHTML = '<div class="small text-secondary">The live preview needs FPP\'s own renderer (<code>fpp-privacy-lights.js</code>), which could not be loaded from the FPP repository. The block below is still complete.</div>';
     return;
   }
-  var r = FPPPluginPrivacy.evaluate(block, { unreviewed: true });
-  var h = '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; not verified by FPP</div>';
+  var r = FPPPluginPrivacy.evaluate(block);
+  var h = '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; checked automatically against its code for the plugin list</div>';
   // Same order as FPP's install dialog: summary, strip, Full disclosure
   // (every chip's line and the author's `other` text). The headline
   // is shown only for a block with no disclosure (and as the card tooltip).
