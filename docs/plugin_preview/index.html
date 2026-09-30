@@ -269,13 +269,14 @@ function PrivacyRowHtml(data) {
 // declared block is its worst chip's text again, so FPP shows it only for a
 // block with no disclosure (and as the card's tooltip).
 function PrivacyBlockHtml(r, prefix) {
+  // No block at all: FPP's red warning in place of the label line.
   var h = r.declared
     ? '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; not verified by FPP</div>'
-    : '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">No disclosure</span> &middot; the author has not said what this plugin does with data</div>';
+    : '<div class="d-flex gap-2 align-items-start p-2 mb-2 rounded border bg-danger-subtle border-danger-subtle text-danger-emphasis"><i class="fas fa-triangle-exclamation mt-1"></i><div>' +
+      "<b>" + EscapeHtml(r.headline.text) + ".</b> " + EscapeHtml(r.headline.explain || "") + "</div></div>";
   if (r.unreviewed && r.declared)
     h += '<div class="small text-secondary mb-1">Loaded from a URL, not from the plugin list: this disclosure was not reviewed for the plugin list.</div>';
   h += FPPPluginPrivacy.summaryHtml(r);
-  if (!r.declared) h += FPPPluginPrivacy.headlineHtml(r);
   h += FPPPluginPrivacy.stripHtml(r, { prefix: prefix });
   h += FPPPluginPrivacy.detailsHtml(r, { prefix: prefix });
   return h;
@@ -319,9 +320,9 @@ function render(data, sourceUrl) {
 
   // Install dialog, as ShowInstallDialog in plugins.php builds it. The
   // "installing from a URL" developer callout is left out: it is about the
-  // install path, not the plugin. The Install button is always "Install"
-  // here; FPP turns it into "Install anyway" only for its own device and
-  // version checks, never for the privacy lights.
+  // install path, not the plugin. The Install button reads "Install", or
+  // "Install anyway" for a plugin with no privacy block; FPP's device and
+  // version checks, which also force it, are not previewed.
   var src = data.srcURL || "";
   var body = PluginByLineHtml(data);
   var r = PluginPrivacyResult(data);
@@ -329,6 +330,8 @@ function render(data, sourceUrl) {
   if (IsSafeHttpUrl(src)) body += '<div class="small text-secondary mt-2"><i class="fas fa-code"></i> Source: ' +
     '<a href="' + EscapeAttr(src) + '" target="_blank" rel="noopener noreferrer">' + EscapeHtml(src) + "</a></div>";
   $("confirmInstallDialog").innerHTML = body;
+  $("installBtn").textContent = r.declared ? "Install" : "Install anyway";
+  $("installBtn").className = "btn " + (r.declared ? "btn-success" : "btn-warning");
   FPPPluginPrivacy.bind("confirmInstallDialog");
 
   $("srcNote").innerHTML = sourceUrl

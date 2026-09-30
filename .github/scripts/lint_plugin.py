@@ -1520,10 +1520,8 @@ def _default_credential_hits(root: str, exts=(".php", ".js")):
 # needs the human review.
 
 # A missing block is a listing BLOCKER outright - the original 2027-01-01 grace
-# period was dropped for listing. FPP's own
-# www/js/fpp-privacy-lights.js still keys the install dialog's grey-vs-red
-# "No privacy disclosure" state to its own date; that's the player's concern,
-# not the listing's.
+# period was dropped, for listing and (since late September 2026) in FPP's own
+# install dialog, which shows a plugin with no block in red.
 
 # The v3 vocabulary: eight keys, the keys inside each array item, the enums the
 # linter reasons about, and the soft length caps (spec §1; the schema carries
