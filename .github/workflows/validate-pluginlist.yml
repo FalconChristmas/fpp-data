@@ -42,11 +42,16 @@ jobs:
       - name: Install dependencies
         run: pip install --quiet jsonschema
 
-      # Grab the base-branch copy of pluginList.json so the validator can diff-scope.
-      # `|| true` so a first-time file (no base) doesn't fail the step.
+      # Grab the base-branch copy of pluginList.json so the validator can diff-scope
+      # and check that no dateAdded changed. Written to a temp file and moved into
+      # place only on success: a failed `git show` used to leave an empty file that
+      # silently turned those checks off. With no base file the validator reports
+      # an error instead.
       - name: Fetch base pluginList.json
         run: |
-          git show "origin/${{ github.base_ref }}:pluginList.json" > base_pluginList.json 2>/dev/null || echo "no base file (validating all entries)"
+          git show "origin/${{ github.base_ref }}:pluginList.json" > "$RUNNER_TEMP/base.json" \
+            && mv "$RUNNER_TEMP/base.json" base_pluginList.json \
+            || echo "::error::could not read pluginList.json from origin/${{ github.base_ref }}"
 
       - name: Validate
         id: validate

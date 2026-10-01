@@ -9,18 +9,19 @@
   "properties": {
     "pluginList": {
       "type": "array",
-      "description": "One entry per plugin: [displayName, pluginInfoURL] or [displayName, pluginInfoURL, category].",
+      "description": "One entry per plugin: [displayName, pluginInfoURL, category, dateAdded].",
       "items": {
         "type": "array",
-        "description": "A positional tuple. Element 2 (category) is optional and backward-compatible.",
-        "minItems": 2,
-        "maxItems": 3,
+        "description": "A positional tuple; all four elements are required. FPP reads entries by index (older releases only [0] and [1]) and ignores elements it doesn't know.",
+        "minItems": 4,
+        "maxItems": 4,
         "prefixItems": [
           { "type": "string", "minLength": 1, "description": "Display/repo name (used as the entry key)." },
           { "type": "string", "pattern": "^https://raw\\.githubusercontent\\.com/", "description": "Raw URL to the plugin's pluginInfo.json. Must be hosted on GitHub — that's the only source FPP plugins support." },
-          { "type": "string", "minLength": 1, "description": "Category short name (must exist in pluginCategories.json)." }
+          { "type": "string", "minLength": 1, "description": "Category short name (must exist in pluginCategories.json)." },
+          { "type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "minLength": 10, "maxLength": 10, "description": "Date the plugin was first listed, ISO YYYY-MM-DD (UTC): the date its listing PR was prepared. Set once and never changed; a correction goes in a PR that changes nothing but dates." }
         ],
-        "items": { "type": "string" }
+        "items": false
       }
     }
   }

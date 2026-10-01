@@ -28,10 +28,11 @@ from lib_plugin_schema import field, load_category_map, resolve_repo_name  # noq
 
 NAME_RE = re.compile(r'^\s*\[\s*"([^"]*)"')
 # Group 1: everything through the third field's opening quote. Group 2: the category
-# text itself. Group 3: closing quote through end-of-line, tolerating both a trailing
+# text itself. Group 3: closing quote through end-of-line - including the 4th
+# dateAdded element, which is carried over untouched - tolerating both a trailing
 # comma (every entry but the last) and none (the last entry), and both a space and no
 # space before the closing `]` (both styles already exist in pluginList.json).
-ENTRY_RE = re.compile(r'^(\s*\[\s*"[^"]*"\s*,\s*"[^"]*"\s*,\s*")([^"]*)("\s*\][^\n]*\n?)$')
+ENTRY_RE = re.compile(r'^(\s*\[\s*"[^"]*"\s*,\s*"[^"]*"\s*,\s*")([^"]*)("(?:\s*,\s*"[^"]*")?\s*\][^\n]*\n?)$')
 
 
 def change_category(text: str, repo_name: str, new_short: str) -> tuple[str | None, str | None, str | None]:
