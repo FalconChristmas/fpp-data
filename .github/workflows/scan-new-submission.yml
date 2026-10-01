@@ -466,7 +466,7 @@ jobs:
             lines.push(`**Submitted by:** @${reporter}`);
             if (registeredOwner) {
               const same = registeredOwner.toLowerCase() === reporter.toLowerCase();
-              lines.push(`**Registered owner (from srcURL):** @${registeredOwner}` +
+              lines.push(`**Registered owner (on GitHub):** @${registeredOwner}` +
                 (same ? ' (matches submitter)'
                       : result.owner_confirmed
                         ? ' - differs from the submitter, but ownership was verified via `submissionToken` in pluginInfo.json.'

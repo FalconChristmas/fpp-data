@@ -29,10 +29,12 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib_plugin_schema import (  # noqa: E402
     branch_findings,
+    branch_for_major,
     compatible_with_major,
     fetch_json,
     field,
@@ -42,6 +44,8 @@ from lib_plugin_schema import (  # noqa: E402
     load_pluginlist,
     parse_github_repo,
     parse_raw_github_repo,
+    resolved_repo,
+    source_repo_findings,
     repo_metadata_findings,
     schema_validation_error,
 )
@@ -90,6 +94,9 @@ def already_listed(repo_name: str, plugin_list_path: str) -> bool:
 
 CLONE_TIMEOUT = 60  # seconds
 
+# BEST_PRACTICE codes reported as OPTIONAL on a submission (see the verdict in main()).
+NEVER_BLOCKS = frozenset({"privacy-text-length"})
+
 
 def clone_repo(owner: str, repo: str, dest: str, branch: str | None = None) -> str | None:
     """Shallow-clone into dest. Returns an error string, or None on success.
@@ -110,6 +117,31 @@ def clone_repo(owner: str, repo: str, dest: str, branch: str | None = None) -> s
         if proc.returncode == 0:
             return None
     return f"git clone of {owner}/{repo} failed: {proc.stderr.strip()[:300]}"
+
+
+def install_ref(info: dict | None, target_major, branches: set[str] | None) -> str:
+    """The branch FPP installs for `target_major`, if it is one of the repo's
+    branches (`branches`, from gh_list_branches): raw.githubusercontent.com and git
+    also take a commit SHA or refs/pull/N/head, which anyone can create without
+    write access. Anything else, or no branch list, is HEAD (the default branch).
+    The submission token is read from, and the lint runs on, this one ref."""
+    ref = branch_for_major((info or {}).get("versions") or [], target_major)
+    if not ref or branches is None or ref not in branches:
+        return "HEAD"
+    return ref
+
+
+def read_submission_token(owner: str, repo: str, info: dict | None, target_major,
+                          branches: set[str] | None) -> tuple[str, str, str | None]:
+    """(token, ref, error) - submissionToken from pluginInfo.json in owner/repo itself,
+    on install_ref()'s branch."""
+    ref = install_ref(info, target_major, branches)
+    src_info, err = fetch_json(f"https://raw.githubusercontent.com/{owner}/{repo}/"
+                               f"{urllib.parse.quote(ref, safe='/')}/pluginInfo.json")
+    if err is None and not isinstance(src_info, dict):
+        err = f"pluginInfo.json in `{owner}/{repo}` on `{ref}` is not a JSON object"
+    token = str(src_info.get("submissionToken", "")).strip() if isinstance(src_info, dict) else ""
+    return token, ref, err
 
 
 def main():
@@ -179,6 +211,8 @@ def main():
 
     owner_confirmed = True
     linted = False
+    branches = None
+    resolved = None
     if already:
         findings.append((BLOCKER, "already-listed",
                           f"`{repo_name}` is already in pluginList.json - nothing to do here."))
@@ -186,11 +220,19 @@ def main():
         # --- repo metadata (archived / issues-disabled / bugURL) ----------------
         if gh:
             owner, repo = gh
-            meta, _ = gh_get_repo(owner, repo, token)
+            meta, meta_err = gh_get_repo(owner, repo, token)
             if meta:
                 findings.extend(repo_metadata_findings(meta, (info or {}).get("bugURL", "")))
+            else:
+                # Without it neither who owns the repo now nor whether srcURL was
+                # renamed or transferred can be checked - fail closed, not open.
+                findings.append((BLOCKER, "repo-unavailable",
+                    f"could not read `{owner}/{repo}` from the GitHub API ({meta_err}), so its current owner "
+                    f"and name cannot be checked. If the repo is public, comment `/recheck` to try again."))
+            resolved = resolved_repo(meta)
             branches, _ = gh_list_branches(owner, repo, token)
             findings.extend(branch_findings(info or {}, branches))
+            findings.extend(source_repo_findings(info or {}, args.plugininfo_url, resolved, branches))
 
         # --- ownership: submitter must own the repo, or prove write access -----
         # Unlike removal (verify_remove_plugin.py), a submission had NO ownership check
@@ -199,22 +241,33 @@ def main():
         # a specific string to their OWN pluginInfo.json. The token is tied to this one
         # issue (not a permanent flag like "delist") so an old, already-approved
         # submission's public token can't be replayed as proof for a different request.
-        if gh and args.reporter and gh[0].lower() != args.reporter.lower():
+        # The owner is the one GitHub resolves the repo to now, not the name in
+        # srcURL: after a transfer the old owner's name still redirects there.
+        real = resolved or gh
+        if real and args.reporter and real[0].lower() != args.reporter.lower():
             expected = f"fpp-{args.issue_number}"
-            got = str((info or {}).get("submissionToken", "")).strip()
+            # Read the token from the repo being listed, on the branch FPP installs:
+            # the copy at the submitted URL can live in any repo whose srcURL merely
+            # names this one, so a token there proves nothing about this repo.
+            got, ref, err = read_submission_token(real[0], real[1], info, args.target_major, branches)
             if got != expected:
                 owner_confirmed = False
                 findings.append((BLOCKER, "owner-unconfirmed",
-                    f"submitter @{args.reporter} does not match `{gh[0]}`, this repo's registered owner "
-                    f"(from srcURL). Add `\"submissionToken\": \"{expected}\"` to your pluginInfo.json and "
-                    f"comment `/recheck` to prove you have write access here."))
+                    f"submitter @{args.reporter} does not match `{real[0]}`, this repo's owner on GitHub. "
+                    + (f"Could not read its pluginInfo.json to check for a submission token ({err}). " if err else "")
+                    + f"Add `\"submissionToken\": \"{expected}\"` to pluginInfo.json in "
+                    f"`{real[0]}/{real[1]}` on {'the default branch' if ref == 'HEAD' else f'the `{ref}` branch'} and comment `/recheck` to prove you have "
+                    f"write access here."))
 
         # --- clone + static lint -------------------------------------------------
         if gh:
             owner, repo = gh
             with tempfile.TemporaryDirectory() as tmp:
                 dest = os.path.join(tmp, repo)
-                clone_err = clone_repo(owner, repo, dest)
+                # Lint what FPP installs on the current major - the same ref the
+                # submission token is read from - not the default branch.
+                ref = install_ref(info, args.target_major, branches)
+                clone_err = clone_repo(owner, repo, dest, None if ref == "HEAD" else ref)
                 if clone_err:
                     findings.append((BLOCKER, "clone-failed", clone_err))
                 else:
@@ -227,6 +280,10 @@ def main():
 
     # --- verdict ---------------------------------------------------------------
     # Stricter than the new-major-release scan: BEST_PRACTICE blocks a new submission, not just BLOCKER.
+    # Except the privacy text-length caps, which the spec promises never block: an
+    # over-long line crowds FPP's install dialog but hides nothing from it. Reported
+    # as OPTIONAL so the issue comment lists it under "Optional polish".
+    findings = [(OPTIONAL if c in NEVER_BLOCKS else s, c, m) for s, c, m in findings]
     blocking = [f for f in findings if f[0] in (BLOCKER, BEST_PRACTICE)]
     advisory = [f for f in findings if f[0] == OPTIONAL]
 
@@ -234,7 +291,9 @@ def main():
         "pass": not blocking,
         "already_listed": already,
         "linted": linted,
-        "owner": gh[0] if gh else None,   # registered owner from srcURL - may differ from the submitter
+        # The repo's owner on GitHub now (what the ownership check used), else the
+        # name in srcURL - may differ from the submitter.
+        "owner": (resolved or gh)[0] if gh else None,
         "owner_confirmed": owner_confirmed,
         "repo_name": repo_name,
         "repo_url": f"https://github.com/{gh[0]}/{gh[1]}" if gh else None,

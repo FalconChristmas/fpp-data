@@ -178,12 +178,14 @@ class Vocabulary(unittest.TestCase):
         pv["summary"] = "s" * 201
         pv["sends"][0]["what"] = "w" * 101
         pv["collects"][0]["what"] = "c" * 100  # exactly at the cap: fine
-        pv["systemChanges"][0]["what"] = "x" * 121
+        pv["systemChanges"][0]["what"] = "x" * 151
         fs = privacy_findings({"a.php": "<?php echo 1;"}, pv)
         self.assertEqual([(f.severity, f.code) for f in fs], [(L.BEST_PRACTICE, "privacy-text-length")])
         self.assertIn("summary (201 > 200)", fs[0].message)
         self.assertIn("sends[0].what (101 > 100)", fs[0].message)
-        self.assertIn("systemChanges[0].what (121 > 120)", fs[0].message)
+        self.assertIn("systemChanges[0].what (151 > 150)", fs[0].message)
+        pv["systemChanges"][0]["what"] = "x" * 150  # exactly at the raised cap: fine
+        self.assertNotIn("systemChanges[0]", privacy_findings({"a.php": "<?php echo 1;"}, pv)[0].message)
         self.assertNotIn("collects[0]", fs[0].message)
         self.assertEqual(codes(privacy_findings({"a.php": "<?php echo 1;"}, FULL_PRIVACY)), [])
 
@@ -462,6 +464,74 @@ class ClosedCodeUnverified(unittest.TestCase):
         self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), [])
 
 
+class CommittedBinaries(unittest.TestCase):
+    """privacy-undeclared-closedcode: a compiled file committed with no source for
+    it contradicts closedCode: false, whatever it is named."""
+    ELF = "\x7fELF\x02\x01\x01" + "\x00" * 57
+
+    def test_binary_without_source_contradicts(self):
+        for files in ({"bin/helper": self.ELF}, {"data/model.dat": self.ELF}, {"lib/foo.cpython-311.pyc": "x"}):
+            fs = privacy_findings(files, EMPTY_PRIVACY)
+            self.assertEqual([(f.severity, f.code) for f in fs], [(L.BLOCKER, "privacy-undeclared-closedcode")], files)
+
+    def test_packaged_library_is_asked_about(self):
+        # A vendored .jar/.whl is often an open project: confirm, don't contradict.
+        for files in ({"libs/vendor.jar": "x"}, {"wheels/thing-1.0-py3-none-any.whl": "x"}):
+            fs = privacy_findings(files, EMPTY_PRIVACY)
+            self.assertEqual([(f.severity, f.code) for f in fs], [(L.BEST_PRACTICE, "privacy-closedcode-unverified")], files)
+            self.assertIn(next(iter(files)), fs[0].message)
+
+    def test_binary_with_its_source_is_open(self):
+        for files in ({"bin/helper": self.ELF, "src/helper.c": "int main(){}\n"},
+                      {"libfpp-thing.so.1": self.ELF, "Makefile": "all:\n", "src/plugin.cpp": "\n"},
+                      {"lib/foo.cpython-311.pyc": "x", "lib/foo.py": "\n"}):
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), [], files)
+
+    def test_header_is_not_source(self):
+        fs = privacy_findings({"lib/libvendor.so": self.ELF, "lib/vendor.h": "int f(void);\n"}, EMPTY_PRIVACY)
+        self.assertEqual(codes(fs), ["privacy-undeclared-closedcode"])
+        fs = privacy_findings({"libvendor.so": self.ELF, "vendor.hpp": "\n", "Makefile": "all:\n"}, EMPTY_PRIVACY)
+        self.assertEqual(codes(fs), ["privacy-undeclared-closedcode"])
+
+    def test_build_tree_exemption_is_local(self):
+        # A Makefile and source elsewhere in the repo say nothing about a binary
+        # in another top-level directory.
+        fs = privacy_findings({"Makefile": "all:\n", "src/plugin.cpp": "\n", "tools/closed/helper": self.ELF},
+                              EMPTY_PRIVACY)
+        self.assertEqual(codes(fs), ["privacy-undeclared-closedcode"])
+        fs = privacy_findings({"tools/Makefile": "all:\n", "tools/a.c": "\n", "helper/bin/helper": self.ELF},
+                              EMPTY_PRIVACY)
+        self.assertEqual(codes(fs), ["privacy-undeclared-closedcode"])
+        # A real build tree: the .so at the root and the objects under src/ next to
+        # their .cpp files, one Makefile at the root (fpp-plugin-TMCStepper2).
+        for files in ({"Makefile": "all:\n", "libfpp-thing.so": self.ELF, "src/Axis.cpp": "\n",
+                       "src/Axis.o": self.ELF, "src/Axis.h": "\n", "src/sub/Io.o": self.ELF, "src/sub/Io.cpp": "\n"},
+                      {"tools/Makefile": "all:\n", "tools/src/a.c": "\n", "tools/bin/helper": self.ELF}):
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), [], files)
+        # Build files and source at the repo root vouch only for binaries at the root.
+        for files in ({"Makefile": "all:\n", "plugin.cpp": "\n", "vendor/closed/libblob.so": self.ELF},
+                      {"Makefile": "all:\n", "plugin.cpp": "\n", "bin/helper": self.ELF},
+                      {"setup.py": "\n", "tools/agent.cpython-311.pyc": "x"}):
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), ["privacy-undeclared-closedcode"], files)
+        self.assertEqual(codes(privacy_findings({"Makefile": "all:\n", "plugin.cpp": "\n", "libblob.so": self.ELF},
+                                                EMPTY_PRIVACY)), [])
+        # Source and objects without any build file are not a build tree.
+        fs = privacy_findings({"src/a.cpp": "\n", "src/b.o": self.ELF}, EMPTY_PRIVACY)
+        self.assertEqual(codes(fs), ["privacy-undeclared-closedcode"])
+
+    def test_symlinks_and_special_files_are_not_opened(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.symlink("/usr/bin/python3", os.path.join(tmp, "python"))
+            os.symlink("/dev/zero", os.path.join(tmp, "zero"))
+            os.mkfifo(os.path.join(tmp, "pipe"))
+            self.assertEqual(L._committed_binary_hits(tmp), [])
+
+    def test_declared_closed_is_silent(self):
+        pv = copy.deepcopy(EMPTY_PRIVACY)
+        pv["closedCode"] = True
+        self.assertEqual(codes(privacy_findings({"bin/helper": self.ELF}, pv)), [])
+
+
 class BrowserLoads(unittest.TestCase):
     """A CDN, font or badge host the plugin's own page makes the operator's browser
     load is a `sends` recipient like any other hostname (spec §1, decided 14 Sep) -
@@ -602,6 +672,147 @@ class BrowserLoads(unittest.TestCase):
         files = {"index.php": '<script src="https://example.github.io/lib/lib.min.js"></script>\n'
                               '<img src="https://raw.githubusercontent.com/example/fpp-synthetic/main/logo.png">\n'}
         self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), [])
+
+    def test_minified_and_library_named_code_is_scanned_for_hosts(self):
+        call = "fetch('https://collector.tracklytics.net/c',{method:'POST',body:x});"
+        for name, body in (("js/app.min.js", "var a=1;" * 100 + call + "\n"),
+                           ("js/chart-helper.js", call + "\n"),
+                           ("js/jquery-3.7.1.min.js", call + "\n")):
+            files = {"index.php": '<script src="' + name + '"></script>\n', name: body}
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), ["privacy-csp-blocked-load"], name)
+        files = {"lib/send.php": "<?php " + "$a=1;" * 150 + "$r = file_get_contents('https://collector.tracklytics.net/c?d=' . $d);\n"}
+        self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), ["privacy-undeclared-recipients"])
+
+    def test_github_writes_are_sends(self):
+        reads = {"scripts/check.sh": "#!/bin/bash\ncurl -s https://api.github.com/repos/example/fpp-synthetic/releases/latest\n"}
+        self.assertEqual(codes(privacy_findings(reads, EMPTY_PRIVACY)), [])
+        for line in ("curl -s -X POST -d @log.json https://api.github.com/repos/other/inbox/issues\n",
+                     "curl -s https://api.github.com/gists -d @log.json\n",
+                     "curl -s -F f=@log.json https://uploads.github.com/repos/other/inbox/releases/1/assets\n",
+                     "curl -s -X POST https://gist.github.com/other/abc\n"):
+            files = {"scripts/report.sh": "#!/bin/bash\n" + line}
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), ["privacy-undeclared-recipients"], line)
+        pv = copy.deepcopy(EMPTY_PRIVACY)
+        pv["sends"] = [{"to": "api.github.com", "what": "the fppd log", "why": "bug reports", "alwaysOn": False}]
+        files = {"scripts/report.sh": "#!/bin/bash\ncurl -s -X POST -d @log.json https://api.github.com/repos/other/inbox/issues\n"}
+        self.assertEqual(codes(privacy_findings(files, pv)), [])
+
+    def test_github_reads_with_short_flags_are_not_sends(self):
+        for line in ("curl -s https://gist.github.com/other/abc/raw\n",
+                     "curl -s https://gist.githubusercontent.com/other/abc/raw/x.sh\n",
+                     "curl -s https://api.github.com/gists/abc123\n",
+                     "curl -sG --data-urlencode 'q=fpp' https://api.github.com/search/repositories\n",
+                     "curl --get -d q=fpp https://api.github.com/search/repositories\n",
+                     "curl -f -s https://api.github.com/repos/example/fpp-synthetic/releases/latest\n",
+                     "curl -fsSL https://api.github.com/repos/example/fpp-synthetic/releases/latest\n",
+                     "curl -f -L https://api.github.com/repos/example/fpp-synthetic/tarball\n",
+                     "[ -d /tmp ] && curl https://api.github.com/repos/example/fpp-synthetic/releases\n",
+                     "if [ -f x ]; then wget -q https://api.github.com/repos/example/fpp-synthetic/zipball; fi\n"):
+            files = {"scripts/check.sh": "#!/bin/bash\n" + line}
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), [], line)
+        for line in ("curl -sd @log.json https://api.github.com/repos/other/inbox/issues\n",
+                     "curl -s -d\"{}\" https://api.github.com/repos/other/inbox/issues\n",
+                     "curl -s --request=POST https://api.github.com/repos/other/inbox/issues\n",
+                     "curl -s -XPOST https://api.github.com/repos/other/inbox/issues\n",
+                     "curl -s --json @log.json https://api.github.com/repos/other/inbox/issues\n",
+                     "wget -q --post-file=log.json https://api.github.com/repos/other/inbox/issues\n",
+                     "wget -q --method=POST https://api.github.com/repos/other/inbox/issues\n"):
+            files = {"scripts/report.sh": "#!/bin/bash\n" + line}
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), ["privacy-undeclared-recipients"], line)
+        files = {"js/report.js": "axios.post('https://api.github.com/repos/other/inbox/issues', body);\n",
+                 "index.php": '<script src="js/report.js"></script>\n'}
+        self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), ["privacy-csp-blocked-load"])
+
+    def test_github_write_set_up_over_several_lines(self):
+        php = ('<?php\n$url = "https://api.github.com/repos/other/inbox/issues";\n$ch = curl_init($url);\n'
+               'curl_setopt($ch, CURLOPT_POST, true);\ncurl_setopt($ch, CURLOPT_POSTFIELDS, $body);\n'
+               '$r = curl_exec($ch);\n')
+        sh = ("#!/bin/bash\ncurl -s \\\n  -d @log.json \\\n"
+              "  https://api.github.com/repos/other/inbox/issues/1/comments\n")
+        py = ('import requests\nURL = "https://api.github.com/gists"\n\n\ndef share(log):\n'
+              '    return requests.post(URL, json={"files": log})\n')
+        for rel, text in (("lib/report.php", php), ("scripts/report.sh", sh), ("report.py", py)):
+            self.assertEqual(codes(privacy_findings({rel: text}, EMPTY_PRIVACY)),
+                             ["privacy-undeclared-recipients"], rel)
+
+    def test_release_check_near_an_unrelated_post_stays_a_read(self):
+        # Only endpoints that take a write get the multi-line look; a release check
+        # next to the plugin's own POST to localhost is still a read.
+        php = ('<?php\n$ch = curl_init("https://api.github.com/repos/example/fpp-synthetic/releases/latest");\n'
+               '$r = curl_exec($ch);\n$ch2 = curl_init("http://127.0.0.1/api/command");\n'
+               'curl_setopt($ch2, CURLOPT_POST, true);\n'
+               '$list = file_get_contents("https://api.github.com/repos/example/fpp-synthetic/issues?state=open");\n')
+        self.assertEqual(codes(privacy_findings({"lib/update.php": php}, EMPTY_PRIVACY)), [])
+        # A POST set up for the next request (after another URL) is not this one's.
+        php = ('<?php\n$issues = "https://api.github.com/repos/example/fpp-synthetic/issues";\n$open = curl_init($issues);\n'
+               '$r = curl_exec($open);\n$ch = curl_init("http://127.0.0.1/api/command");\n'
+               'curl_setopt($ch, CURLOPT_POST, true);\n')
+        self.assertEqual(codes(privacy_findings({"lib/list.php": php}, EMPTY_PRIVACY)), [])
+        far = ('<?php\n$list = file_get_contents("https://api.github.com/repos/example/fpp-synthetic/issues");\n'
+               + "$a = 1;\n" * 10 + 'curl_setopt($ch, CURLOPT_POST, true);\n')
+        self.assertEqual(codes(privacy_findings({"lib/list.php": far}, EMPTY_PRIVACY)), [])
+
+    def test_github_write_must_be_near_the_url(self):
+        # A POST thousands of characters away on a minified line says nothing
+        # about a GitHub read on it.
+        line = ("$.ajax({url:'/api/x',type:'POST'});" + "var a=1;" * 400
+                + "var r=fetch('https://api.github.com/repos/example/fpp-synthetic/releases/latest');\n")
+        files = {"js/app.min.js": line, "index.php": '<script src="js/app.min.js"></script>\n'}
+        self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), [])
+
+    def test_decoy_urls_do_not_exhaust_the_budget(self):
+        decoys = "".join(f'a{n}="https://cdn.example-decoy.net/{n}";' for n in range(700))
+        decoys += "".join(f'b{n}="https://localhost/{n}";' for n in range(700))
+        line = decoys + "fetch('https://collector.tracklytics.net/c',{method:'POST',body:x});\n"
+        files = {"js/app.min.js": line, "index.php": '<script src="js/app.min.js"></script>\n'}
+        self.assertIn("privacy-csp-blocked-load", codes(privacy_findings(files, EMPTY_PRIVACY)))
+
+    def test_quoted_curl_url_in_library_named_file(self):
+        files = {"js/chart.min.js": "x=1;\n", "lib/jquery.sync.js": "exec(\"curl -s 'https://collector.tracklytics.net/c'\");\n"}
+        self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), ["privacy-undeclared-recipients"])
+
+    def test_library_file_names(self):
+        # Bundled libraries are skipped by the non-host privacy checks; a plugin's
+        # own file whose name merely contains a library's name is not.
+        lib = ("jquery-3.7.1.min.js", "jquery-ui-1.13.2.custom.min.js", "jquery.validate.min.js",
+               "jquery.dataTables.min.js", "bootstrap.bundle.min.js", "react-dom.production.min.js", "chart.umd.js")
+        lib += ("jquery-ui.structure.min.css", "chartjs-plugin-datalabels.min.js", "bootstrap-icons.css",
+                "moment-timezone.js")
+        own = ("plugin-chart.js", "app-react.js", "x.chart.js", "my.jquery.js", "chart-helper.js", "jquery",
+               "chart.php", "bootstrap.php", "vue.php")
+        for name in lib:
+            self.assertTrue(L._PRIV_LIB_FILE_RX.search(name), name)
+        for name in own:
+            self.assertFalse(L._PRIV_LIB_FILE_RX.search(name), name)
+        for name, want in [(n, []) for n in lib[:3]] + [(n, ["privacy-undeclared-sensors"]) for n in own[:4]]:
+            files = {"js/" + name: "var dev = '/dev/video0';\n"}
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), want, name)
+
+    def test_long_line_url_scan_is_bounded(self):
+        # ~16k distinct URLs on one 1 MB minified line: every URL's context is read
+        # from a bounded window, not from the whole line before it.
+        import time
+        for tpl in ('a=function(){{return"https://cdn{n}.example-lib.net/x"}};ping(e);',
+                    'a={{u:"https://cdn{n}.tracklytics-lib.net/x"}};ping(e);'):
+            line = "".join(tpl.format(n=n) for n in range(16000))
+            self.assertGreater(len(line), 750_000)
+            t = time.monotonic()
+            codes(privacy_findings({"js/bundle.min.js": line + "\n"}, EMPTY_PRIVACY))
+            self.assertLess(time.monotonic() - t, 5, tpl)
+
+    def test_namespace_strings_in_minified_code_are_not_recipients(self):
+        ns = ('var a={ct:"http://schemas.openxmlformats.org/package/2006/content-types",'
+              'm:"http://schemas.microsoft.com/office/2006/relationships",p:"http://purl.oclc.org/ooxml/x",'
+              'o:"http://docs.oasis-open.org/ns/office/1.2/meta",h:"https://sheetjs.com/"};')
+        for name, body in (("js/xlsx.full.min.js", "var b=1;" * 100 + ns + "\n"),
+                           ("js/jquery-3.7.1.min.js", ns + "\n"),
+                           ("js/app.js", "var b=1;" * 100 + ns + "\n")):
+            files = {"index.php": '<script src="' + name + '"></script>\n', name: body}
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), [], name)
+        # The same kind of literal in a short line of the plugin's own code is
+        # still a literal the server-side rules look at.
+        files = {"lib/send.php": "<?php\n$u = 'https://sheetjs.com/x';\n"}
+        self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), ["privacy-undeclared-recipients"])
 
     def test_relative_and_local_src_are_not_loads(self):
         files = {"index.php": '<script src="js/app.js"></script>\n<script src="/plugin.php?plugin=fpp-synthetic&file=x.js"></script>\n'

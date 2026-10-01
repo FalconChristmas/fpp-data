@@ -3,6 +3,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -66,6 +68,85 @@ class ConfigDirMigration(unittest.TestCase):
         self.assertEqual(self.hits(
             '<?php $legacy = $settings[\'configDirectory\'] . "/FPP.X.db";'),
             [("functions.inc.php", "binary")])
+
+
+class StockIniParseSettings(unittest.TestCase):
+    """stock-ini-parse-settings: PHP's parse_ini_file()/parse_ini_string() on a file
+    FPP's WriteSettingToFile() writes (settings, plugin.<name>) fires; the same
+    functions on any other INI file (os-release, the plugin's own .ini) don't."""
+
+    def hits(self, files: dict):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(tmp, files)
+            return sorted((h[0], h[1]) for h in L._stock_ini_parse_hits(tmp))
+
+    def test_plugin_config_via_same_file_variable_fires(self):
+        # AdvancedStats' functions.inc.php, verbatim shape
+        self.assertEqual(self.hits({"functions.inc.php":
+            '<?php\n$pluginConfigFile = $settings[\'configDirectory\'] . "/plugin." . $pluginName;\n'
+            'if (file_exists($pluginConfigFile)){\n$pluginSettings = parse_ini_file($pluginConfigFile);\n}\n'}),
+            [("functions.inc.php", 4)])
+
+    def test_settings_file_literal_fires(self):
+        self.assertEqual(self.hits({"a.php": '<?php $s = parse_ini_file("/home/fpp/media/settings");\n'}),
+                         [("a.php", 1)])
+
+    def test_fpp_settingsfile_global_fires(self):
+        self.assertEqual(self.hits({"a.php": '<?php $s = parse_ini_file($settingsFile, false, INI_SCANNER_RAW);\n'}),
+                         [("a.php", 1)])
+
+    def test_variable_assigned_in_another_file_fires(self):
+        self.assertEqual(self.hits({
+            "functions.inc.php": '<?php $cfg = "/home/fpp/media/config/plugin.X";\n',
+            "plugin_setup.php": '<?php include "functions.inc.php";\n$p = parse_ini_file($cfg);\n'}),
+            [("plugin_setup.php", 2)])
+
+    def test_unassigned_convention_variable_fires(self):
+        self.assertEqual(self.hits({"a.php": '<?php $p = parse_ini_file($pluginConfigFile);\n'}), [("a.php", 1)])
+
+    def test_parse_ini_string_of_file_contents_fires(self):
+        self.assertEqual(self.hits({"a.php":
+            '<?php $f = $settings["configDirectory"] . "/plugin.X";\n$raw = file_get_contents($f);\n'
+            '$p = parse_ini_string($raw);\n'}), [("a.php", 3)])
+
+    def test_os_release_is_skipped(self):
+        self.assertEqual(self.hits({"a.php": '<?php $os = parse_ini_file("/etc/os-release");\n'}), [])
+
+    def test_plugins_own_ini_is_skipped(self):
+        self.assertEqual(self.hits({"a.php":
+            '<?php $iniFile = __DIR__ . "/plugin.ini";\n$c = parse_ini_file($iniFile, true);\n'
+            '$d = parse_ini_file(__DIR__ . "/config/defaults.ini");\n'}), [])
+
+    def test_plugins_own_dotted_ini_is_skipped(self):
+        self.assertEqual(self.hits({"a.php":
+            '<?php $c = parse_ini_file(__DIR__ . "/plugin.defaults.ini");\n'
+            '$d = parse_ini_file("/home/fpp/media/plugindata/x/plugin.settings.ini");\n'}), [])
+
+    def test_function_parameter_is_not_resolved_across_files(self):
+        self.assertEqual(self.hits({
+            "functions.inc.php": '<?php $file = "/home/fpp/media/settings";\n',
+            "lib.php": '<?php\nfunction readIni($file) {\n  return parse_ini_file($file);\n}\n'}), [])
+        # ...but a same-file assignment inside the function still resolves.
+        self.assertEqual(self.hits({"lib.php":
+            '<?php\nfunction readIni($x) {\n  $file = "/home/fpp/media/settings";\n'
+            '  return parse_ini_file($file);\n}\n'}), [("lib.php", 4)])
+
+    def test_custom_parser_and_comments_are_skipped(self):
+        self.assertEqual(self.hits({"a.php":
+            '<?php $p = custom_parse_ini_file($pluginConfigFile);\n'
+            '// $p = parse_ini_file($pluginConfigFile);\n'
+            'function parse_ini_file_safe($f) {}\n$x = $obj->parse_ini_file($settingsFile);\n'}), [])
+
+    def test_finding_is_best_practice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(tmp, {"a.php": '<?php $p = parse_ini_file($pluginConfigFile);\n',
+                             "b.php": '<?php $s = parse_ini_file("/home/fpp/media/settings");\n'})
+            found = [f for f in L.lint_plugin_dir(tmp, "fpp-plugin-X") if f.code == "stock-ini-parse-settings"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].severity, L.BEST_PRACTICE)
+        self.assertIn("a.php:1", found[0].message)
+        self.assertIn("also b.php:1", found[0].message)
+        self.assertIn('ReadSettingFromFile($key, "fpp-plugin-X")', found[0].message)
 
 
 class DestructiveNoGuard(unittest.TestCase):
@@ -905,6 +986,198 @@ class ReReviewFixes(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             write_tree(tmp, {"poll.php": loop, "scripts/postStart.sh": "systemd-run --unit=x php poll.php\n"})
             self.assertEqual(list(L._busy_wait_poll_hits(tmp)), [])
+
+
+
+class SourceRepo(unittest.TestCase):
+    """lib_plugin_schema.source_repo_findings: srcURL is the repo the listing reads
+    pluginInfo.json from, on a branch of it, and still resolves there."""
+    INFO = {"srcURL": "https://github.com/alice/fpp-thing.git"}
+    LISTED = "https://raw.githubusercontent.com/alice/fpp-thing/main/pluginInfo.json"
+
+    def codes(self, **kw):
+        import lib_plugin_schema as lib
+        return [c for _, c, _ in lib.source_repo_findings(self.INFO, kw.get("listed"), kw.get("resolved"),
+                                                           kw.get("branches"))]
+
+    def test_same_repo_any_case_or_git_suffix(self):
+        self.assertEqual(self.codes(listed=self.LISTED.replace("alice", "Alice"), resolved=("ALICE", "fpp-thing")), [])
+
+    def test_srcurl_points_elsewhere(self):
+        self.assertEqual(self.codes(listed="https://raw.githubusercontent.com/alice/other/main/pluginInfo.json"),
+                         ["srcurl-not-listed-repo"])
+
+    def test_github_raw_and_blob_urls(self):
+        for url in ("https://github.com/alice/other/raw/main/pluginInfo.json",
+                    "https://github.com/alice/other/blob/main/pluginInfo.json"):
+            self.assertEqual(self.codes(listed=url), ["srcurl-not-listed-repo"], url)
+            self.assertEqual(self.codes(listed=url.replace("/other/", "/fpp-thing/")), [], url)
+
+    def test_listing_url_must_be_a_github_file(self):
+        for url in ("https://example.com/pluginInfo.json", "https://github.com/alice/fpp-thing/releases/pluginInfo.json"):
+            self.assertEqual(self.codes(listed=url), ["listing-url-not-github"], url)
+
+    def test_listing_ref_must_be_a_branch(self):
+        base = "https://raw.githubusercontent.com/alice/fpp-thing/"
+        for ref in ("0123456789abcdef0123456789abcdef01234567", "refs/pull/5/head", "refs/pull/5/merge"):
+            self.assertEqual(self.codes(listed=base + ref + "/pluginInfo.json"), ["listing-ref-not-branch"], ref)
+        # With the branch list: a branch (also as refs/heads/, or with a slash) passes;
+        # anything else (a short SHA, a tag name) does not.
+        branches = {"main", "feature/x"}
+        for ref in ("main", "refs/heads/main", "feature/x"):
+            self.assertEqual(self.codes(listed=base + ref + "/pluginInfo.json", branches=branches), [], ref)
+        import lib_plugin_schema as lib
+        for ref, sev in (("0123abc", "blocker"), ("v1.0", "best-practice"), ("master", "best-practice")):
+            fs = lib.source_repo_findings(self.INFO, base + ref + "/pluginInfo.json", None, branches)
+            self.assertEqual([(s, c) for s, c, _ in fs], [(sev, "listing-ref-not-branch")], ref)
+
+    def test_transferred_or_renamed(self):
+        self.assertEqual(self.codes(listed=self.LISTED, resolved=("mallory", "fpp-thing")), ["srcurl-repo-moved"])
+
+    def test_nothing_to_compare(self):
+        self.assertEqual(self.codes(), [])
+
+
+class SubmissionToken(unittest.TestCase):
+    """scan_submission.read_submission_token: the token is read from the listed
+    repo on a real branch, never a SHA or a PR ref the submitter can create."""
+    INFO = {"versions": [{"minFPPVersion": "9.0", "maxFPPVersion": "0", "branch": "main", "sha": ""}]}
+
+    def read(self, info, branches, reply=({"submissionToken": "fpp-7"}, None)):
+        import scan_submission as S
+        urls = []
+
+        def fake(url):
+            urls.append(url)
+            return reply
+        orig, S.fetch_json = S.fetch_json, fake
+        try:
+            return S.read_submission_token("alice", "fpp-thing", info, 9, branches), urls
+        finally:
+            S.fetch_json = orig
+
+    def test_ref_must_be_a_listed_branch(self):
+        (tok, ref, err), urls = self.read(self.INFO, {"main", "dev"})
+        self.assertEqual((tok, ref, err), ("fpp-7", "main", None))
+        self.assertEqual(urls, ["https://raw.githubusercontent.com/alice/fpp-thing/main/pluginInfo.json"])
+        for branch in ("0123456789abcdef0123456789abcdef01234567", "refs/pull/5/head"):
+            info = {"versions": [dict(self.INFO["versions"][0], branch=branch)]}
+            (_, ref, _), urls = self.read(info, {"main"})
+            self.assertEqual(ref, "HEAD", branch)
+            self.assertTrue(urls[0].endswith("/fpp-thing/HEAD/pluginInfo.json"), urls)
+        (_, ref, _), _ = self.read(self.INFO, None)
+        self.assertEqual(ref, "HEAD")
+
+    def test_install_ref_is_shared_with_the_clone(self):
+        import scan_submission as S
+        self.assertEqual(S.install_ref(self.INFO, 9, {"main"}), "main")
+        self.assertEqual(S.install_ref(self.INFO, 9, None), "HEAD")
+        self.assertEqual(S.install_ref(self.INFO, 9, {"master"}), "HEAD")
+
+    def test_non_object_json_and_fetch_errors(self):
+        (tok, _, err), _ = self.read(self.INFO, {"main"}, reply=(["fpp-7"], None))
+        self.assertEqual(tok, "")
+        self.assertIn("not a JSON object", err)
+        (tok, _, err), _ = self.read(self.INFO, {"main"}, reply=(None, "HTTP 404 fetching x"))
+        self.assertEqual((tok, err), ("", "HTTP 404 fetching x"))
+
+
+class SubmissionScan(unittest.TestCase):
+    """scan_submission.main() end to end, with GitHub, the network and the clone
+    faked: what the issue comment is built from (the --out JSON)."""
+    LISTED = "https://raw.githubusercontent.com/alice/fpp-thing/main/pluginInfo.json"
+    INFO = {"repoName": "fpp-thing", "srcURL": "https://github.com/alice/fpp-thing.git",
+            "versions": [{"minFPPVersion": "9.0", "maxFPPVersion": "0", "branch": "main", "sha": ""}]}
+
+    def run_scan(self, reporter="alice", meta=None, meta_err=None, branches=frozenset({"main"}),
+                 lint=(), token_info=None):
+        import scan_submission as S
+        meta = {"full_name": "alice/fpp-thing", "has_issues": True} if meta is None and not meta_err else meta
+        calls = {"fetch": [], "clone": []}
+
+        def fetch(url):
+            calls["fetch"].append(url)
+            if url == self.LISTED:
+                return dict(self.INFO, **(token_info or {})), None
+            return (token_info, None) if token_info is not None else (None, "HTTP 404")
+
+        def clone(owner, repo, dest, branch=None):
+            calls["clone"].append((owner, repo, branch))
+            os.makedirs(dest, exist_ok=True)
+            return None
+
+        fakes = {"fetch_json": fetch, "gh_get_repo": lambda o, r, t: (meta, meta_err),
+                 "gh_list_branches": lambda o, r, t: (set(branches) if branches is not None else None, None),
+                 "clone_repo": clone, "lint_plugin_dir": lambda *a, **k: list(lint),
+                 "schema_validation_error": lambda i, sc: None}
+        saved = {k: getattr(S, k) for k in fakes}
+        with tempfile.TemporaryDirectory() as tmp:
+            schema, plist, out = (os.path.join(tmp, n) for n in ("schema.json", "pluginList.json", "out.json"))
+            for path, text in ((schema, "{}"), (plist, '{"pluginList": []}')):
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+            argv = ["scan_submission.py", "--plugininfo-url", self.LISTED, "--schema", schema,
+                    "--target-major", "9", "--plugin-list", plist, "--reporter", reporter,
+                    "--issue-number", "7", "--out", out]
+            old_argv = sys.argv
+            try:
+                for k, v in fakes.items():
+                    setattr(S, k, v)
+                sys.argv = argv
+                with contextlib.redirect_stdout(io.StringIO()):
+                    S.main()
+            finally:
+                sys.argv = old_argv
+                for k, v in saved.items():
+                    setattr(S, k, v)
+            with open(out, encoding="utf-8") as f:
+                result = json.load(f)
+        result["codes"] = {f["code"]: f["severity"] for f in result["findings"]}
+        return result, calls
+
+    def test_clean_submission_passes_and_lints_the_install_branch(self):
+        result, calls = self.run_scan()
+        self.assertTrue(result["pass"], result["findings"])
+        self.assertEqual(calls["clone"], [("alice", "fpp-thing", "main")])
+
+    def test_github_api_failure_fails_closed(self):
+        result, _ = self.run_scan(meta_err="HTTP 502")
+        self.assertEqual(result["codes"].get("repo-unavailable"), L.BLOCKER)
+        self.assertFalse(result["pass"])
+
+    def test_owner_is_the_repo_owner_on_github_not_the_srcurl_name(self):
+        # alice transferred the repo to bob; srcURL still says alice.
+        moved = {"full_name": "bob/fpp-thing", "has_issues": True}
+        result, calls = self.run_scan(reporter="alice", meta=moved)
+        self.assertEqual(result["codes"].get("owner-unconfirmed"), L.BLOCKER)
+        self.assertEqual(result["codes"].get("srcurl-repo-moved"), L.BLOCKER)
+        # The token is looked for in bob's repo, on the install branch.
+        self.assertIn("https://raw.githubusercontent.com/bob/fpp-thing/main/pluginInfo.json", calls["fetch"])
+        self.assertEqual(result["owner"], "bob")
+        # bob himself needs no token for the ownership check.
+        result, _ = self.run_scan(reporter="bob", meta=moved)
+        self.assertNotIn("owner-unconfirmed", result["codes"])
+
+    def test_token_in_the_resolved_repo_confirms_a_non_owner(self):
+        result, _ = self.run_scan(reporter="carol", token_info={"submissionToken": "fpp-7"})
+        self.assertNotIn("owner-unconfirmed", result["codes"])
+        self.assertTrue(result["owner_confirmed"])
+
+    def test_unknown_branch_list_lints_and_reads_the_default_branch(self):
+        result, calls = self.run_scan(branches=None)
+        self.assertEqual(calls["clone"], [("alice", "fpp-thing", None)])
+
+    def test_text_length_is_optional_on_a_submission(self):
+        lint = [L.Finding(L.BEST_PRACTICE, "privacy-text-length", "summary (201 > 200)")]
+        result, _ = self.run_scan(lint=lint)
+        self.assertTrue(result["pass"], result["findings"])
+        self.assertEqual(result["codes"]["privacy-text-length"], L.OPTIONAL)
+        self.assertEqual(result["num_blocking"], 0)
+        # Any other best-practice finding still blocks.
+        lint.append(L.Finding(L.BEST_PRACTICE, "no-set-e", "x"))
+        result, _ = self.run_scan(lint=lint)
+        self.assertFalse(result["pass"])
+        self.assertEqual(result["num_blocking"], 1)
 
 
 if __name__ == "__main__":

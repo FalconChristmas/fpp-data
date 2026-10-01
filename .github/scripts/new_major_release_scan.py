@@ -136,6 +136,7 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
     maintainer_candidates = []
     meta = {}
     repo = None
+    branches = None
     src = lib.parse_github_repo(info.get("srcURL", "") or "")
     if src:
         owner, repo = src
@@ -151,6 +152,10 @@ def scan_plugin(entry, target, plugins_dir, token, schema):
             owner_is_org = (meta.get("owner") or {}).get("type") == "Organization"
             if owner_is_org:
                 maintainer_candidates = lib.gh_get_maintainer_candidates(owner, repo, token)
+
+    # srcURL is the listed repo, read from a branch, and still resolves there
+    # (needs only the listing and the API metadata, so it runs without a clone).
+    findings.extend(lib.source_repo_findings(info, info_url, lib.resolved_repo(meta), branches))
 
     # --- open issue/PR staleness (best-effort, independent of push staleness) -
     # A repo can look "active" by push date while its owner ignores the

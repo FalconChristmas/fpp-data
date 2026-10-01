@@ -201,7 +201,7 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
       <h2>Sends data</h2>
       <p class="q">Every place data leaves this device: the plugin's own connections, anything it publishes on FPP's MQTT, fetches through FPP's helpers, loads into the operator's browser from a plugin page (a CDN, fonts, an embed), or broadcasts (FM, LoRa). Empty means the plugin sends nothing.</p>
       <div class="note"><p><b>A CDN, font or badge host your pages load</b> is a destination only if the load actually happens. FPP serves plugin pages under its own Content-Security-Policy, so such a tag is blocked unless your install script whitelists the host with <code>ManageApacheContentPolicy.sh add &lt;directive&gt; &lt;host&gt;</code> or the page is served by your own listener (<b>Remote access</b> other than <code>none</code>). If it is, declare it with <b>What is sent</b> <code>your browser's address</code> - FPP shows that as amber "Your browser loads files from &lt;host&gt;"; if not, bundle the file or remove the tag.</p></div>
-      <div class="note"><p><b>Do not list GitHub</b> (<code>github.com</code>, <code>api.github.com</code>, <code>raw.githubusercontent.com</code>, <code>*.github.io</code>) for fetching your own code, releases, update checks or a package - FPP's plugin manager makes that traffic already. A program you download is a <b>System change</b> of kind <code>download</code> instead.</p></div>
+      <div class="note"><p><b>Do not list GitHub</b> (<code>github.com</code>, <code>api.github.com</code>, <code>raw.githubusercontent.com</code>, <code>*.github.io</code>) for fetching your own code, releases, update checks or a package - FPP's plugin manager makes that traffic already. A program you download is a <b>System change</b> of kind <code>download</code> instead. Writing to GitHub is sending: if the plugin creates a gist, an issue or a comment, or uploads a file, list <code>api.github.com</code> (or <code>uploads.github.com</code>) like any other destination.</p></div>
       <div id="sendsList"></div>
       <button type="button" class="btn btn-outline mt-2" data-add="sends"><i class="fas fa-plus"></i> Add a destination</button>
       <div class="note" id="sendsEmptyNote"><p>Nothing listed = <b>"No sending disclosed"</b> (green).</p></div>
@@ -231,7 +231,7 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
     <!-- 5 · remote access -->
     <section class="step" data-step="5">
       <h2>Remote access</h2>
-      <p class="q">The plugin's <b>own</b> listener, at its widest reach. Pages and API routes served through FPP's normal web server are <code>none</code>.</p>
+      <p class="q">The plugin's <b>own</b> listener, at its widest reach. Pages and API routes served through FPP's normal web server are <code>none</code>. A route there that acts on someone's behalf (sends a message, spends credit, moves hardware, unlocks something) must still be named in <b>Anything else</b>, because anyone who can reach FPP can call it.</p>
       <div id="remoteChoices"></div>
       <div class="note nofit"><p><b>None of the choices fit?</b> Pick the <b>widest</b> reach that applies and explain the detail in <b>Anything else</b>. If nothing is close, leave it out here, describe it in the <b>Anything else</b> step so it still shows in the install dialog, and <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> so the vocabulary can grow. Never invent a new key or value - FPP ignores it and the listing check rejects it.</p></div>
     </section>
@@ -260,7 +260,7 @@ input.is-invalid,textarea.is-invalid{border-color:var(--bs-danger);box-shadow:0 
     <!-- 8 · other -->
     <section class="step" data-step="8">
       <h2>Anything else</h2>
-      <p class="q">Anything the other keys cannot say: what is left behind after uninstall, a visitor-facing page hosted by a vendor, payments taken, a self-updating component, a behaviour none of the earlier choices fit. FPP shows this text verbatim in the install dialog, so it is never lost - it just doesn't change a light's colour. It counts like the other keys on upgrade: a change to it re-shows the dialog before the update is applied (rewording the summary alone does not). Write <code>none</code> if there is nothing.</p>
+      <p class="q">Anything the other keys cannot say: what is left behind after uninstall, a visitor-facing page hosted by a vendor, payments taken, a self-updating component, a behaviour none of the earlier choices fit. A route on FPP's web server that acts on someone's behalf (sends a message, spends credit, moves hardware, unlocks something) belongs here, because anyone who can reach FPP can call it. FPP shows this text verbatim in the install dialog, so it is never lost - it just doesn't change a light's colour. It counts like the other keys on upgrade: a change to it re-shows the dialog before the update is applied (rewording the summary alone does not). Write <code>none</code> if there is nothing.</p>
       <div class="note"><p>If you had to put something here because the vocabulary has no place for it, please <a href="https://github.com/FalconChristmas/fpp-data/issues/new?title=privacy%20vocabulary%3A%20" target="_blank" rel="noopener">open an fpp-data issue</a> saying what it was. The keys and values are fixed on purpose (FPP computes the colours from them and the listing check matches your code against them), so the way to cover a new kind of behaviour is to add it to the vocabulary for everyone, not to invent a key in one plugin.</p></div>
       <label for="other">Other <span class="hint">- the box is empty until you type in it</span></label>
       <textarea id="other" placeholder="none, or anything the earlier steps could not say (eg: a settings file is left behind after uninstall)"></textarea>
@@ -390,6 +390,9 @@ function loadDraft() {
 // (remotes.json) is a hostname on the internet.
 var HOST_RE = /\b[a-z0-9-]+(\.[a-z0-9-]+)*\.(?!(?:local|localhost|localdomain|lan|home|internal|arpa|json|txt|csv|log|conf|cfg|ini|php|py|sh|js|html|xml|yaml|yml|db)\b)[a-z]{2,}\b(?!\.[a-z0-9-])/i;
 var GITHUB_RE = /(^|\.|\/)(github\.com|api\.github\.com|raw\.githubusercontent\.com|github\.io)(\/|$|\s)/i;
+// The hosts a plugin writes to GitHub through (a gist, an issue, a comment, an
+// upload): those are sends, and the listing check requires them here.
+var GITHUB_WRITE_RE = /(^|\/|\s)(api|uploads|gist)\.github\.com(\/|$|\s)/i;
 // Qualified forms only, as fpp-privacy-lights.js: "serial port" and "the
 // playlist uuid" identify nobody.
 var HWID_RE = /\b(serial numbers?|cpu serial|mac addresse?s?|hardware ids?|hwid|hw id|device ids?|(?:device|player|device's|player's) uuids?)\b/i;
@@ -473,7 +476,7 @@ function renderList(list) {
     } else {
       h += entryBar(list, i, "Change");
       h += selectField(list, i, "kind", "Kind", KINDS);
-      h += field(list, i, "what", "What", "one line: \"enables smbd\", \"adds fpp to the video group\", \"downloads the Piper voice models from huggingface.co\"", { placeholder: "what it changes, one line (eg: enables smbd, adds fpp to the video group)", max: 120 });
+      h += field(list, i, "what", "What", "one line: \"enables smbd\", \"adds fpp to the video group\", \"downloads the Piper voice models from huggingface.co\"", { placeholder: "what it changes, one line (eg: enables smbd, adds fpp to the video group)", max: 150 });
     }
     h += "</div>";
   });
@@ -495,7 +498,7 @@ function refreshFieldHints(list, i, f) {
   if (!w) return;
   var msg = "";
   if (list === "sends" && f === "to") {
-    if (GITHUB_RE.test(v)) msg = "GitHub hosts are not listed here - FPP's plugin manager already makes that traffic. If it downloads a program, declare a System change of kind download instead.";
+    if (GITHUB_RE.test(v) && !GITHUB_WRITE_RE.test(v)) msg = "GitHub is not listed for reading your own code, releases or update checks - FPP's plugin manager already makes that traffic. If it downloads a program, declare a System change of kind download instead. Writing to GitHub (a gist, an issue, a comment, an upload) is listed as api.github.com or uploads.github.com.";
     else if (/^https:\/\//i.test(v)) msg = "Just the hostname is enough; https:// is assumed.";
     else if (/^http:\/\//i.test(v) && HOST_RE.test(v.replace(/^http:\/\//i, ""))) msg = "Unencrypted to a hostname on the internet: this light will be red (\"Sends unencrypted to the internet\").";
     else if (/localhost|127\.0\.0\.1/i.test(v)) msg = "127.0.0.1 / localhost never leaves the device - that isn't a send.";

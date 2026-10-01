@@ -36,6 +36,8 @@ from lib_plugin_schema import (  # noqa: E402
     load_categories,
     load_pluginlist,
     parse_github_repo,
+    resolved_repo,
+    source_repo_findings,
 )
 
 ERROR = "error"
@@ -126,6 +128,7 @@ def validate_entry(entry, categories, info_schema, token, is_target, report):
         is_private = bool(info.get("private"))
         src = info.get("srcURL") or info.get("homeURL") or url
         gh = parse_github_repo(src)
+        data = None
         if gh:
             owner, repo = gh
             data, gh_err = gh_get_repo(owner, repo, token)
@@ -144,6 +147,13 @@ def validate_entry(entry, categories, info_schema, token, is_target, report):
                 bug = parse_github_repo(info.get("bugURL", ""))
                 if bug and bug == (owner, repo) and data.get("has_issues") is False:
                     report.add(WARNING, name, f"Issues are disabled on {owner}/{repo} - the bugURL link won't work")
+
+        # --- srcURL is the listed repo, read from a branch, not renamed/transferred ---
+        for sev, _code, message in source_repo_findings(info, url, resolved_repo(data)):
+            if sev == "blocker":
+                report_problem(name, message)
+            else:
+                report.add(WARNING, name, message)
 
         # --- at least one versions[] entry (schema enforces non-empty; here just note majors) ---
         versions = info.get("versions") or []

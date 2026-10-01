@@ -954,6 +954,112 @@ def _config_dir_hits(root: str, exts=_CFG_SCAN_EXTS):
                 continue
             yield rel, i, line.strip(), fname, kind
 
+
+# The files FPP's WriteSettingToFile() writes (and parses with its own readers,
+# never PHP's stock INI parser): the global settings file (/home/fpp/media/
+# settings - `$settingsFile`, `$settings['settingsFile']`, `$mediaDirectory .
+# "/settings"`, the SETTINGSFILE env var) and the per-plugin `plugin.<name>`
+# config files under config/. A `plugin.ini`/`plugin.defaults.ini`/... literal
+# (any name that ends in a file extension) is a plugin's own INI file, not FPP's
+# `plugin.<name>` convention.
+_INI_FPP_FILE_RX = re.compile(
+    r'/home/fpp/media/settings\b|\bmedia/settings\b'
+    r'|\$settingsFile\b|\[\s*[\'"]settingsFile[\'"]\s*\]|\bSETTINGSFILE\b'
+    r'|(?:\$mediaDir(?:ectory)?|\[\s*[\'"]mediaDirectory[\'"]\s*\])\s*\.\s*[\'"]/settings[\'"]'
+    r'|[\'"/]plugin\.(?!(?:[\w-]+\.)*(?:ini|conf|cfg|txt|php|inc|json)\b)')
+_INI_CALL_RX = re.compile(r'(?<![\w$>:])(parse_ini_(?:file|string))\s*\(')
+_INI_VAR_RX = re.compile(r'\$(\w+)\b(?!\s*\[)')
+_INI_ASSIGN_RX = re.compile(r'\$(\w+)\s*(?:\.=|=(?![=>]))\s*([^;]*);')
+_INI_FUNC_RX = re.compile(r'\bfunction\s*&?\s*\w*\s*\(([^)]*)\)')
+# Variable names that, with no assignment anywhere in the plugin, still mean an
+# FPP-written file: `$settingsFile` is FPP's own global (www/config.php) and
+# `$pluginConfigFile` the name template-derived plugins give
+# `$settings['configDirectory'] . "/plugin." . $pluginName`.
+_INI_CONVENTION_VARS = frozenset({"settingsFile", "pluginConfigFile", "pluginSettingsFile"})
+
+
+def _call_first_arg(text: str, start: int, limit: int = 400) -> str:
+    """Text of the first argument of the call whose `(` ends just before
+    text[start]: everything up to the top-level `,` or the matching `)`."""
+    depth, quote, i, end = 0, None, start, min(len(text), start + limit)
+    while i < end:
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif c == "," and depth == 0:
+            break
+        i += 1
+    return text[start:i]
+
+
+def _stock_ini_parse_hits(root: str, exts=(".php", ".inc")):
+    """Yield (relpath, lineno, line, func) for a PHP parse_ini_file()/parse_ini_string()
+    call whose first argument is an FPP settings or `plugin.<name>` config file (or,
+    for parse_ini_string, that file's contents). Precision over recall: the argument
+    must reference one of the _INI_FPP_FILE_RX spellings directly, or through
+    `$var = ...` assignments up to two levels deep (`$cfg = $dir . "/plugin." . $n;
+    $raw = file_get_contents($cfg); parse_ini_string($raw)`) - looked up in the same
+    file first, else in any of the plugin's PHP files (the path is often built in
+    functions.inc.php and parsed from a page that includes it). An unassigned
+    `$pluginConfigFile`/`$settingsFile` still counts (_INI_CONVENTION_VARS). Any
+    other target - /etc/os-release, a plugin's own `config.ini` - is legitimate INI
+    and never fires. Motivating case: AdvancedStats' functions.inc.php
+    `$pluginSettings = parse_ini_file($pluginConfigFile);`."""
+    files = []
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        local: dict[str, list[str]] = {}
+        for m in _INI_ASSIGN_RX.finditer(text):
+            local.setdefault(m.group(1), []).append(m.group(2))
+        files.append((rel, text, local))
+    everywhere: dict[str, list[str]] = {}
+    for _, _, local in files:
+        for name, rhs in local.items():
+            everywhere.setdefault(name, []).extend(rhs)
+
+    def refs_fpp_file(expr: str, local: dict[str, list[str]], depth: int = 2,
+                      params: frozenset = frozenset()) -> bool:
+        if _INI_FPP_FILE_RX.search(expr):
+            return True
+        for name in _INI_VAR_RX.findall(expr):
+            # A parameter of the function the call sits in is whatever the caller
+            # passes: a `$file` assigned in some other file says nothing about it.
+            rhs_list = local.get(name) or (None if name in params else everywhere.get(name))
+            if not rhs_list:
+                if name in _INI_CONVENTION_VARS:
+                    return True
+            elif depth and any(refs_fpp_file(rhs, local, depth - 1) for rhs in rhs_list):
+                return True
+        return False
+
+    for rel, text, local in files:
+        lines = text.split("\n")
+        for m in _INI_CALL_RX.finditer(text):
+            lineno = text.count("\n", 0, m.start()) + 1
+            line = lines[lineno - 1]
+            if _is_comment_line(line) or re.search(r'\bfunction\s+$', text[max(0, m.start() - 20):m.start()]):
+                continue
+            # Parameters of the nearest function defined above the call (the one
+            # it most likely sits in; a closed one only costs a missed hit).
+            funcs = list(_INI_FUNC_RX.finditer(text, 0, m.start()))
+            params = frozenset(re.findall(r'\$(\w+)', funcs[-1].group(1))) if funcs else frozenset()
+            if refs_fpp_file(_call_first_arg(text, m.end()), local, params=params):
+                yield rel, lineno, line.strip(), m.group(1)
+
 # limonade lifecycle hooks - www/api/controllers/plugin.php PluginApiReservedFunctions().
 _LIMONADE_RESERVED_NAMES = frozenset({
     "configure", "initialize", "before", "autorender", "before_exit",
@@ -1534,7 +1640,7 @@ _PRIV_V3_ITEM_KEYS = {
     "systemChanges": ("kind", "what"),
 }
 _PRIV_V3_KINDS = ("service", "network", "core-settings", "download", "package-source", "tunnel", "reads-core-credentials", "privilege")
-_PRIV_LEN_SUMMARY, _PRIV_LEN_TEXT, _PRIV_LEN_CHANGE = 200, 100, 120
+_PRIV_LEN_SUMMARY, _PRIV_LEN_TEXT, _PRIV_LEN_CHANGE = 200, 100, 150
 # The placeholder fpp-plugin-Template ships in privacy.summary / privacy.other
 # (matched case-insensitively, so a half-edited copy still trips it).
 _PRIV_TEMPLATE_MARK = "template text"
@@ -1560,15 +1666,26 @@ _PRIV_EXTS = _CFG_SCAN_EXTS + (".html", ".htm", ".css")
 # bundled UI libraries carry hundreds of doc/CDN URLs that say nothing about the
 # plugin's own traffic - skipped here on top of _skippable()'s vendor dirs.
 _PRIV_SKIP_DIRS = ("/venv/", "/.venv/", "/site-packages/", "/dist-packages/", "/__pycache__/")
+# A basename that is the library's own name (or a jquery.<plugin> / jquery-<plugin>
+# name), then only a version and build words (jquery-3.7.1.min.js,
+# jquery-ui-1.13.2.custom.min.js, jquery.validate.min.js, react-dom.production.min.js):
+# a plugin's own file that merely contains a library name (chart-helper.js,
+# plugin-chart.js, my.jquery.js) is the plugin's code. JavaScript and CSS only:
+# PHP libraries (PHPMailer, Guzzle) live under vendor/, which is skipped anyway,
+# and a plugin's own chart.php or bootstrap.php is its code.
 _PRIV_LIB_FILE_RX = re.compile(
-    r'(^|[/.-])(jquery|bootstrap|sweetalert|popper|chart|moment|lodash|underscore|select2|datatables?'
-    r'|fontawesome|font-awesome|d3|three|socket\.io|axios|vue|react|angular|phpmailer|guzzle)[\w.-]*\.(js|php|css)$', re.I)
+    r'^(?:jquery[.-][a-z]\w*|chartjs-plugin-[a-z]\w*|(?:jquery|bootstrap|sweetalert|popper|chart|chartjs|moment'
+    r'|lodash|underscore|select2|datatables?|fontawesome|font-awesome|d3|three|socket\.io|axios|vue|react|angular)\d*)'
+    r'(?:[.-](?:v?\d[\w]*|ui|dom|bundle|slim|min|umd|esm|cjs|amd|global|browser|runtime|common|core|all|full'
+    r'|with|locales|dist|module|prod|production|dev|development|custom|js|structure|theme|icons|timezone|data))*'
+    r'\.(js|css)$', re.I)
 
 _PRIV_URL_RX = re.compile(
     r'''(?<![\w/@-])(https?|wss?|mqtts?|ftp|git|ssh|smtps?|imaps?|pop3s?)://'''
     r'''([A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(/[^\s'"`<>)]*)?''')
 # Reference/documentation hosts that turn up in code as spec links, license
-# headers, badge images and "see also" strings, never as a data recipient.
+# headers, badge images, XML namespaces and "see also" strings, never as a data
+# recipient.
 _PRIV_DOC_HOST_RX = re.compile(
     r'(^|\.)(ietf\.org|rfc-editor\.org|wikipedia\.org|php\.net|w3\.org|whatwg\.org|example\.(com|org|net)'
     r'|gnu\.org|creativecommons\.org|opensource\.org|mozilla\.org|stackoverflow\.com|iana\.org|iso\.org'
@@ -1576,7 +1693,8 @@ _PRIV_DOC_HOST_RX = re.compile(
     r'|jqueryui\.com|jquery\.com|curl\.haxx\.se|curl\.se|sourceforge\.net|schema\.org|json-schema\.org'
     r'|purl\.org|falconchristmas\.com|github\.io|python\.org|npmjs\.com|pypi\.org|debian\.org'
     r'|raspberrypi\.(com|org)|ubuntu\.com|nodejs\.org|readthedocs\.io|shields\.io|brew\.sh'
-    r'|placehold\.co|youtube\.com|youtu\.be|docs\.\w+\.\w+)$', re.I)
+    r'|placehold\.co|youtube\.com|youtu\.be|docs\.\w+\.\w+|openxmlformats\.org|oasis-open\.org'
+    r'|schemas\.[\w-]+\.\w+|purl\.[\w-]+\.\w+)$', re.I)
 
 
 def _priv_private_host(h: str) -> bool:
@@ -1623,18 +1741,22 @@ def _priv_host_declared(host: str, declared: set[str]) -> bool:
     return False
 
 
-def _priv_lines(root: str, exts=_PRIV_EXTS):
+def _priv_lines(root: str, exts=_PRIV_EXTS, minified: bool = False):
     """(relpath, lineno, line) for every code line the privacy checks look at: same
     doc/help/test/vendor exclusions as _grep, plus committed venvs, bundled UI
     libraries and minified lines (a 30 KB one-line library has no bearing on what
-    the plugin does)."""
+    the plugin does). `minified` keeps the bundled libraries and long lines, for
+    the host scan: a recipient hidden in minified code, or in a file named like a
+    library, is still a recipient."""
     for path in sorted(_iter_files(root, exts)):
         rel = os.path.relpath(path, root)
         low = "/" + rel.lower()
-        if _skippable(rel) or any(d in low for d in _PRIV_SKIP_DIRS) or _PRIV_LIB_FILE_RX.search(os.path.basename(rel)):
+        if _skippable(rel) or any(d in low for d in _PRIV_SKIP_DIRS):
+            continue
+        if not minified and _PRIV_LIB_FILE_RX.search(os.path.basename(rel)):
             continue
         for i, line in enumerate(_read(path).splitlines(), 1):
-            if len(line) > 600 or _is_comment_line(line):
+            if (len(line) > 600 and not minified) or _is_comment_line(line):
                 continue
             yield rel, i, line
 
@@ -1669,6 +1791,14 @@ def _priv_split_args(text: str) -> list[str] | None:
 
 _PRIV_INSTALL_HOOK_RX = re.compile(r'(^|/)(fpp_install\.sh|fpp_uninstall\.sh|fpp_upgrade\.sh|install[\w.-]*\.sh|setup[\w.-]*\.sh|Makefile|makefile)$', re.I)
 _PRIV_TRAILING_COMMENT_RX = re.compile(r'''(?:^|\s)(?://|#|\*|;)\s*[^'"`]*$''')
+# The server-side request calls and commands that make a URL in minified or
+# library code a recipient (see _priv_host_hits); browser-side loads and fetch()
+# calls are _priv_url_context's "browser".
+_PRIV_STRICT_SINK_RX = re.compile(
+    r'(?:\b(?:file_get_contents|fopen|curl_init|get_headers|simplexml_load_file|urlopen|url(?:Get|Post|Put|Delete)'
+    r'|requests\.(?:get|post|put|patch|delete|head|request)|https?\.(?:get|post|put|request)|wp_remote_\w+)'
+    r'\s*\(\s*["\'`]|\bCURLOPT_URL\s*,\s*["\']|\b(?:curl|wget)\s+[^\'"`;|&\n]*["\'`]?)$')
+_PRIV_STRICT_PRE_RX = re.compile(r'''(?:[=(:]|@import)\s*["'`]?\s*$''')
 _PRIV_URL_CMD_RX = re.compile(
     r'\b(curl|wget|git\s+clone|git\s+remote|pip3?\s+install|npm\s+(?:install|i)|add-apt-repository|ping|ssh|scp|rsync'
     r'|nc|ncat|openssl|mosquitto_(?:pub|sub)|ffmpeg|ffplay|mpv|mpg123|mplayer|cvlc|vlc|yt-dlp)\b[^#\n]*$', re.I)
@@ -1853,20 +1983,73 @@ def _priv_in_prose(rel: str, line: str, pos: int) -> bool:
     operator-facing prose (see _PRIV_PROSE_RX) rather than in code."""
     return rel.lower().endswith(_PRIV_SERVED_EXTS) and bool(_PRIV_PROSE_RX.search(line[:pos]))
 _PRIV_GITHUB_HOSTS = ("github.com", "www.github.com", "raw.githubusercontent.com", "api.github.com",
-                      "gist.github.com", "objects.githubusercontent.com", "codeload.github.com")
+                      "objects.githubusercontent.com", "codeload.github.com", "gist.github.com",
+                      "gist.githubusercontent.com")
+# A write next to an api.github.com or gist.github.com URL: creating a gist, an
+# issue or a comment, or pushing a file, puts data where the account behind it
+# can read it. The text around the URL on its own line is looked at, and - for
+# an endpoint that can be written to (_PRIV_GITHUB_WRITABLE_RX) on a short line -
+# the statement it starts (_priv_github_context): the usual PHP request
+# assigns the URL on one line and sets CURLOPT_POST a few lines below it.
+# curl's short flags are case-sensitive and only count after `curl` (`-f` is
+# --fail, `-d` in `[ -d dir ]` is a test; `-sd`, `-d"{}"`, `-F`, `-T` are writes).
+_PRIV_GITHUB_WRITE_RX = re.compile(
+    r'(?:(?-i:-X)|--request|--method)[\s=]*[\'"]?(?:POST|PUT|PATCH)\b|--(?:data(?:-\w+)?|json|form|upload-file'
+    r'|post-data|post-file|body-data|body-file)\b|\bcurl\b[^|;&\n]*?(?<!\S)-(?-i:[a-zA-Z]*[dFT])'
+    r'|\bCURLOPT_(?:POST|POSTFIELDS|CUSTOMREQUEST|UPLOAD)\b|\b(?:requests|axios|http)\.(?:post|put|patch)\s*\('
+    r'|\b(?:method|type)\s*[:=]\s*[\'"](?:POST|PUT|PATCH)[\'"]|\$\.post\s*\(|\burl(?:Post|Put)\s*\(', re.I)
+# curl -G / --get sends its -d data as a query string on a GET: a read.
+_PRIV_GITHUB_GET_RX = re.compile(r'\bcurl\b[^|;&\n]*?(?:(?<!\S)-(?-i:[a-zA-Z]*G)|--get\b)', re.I)
+# How far either side of a GitHub URL the write check looks: a minified line can
+# hold an unrelated POST thousands of characters away.
+_PRIV_GITHUB_WRITE_WINDOW = 300
+# api.github.com paths that accept a write: issues and their comments, pull
+# requests, gists, file contents, release assets, workflow dispatches, statuses.
+# Only these get the multi-line look - a release check (/releases/latest,
+# /tags, /zipball) a few lines from an unrelated POST stays a read.
+_PRIV_GITHUB_WRITABLE_RX = re.compile(
+    r'^/(?:gists\b|repos/[^/]+/[^/]+/(?:issues|pulls|comments|contents|statuses|dispatches|actions/workflows'
+    r'|releases/[^/]+/assets|releases/?$|git/))', re.I)
+# How many lines past the URL the multi-line look reads (_priv_github_context).
+_PRIV_GITHUB_WRITE_LINES = 6
 
 
-def _priv_host_exempt(host: str, where: str) -> bool:
-    """Hosts that are never a `sends` recipient. GitHub (fetching code, releases,
-    update checks or a package from GitHub is the same traffic FPP's own plugin
-    manager already makes - spec §1, `sends[].to`; a binary fetched from there still
-    has to be a `download` system change, which the install rule checks separately),
+def _priv_github_context(lines: list[str], i: int) -> str:
+    """The statement around line i (1-based) of a file, for the GitHub write check:
+    back through shell `\\` continuation lines only (`curl -s \\` / `-d @x \\` /
+    `https://...`), and forward up to _PRIV_GITHUB_WRITE_LINES lines, stopping at
+    the next line with another URL in it - a request set up after that is the
+    next request's, not this one's (`$url = ...; curl_init($url); CURLOPT_POST`)."""
+    start = i - 1
+    while start > 0 and i - start <= _PRIV_GITHUB_WRITE_LINES and lines[start - 1].rstrip().endswith("\\"):
+        start -= 1
+    end = i
+    while end < min(len(lines), i + _PRIV_GITHUB_WRITE_LINES) and "://" not in lines[end]:
+        end += 1
+    return re.sub(r'\\[ \t]*\n', ' ', "\n".join(lines[start:end]))
+
+
+def _priv_host_exempt(host: str, where: str, path: str = "", line: str = "") -> bool:
+    """Hosts that are never a `sends` recipient. GitHub reads (fetching code,
+    releases, update checks or a package from GitHub is the same traffic FPP's own
+    plugin manager already makes - spec §1, `sends[].to`; a binary fetched from there
+    still has to be a `download` system change, which the install rule checks
+    separately), *.github.io (a Pages site's owner never sees who fetched it),
     private/loopback/LAN names, placeholder names, and - for a server-side literal
     only - the documentation hosts that turn up as spec links and license headers.
+    GitHub writes are recipients: uploads.github.com, api.github.com's /gists
+    (the create-a-gist endpoint), and any api.github.com or gist.github.com URL
+    with a POST, PUT or PATCH around it (`path` is the URL's path, `line` the
+    text around it on its source line).
     A browser-side load is a load whoever the host is: a badge from shields.io or
     a script from code.jquery.com is the operator's browser contacting that host."""
     if "." not in host or _priv_private_host(host):
         return True
+    if host in ("api.github.com", "gist.github.com"):
+        if host == "api.github.com" and path.lower().split("?")[0].rstrip("/") == "/gists":
+            return False
+        if _PRIV_GITHUB_WRITE_RX.search(line) and not _PRIV_GITHUB_GET_RX.search(line):
+            return False
     if host in _PRIV_GITHUB_HOSTS or host.endswith(".github.io"):
         return True
     if re.search(r'yourdomain|example|your-?(?:host|server|domain)|placeholder', host):
@@ -1924,9 +2107,10 @@ def _priv_host_hits(root: str, own_owner: str | None, csp_adds: dict[str, set[st
 
     prev: list[str] = []   # the last few lines of the current file, for split tags
     prev_rel = None
-    for rel, i, line in _priv_lines(root):
+    file_lines: list[str] = []   # the current file, read only for a GitHub write check
+    for rel, i, line in _priv_lines(root, minified=True):
         if rel != prev_rel:
-            prev, prev_rel = [], rel
+            prev, prev_rel, file_lines = [], rel, []
         where_file = "install" if _PRIV_INSTALL_HOOK_RX.search(rel) else "runtime"
         # Only a file the player's web server can serve to a browser makes a
         # browser-side load; `src=https://...` in a shell or Python file is a
@@ -1940,8 +2124,42 @@ def _priv_host_hits(root: str, own_owner: str | None, csp_adds: dict[str, set[st
             prev.append(line)
             del prev[:-6]
             continue
+        # A minified line or a bundled library is full of URL strings that are
+        # namespaces, doc links and defaults nothing loads (xlsx's
+        # schemas.openxmlformats.org): there only a URL handed straight to a load,
+        # a request call or a command counts. Each URL's context comes from a
+        # bounded window, and a long line has at most 500 URLs looked at past the
+        # cheap first cuts, or a 1 MB line with thousands of URLs goes quadratic.
+        # Exempt hosts never count against that budget, and each host counts at
+        # most three times, so a run of decoy URLs cannot hide a real one behind it.
+        long_line = len(line) > 600
+        strict = long_line or bool(_PRIV_LIB_FILE_RX.search(os.path.basename(rel)))
+        budget = 500
+        per_host: dict[str, int] = {}
+        w = _PRIV_GITHUB_WRITE_WINDOW
         for m in _PRIV_URL_RX.finditer(line):
-            pre = line[:m.start()]
+            pre = line[max(0, m.start() - 1000):m.start()] if long_line else line[:m.start()]
+            # Cheap first cut: a load or a request call leaves an `=`, `(`, `:`,
+            # `@import` or a curl/wget command just before the URL.
+            if strict and not (_PRIV_STRICT_PRE_RX.search(pre[-40:]) or _PRIV_STRICT_SINK_RX.search(pre[-300:])):
+                continue
+            host = m.group(2).lower()
+            near = line[max(0, m.start() - w):m.end() + w]
+            if host == "api.github.com" and not long_line and _PRIV_GITHUB_WRITABLE_RX.match(m.group(3) or ""):
+                if not file_lines:
+                    file_lines = _read(os.path.join(root, rel)).splitlines()
+                near = _priv_github_context(file_lines, i)
+            # Exempt even as a browser load (the narrowest exemption): exempt everywhere.
+            if _priv_host_exempt(host, "browser", m.group(3) or "", near):
+                continue
+            if long_line:
+                seen = per_host.get(host, 0)
+                if seen >= 3:
+                    continue
+                per_host[host] = seen + 1
+                budget -= 1
+                if budget < 0:
+                    break
             # A tag written over several lines (`<img\n    src="https://...">`)
             # leaves this line with the attribute but no tag, so the directive
             # would fall through to connect-src. Pull the tag opener in from the
@@ -1958,6 +2176,8 @@ def _priv_host_hits(root: str, own_owner: str | None, csp_adds: dict[str, set[st
             ctx = _priv_url_context(pre)
             if ctx == "link":
                 continue
+            if strict and ctx != "browser" and not _PRIV_STRICT_SINK_RX.search(pre[-300:]):
+                continue
             if _PRIV_TRAILING_COMMENT_RX.search(pre) and not re.search(r'''['"`]\s*$''', pre):
                 continue
             # A code literal ("https://...", `=https://` in shell) or a command-line
@@ -1965,9 +2185,8 @@ def _priv_host_hits(root: str, own_owner: str | None, csp_adds: dict[str, set[st
             # sentence, which the user reads rather than the plugin contacting.
             if not (re.search(r'''['"`=(,:\[]\s*$''', pre) or _PRIV_URL_CMD_RX.search(pre)):
                 continue
-            host = m.group(2).lower()
             where = "browser" if ctx == "browser" and served else where_file
-            if _priv_host_exempt(host, where):
+            if _priv_host_exempt(host, where, m.group(3) or "", near):
                 continue
             directive = None
             if where == "browser":
@@ -2420,6 +2639,124 @@ def _privacy_setting_hits(root: str):
         yield rel, i, line.strip(), key, bool(_PRIV_SETTING_WRITE_RX.search(line))
 
 
+# Committed files that run but cannot be read: native executables and libraries
+# (by magic bytes, whatever they are named), compiled Python, and packaged
+# Java/Python code. A .zip/.tar is not collected - an archive may well hold source.
+# Headers are not source: vendor.h shipped with libvendor.so is the closed library's API.
+_BIN_NATIVE_SRC_EXTS = (".c", ".cc", ".cpp", ".cxx", ".rs", ".go", ".swift", ".m")
+# Packaged libraries: often a vendored open-source project, so asked about rather
+# than treated as closed outright.
+_BIN_PACKAGE_EXTS = (".whl", ".egg", ".jar", ".war", ".aar")
+_BIN_BUILD_FILES = ("makefile", "gnumakefile", "cmakelists.txt", "meson.build", "cargo.toml", "go.mod",
+                    "setup.py", "pyproject.toml", "pom.xml", "build.gradle", "build.gradle.kts", "configure.ac")
+_BIN_SOURCE_FOR = {"native": _BIN_NATIVE_SRC_EXTS, "java": (".java", ".kt"), "python": (".py",),
+                   "wasm": _BIN_NATIVE_SRC_EXTS}
+
+
+def _binary_kind(path: str) -> str | None:
+    """'native' / 'java' / 'python' / 'wasm' for a compiled file, else None."""
+    low = path.lower()
+    if low.endswith((".pyc", ".pyo", ".whl", ".egg")):
+        return "python"
+    if low.endswith((".jar", ".class", ".war", ".aar")):
+        return "java"
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64)
+    except OSError:
+        return None
+    if head[:4] == b"\x7fELF" or head[:4] in (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe"):
+        return "native"
+    if head[:4] == b"\xca\xfe\xba\xbe":   # Java class or a Mach-O fat binary: closed either way
+        return "java" if low.endswith(".class") else "native"
+    if head[:4] == b"\x00asm":
+        return "wasm"
+    if head[:2] == b"MZ" and len(head) >= 64:
+        off = int.from_bytes(head[60:64], "little")
+        try:
+            with open(path, "rb") as f:
+                f.seek(off)
+                if f.read(4) == b"PE\x00\x00":
+                    return "native"
+        except OSError:
+            pass
+    return None
+
+
+def _binary_stem(rel: str) -> str:
+    """libfoo.so.1.2 / foo.cpython-311.pyc / foo.exe -> foo."""
+    b = os.path.basename(rel).lower()
+    b = re.sub(r'\.so(?:\.\d+)*$', '', b)
+    b = b.split(".")[0]
+    return b[3:] if b.startswith("lib") and len(b) > 3 else b
+
+
+def _committed_binary_hits(root: str) -> list[tuple[str, str]]:
+    """(relpath, kind) for each committed compiled file whose source is not in
+    the repository. A binary counts as built from source when a source file of
+    the same name and language exists anywhere (headers are not source), or when
+    it sits in a build tree: a build file (Makefile, CMakeLists.txt, setup.py, ...)
+    in its directory or a parent, and source of its language in its directory, a
+    parent, or a src/ tree under its directory or its top-level directory
+    (libfoo.so at the root with src/*.cpp; tools/bin/x with tools/src/*.c). A
+    build file or source at the root says nothing about a binary under any
+    top-level directory. Vendor directories are included - a vendored binary runs too.
+    Symlinks and special files are never opened."""
+    files = []
+    for p in _iter_files(root):
+        if not os.path.islink(p) and os.path.isfile(p):
+            files.append(os.path.relpath(p, root))
+    stems_by_ext: dict[str, set[str]] = {}
+    build_dirs: set[str] = set()
+    src_dirs_by_ext: dict[str, set[str]] = {}
+    for rel in files:
+        d, base = os.path.split(rel.lower())
+        if base in _BIN_BUILD_FILES:
+            build_dirs.add(d)
+        stem, ext = os.path.splitext(base)
+        stems_by_ext.setdefault(ext, set()).add(stem)
+        src_dirs_by_ext.setdefault(ext, set()).add(d)
+
+    def ancestors(d):
+        out = [d]
+        while d:
+            d = os.path.dirname(d)
+            out.append(d)
+        return out
+
+    def in_build_tree(d, exts):
+        # Only the binary's own top-level directory counts: the repo root is
+        # everyone's ancestor, so a root Makefile and a root plugin.cpp would
+        # otherwise vouch for vendor/closed/libblob.so too.
+        up = ancestors(d)
+        if d:
+            up.remove("")
+        if not any(a in build_dirs for a in up):
+            return False
+        src_roots = {os.path.join(x, "src") for x in (d, d.split("/")[0] if d else "")}
+        for e in exts:
+            for sd in src_dirs_by_ext.get(e, ()):
+                if sd in up or any(sd == r or sd.startswith(r + "/") for r in src_roots):
+                    return True
+        return False
+
+    out = []
+    for rel in sorted(files):
+        low = "/" + rel.lower()
+        if low.endswith((".md", ".markdown")) or "/.git/" in low:
+            continue
+        kind = _binary_kind(os.path.join(root, rel))
+        if kind is None:
+            continue
+        exts = _BIN_SOURCE_FOR[kind]
+        if any(_binary_stem(rel) in stems_by_ext.get(e, ()) for e in exts):
+            continue
+        if in_build_tree(os.path.dirname(rel.lower()), exts):
+            continue
+        out.append((rel, kind))
+    return out
+
+
 def _privacy_findings(root: str, info: dict | None, own_owner: str | None) -> list[Finding]:
     """The privacy-* rule family (PLUGIN_GUIDELINES.md §14.16). Without a `privacy`
     block: one privacy-missing BLOCKER. With one:
@@ -2733,16 +3070,34 @@ def _privacy_findings(root: str, info: dict | None, own_owner: str | None) -> li
     # archive is open only if its source is. Neither is checkable here, so the
     # reviewer is asked to look once. BEST_PRACTICE: the block may well be right.
     if g("closedCode") is False:
+        # A compiled file in the repository with no source for it is closed code
+        # outright - nothing to confirm, so it contradicts the block. A packaged
+        # library (.whl/.egg/.jar/...) is often a vendored copy of an open project,
+        # open when its source is published, so it is asked about like a pip install.
+        compiled, packaged = [], []
+        for rel, kind in _committed_binary_hits(root):
+            (packaged if rel.lower().endswith(_BIN_PACKAGE_EXTS) else compiled).append((rel, kind))
         unverified = list(_priv_unverifiable_code_hits(root))
+        unverified += [(rel, None, "", f"the packaged {kind} library `{rel}`", None) for rel, kind in packaged]
         if unverified:
             rel, i, line, what, url = unverified[0]
             asks = [f"the source of {w} is public" + (f" at {u}" if u else "") for _, _, _, w, u in unverified[:4]]
             more = f" (+{len(unverified) - 4} more)" if len(unverified) > 4 else ""
+            where = loc((rel, i, line)) if i is not None else f"`{rel}`"
             out.append(Finding(BEST_PRACTICE, "privacy-closedcode-unverified",
                        f"`closedCode` is false but the plugin installs code the listing check cannot read as source "
-                       f"({loc((rel, i, line))}){' (+' + str(len(unverified) - 1) + ' more)' if len(unverified) > 1 else ''} - "
-                       f"a package from PyPI/npm/CPAN or a fetched binary is open code only if its source is published.\n"
+                       f"({where}){' (+' + str(len(unverified) - 1) + ' more)' if len(unverified) > 1 else ''} - "
+                       f"a package from PyPI/npm/CPAN, a vendored package or a fetched binary is open code only if "
+                       f"its source is published.\n"
                        f"  - Confirm {'; '.join(asks)}{more}; if any of it has no public source, set `closedCode` to true"))
+        if compiled:
+            more = (f" (+{len(compiled) - 1} more: {', '.join(r for r, _ in compiled[1:6])})"
+                    if len(compiled) > 1 else "")
+            undeclared("closedcode", f"`closedCode` is false but `{compiled[0][0]}` is a compiled "
+                       f"{compiled[0][1]} file with no source in the repository{more}",
+                       "Commit the source it is built from (and the build file), or remove the binary and build "
+                       "or fetch it at install time from a public source; if it has no public source, set "
+                       "`closedCode` to true")
 
     return out
 
@@ -4307,6 +4662,36 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"  - Settings: name it `plugin.{repo}` / `plugin.{repo}.json` "
                        f"(WriteSettingToFile/setPluginJSON); anything else: write it to "
                        f"`/home/fpp/media/plugindata/{repo}/` (`mkdir -p` it in scripts/fpp_install.sh)"))
+
+    # PHP's stock INI parser on a file FPP's WriteSettingToFile() wrote (the
+    # settings file, or a `plugin.<name>` config file). Those files aren't valid
+    # INI once a value holds JSON (written unquoted) or a `"`, and parse_ini_*
+    # silently mangles them: strips every embedded `"`, maps unquoted
+    # yes/on/true -> "1" and no/off/false/none -> "", expands `${...}`, and
+    # returns false for the whole file on one syntax error. FPP core shipped
+    # exactly this bug in 10.1.2 - DeleteSettingFromFile() parsed the settings
+    # file with parse_ini_file() and wrote back a corrupted privacyConsent JSON,
+    # bouncing every page to initialSetup.php (fixed in FPP ca1181176). Reading
+    # alone gives the plugin wrong values; a plugin that writes the parsed array
+    # back corrupts the file the same way core did. BEST_PRACTICE like the other
+    # wrong-API correctness checks - nothing breaks until a value needs quoting.
+    # See _stock_ini_parse_hits for what counts as an FPP-written file.
+    ini_hits = sorted(_stock_ini_parse_hits(root), key=lambda h: (h[0], h[1]))
+    if ini_hits:
+        hit = ini_hits[0]
+        also = ("; also " + ", ".join(f"{h[0]}:{h[1]}" for h in ini_hits[1:4])
+                + (f" (+{len(ini_hits) - 4} more)" if len(ini_hits) > 4 else "")
+                if len(ini_hits) > 1 else "")
+        out.append(Finding(BEST_PRACTICE, "stock-ini-parse-settings",
+                   f"reads an FPP settings/plugin config file with PHP's stock `{hit[3]}()` "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`{also}) - FPP leaves JSON values unquoted in these "
+                   f"files, and PHP's INI parser strips the embedded `\"` (JSON comes back as `{{a:1}}`), "
+                   f"turns yes/no into \"1\"/\"\", and fails the whole file on one bad line. FPP 10.1.2 "
+                   f"corrupted its own settings this way (fixed for the next release).\n"
+                   f"  - Use FPP's `ReadSettingFromFile($key, \"{repo}\")` for one value or "
+                   f"`custom_parse_ini_file($file)` (www/common.php) for the whole file; keep "
+                   f"structured data in its own JSON file (`plugin.{repo}.json` via setPluginJSON, "
+                   f"or `/home/fpp/media/plugindata/{repo}/`)"))
 
     # A file named api.php in the plugin root is not just another page: FPP core's
     # collectPluginEndpoints() (www/api/controllers/plugin.php:3754) require_once's
