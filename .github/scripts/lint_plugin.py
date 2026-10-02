@@ -2553,6 +2553,59 @@ def _priv_media_write_hits(root: str, exts=_CFG_SCAN_EXTS):
                     break
 
 
+# FPP core's install tree: `${FPPDIR}` in any of its default-value spellings,
+# bare `$FPPDIR`, or the literal /opt/fpp/ (not /opt/fpp-data, /opt/fpp2, ...).
+_CORE_TREE_ROOT = r'''(?:\$\{FPPDIR(?::?[-=][^}]*)?\}|\$FPPDIR\b|/opt/fpp(?=/))'''
+_CORE_TREE_PATH = _CORE_TREE_ROOT + r'''/[^\s"';&|)<]*'''
+# A write sink whose DESTINATION is under the core tree - same argument-position
+# rules as _PRIV_MEDIA_WRITE_RX (`cp <core file> /tmp/` and `. ${FPPDIR}/scripts/
+# common` are reads), plus touch/mkdir/rsync, PHP file_put_contents/copy/rename/
+# symlink (literal /opt/fpp/ or core's `$fppDir .` prefix), and a write-mode open().
+_CORE_TREE_WRITE_RX = re.compile(
+    r'''(?:\bsed\s+(?:-\S+\s+)*-i\S*\s+(?:\S+\s+)*|(?<![-=<&0-9\w])>>?\s*|\btee\s+(?:-a\s+)?'''
+    r'''|\b(?:cp|mv|install|ln|rsync)\s+(?:-\S+\s+)*(?!-)\S+\s+|\btouch\s+(?:-\S+\s+)*|\bmkdir\s+(?:-\S+\s+)*)'''
+    r'''['"]?(''' + _CORE_TREE_PATH + r''')'''
+    r'''|(?:\bfile_put_contents\s*\(|\b(?:copy|rename|symlink|link)\s*\([^,]*,)\s*'''
+    r'''(?:\$fppDir\s*\.\s*['"](/[^'"]*)['"]|['"](/opt/fpp/[^'"]*)['"])'''
+    r'''|\bopen\s*\(\s*['"](/opt/fpp/[^'"]*)['"]\s*,\s*(?:mode\s*=\s*)?['"][wax]''')
+_CORE_TREE_ALIAS_RX = re.compile(
+    r'''^\s*(?:local\s+|export\s+|readonly\s+)?\$?(\w+)\s*=\s*["']?(''' + _CORE_TREE_PATH + r''')["']?\s*$''')
+
+
+def _core_tree_write_hits(root: str, exts=_CFG_SCAN_EXTS):
+    """Yield (relpath, lineno, line, path) for a write whose destination is inside
+    FPP core's own install tree (${FPPDIR} / /opt/fpp) - PLUGIN_GUIDELINES §5,
+    "never write into ... FPP core". Follows one hop of variable aliasing within
+    the same file, like _priv_media_write_hits: fpp-jukebox (2026-10) assigned
+    `JUKEBOX_SHORTCUT="${FPPDIR}/www/jukebox.php"` then `cat > "$JUKEBOX_SHORTCUT"`.
+    Reads and execs of core files (`. ${FPPDIR}/scripts/common`, `${FPPDIR}/scripts/
+    ManageApacheContentPolicy.sh add ...`, `cp ${FPPDIR}/etc/x ./`) don't match."""
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        aliases: dict[str, tuple[str, "re.Pattern[str]"]] = {}
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = _CORE_TREE_WRITE_RX.search(line)
+            if m:
+                g = next(n for n in range(1, 5) if m.group(n))
+                target = m.group(g) if g != 2 else "${fppDir}" + m.group(2)
+                if not _priv_in_prose(rel, line, m.start(g)):
+                    yield rel, i, line.strip(), target
+                    continue
+            am = _CORE_TREE_ALIAS_RX.match(line)
+            if am:
+                aliases[am.group(1)] = (am.group(2), _priv_media_alias_sink_rx(am.group(1)))
+                continue
+            for name, (target, sink_rx) in aliases.items():
+                sm = sink_rx.search(line)
+                if sm and not _priv_in_prose(rel, line, sm.start()):
+                    yield rel, i, line.strip(), target
+                    break
+
+
 def _priv_core_write_hits(root: str):
     """(relpath, lineno, line, target) for a write the plugin makes to configuration it
     does not own: a 2-argument WriteSettingToFile (core settings, not the plugin's own
@@ -4624,6 +4677,27 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"(`/home/fpp/media/plugindata/{repo}/`), FPP's config storage (`/media/config/`, "
                    f"for the `plugin.{repo}` settings file only), or the log directory (a real "
                    f"`.log` file only), rather than loose under `/home/fpp/media/` itself"))
+
+    # Writes into FPP core's own install tree (${FPPDIR} / /opt/fpp) - §5 "never
+    # write into ... FPP core". Unlike the media/ checks this applies to the
+    # install/uninstall hooks too: there is no sanctioned plugin footprint inside
+    # core. The file is untracked and un-ignored in core's git checkout, so FPP's
+    # own `git clean -df` on a branch switch (scripts/git_branch) silently deletes
+    # it, and an FPP upgrade can overwrite it. Real case: fpp-jukebox (2026-10-01,
+    # commit d7da8ab) wrote ${FPPDIR}/www/jukebox.php as a short-URL redirect.
+    hit = next(iter(_core_tree_write_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "core-tree-write",
+                   f"writes into FPP core's own install tree - `{hit[3]}` "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`). Plugins may not write into FPP core "
+                   f"(PLUGIN_GUIDELINES §5): the file isn't part of FPP's git checkout, so FPP's "
+                   f"own branch switch (`git clean -df`) deletes it and an FPP update can "
+                   f"overwrite it.\n"
+                   f"  - Keep the file inside the plugin's own directory "
+                   f"(`/home/fpp/media/plugins/{repo}/`) and reach it through FPP's plugin routes "
+                   f"(`plugin.php?plugin={repo}&page=<file>`, add `&nopage=1` for a standalone "
+                   f"page) instead; if you need a short URL for users, show the full plugin URL "
+                   f"on your plugin's own page"))
 
     # Files a plugin creates under FPP's config directory that don't belong
     # there: crash reports bundle every file under config/ and can't redact a

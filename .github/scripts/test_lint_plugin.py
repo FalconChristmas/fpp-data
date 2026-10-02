@@ -621,6 +621,60 @@ class MediaWriteAlias(unittest.TestCase):
             [(2, "/home/fpp/media/scripts/foo.sh")])
 
 
+class CoreTreeWrite(unittest.TestCase):
+    """_core_tree_write_hits: a write whose destination is under ${FPPDIR} or
+    /opt/fpp/ (fpp-jukebox's `cat > "$JUKEBOX_SHORTCUT"`), not a read/exec of a
+    core file."""
+
+    def hits(self, text: str, rel: str = "scripts/fpp_install.sh"):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(tmp, {rel: text})
+            return [(h[1], h[3]) for h in L._core_tree_write_hits(tmp)]
+
+    def test_jukebox_alias_heredoc_fires(self):
+        self.assertEqual(self.hits(
+            'JUKEBOX_SHORTCUT="${FPPDIR}/www/jukebox.php"\n'
+            "cat > \"$JUKEBOX_SHORTCUT\" <<'PHP'\n<?php\nPHP\n"
+            'chmod 644 "$JUKEBOX_SHORTCUT"\n'),
+            [(2, "${FPPDIR}/www/jukebox.php")])
+
+    def test_direct_writes_fire(self):
+        self.assertEqual(self.hits(
+            'cp "$DIR/x.php" "${FPPDIR}/www/x.php"\n'
+            'ln -s /home/fpp/media/plugins/p/y.js /opt/fpp/www/js/y.js\n'
+            "sed -i 's/a/b/' ${FPPDIR:-/opt/fpp}/www/index.php\n"
+            'echo hi >> $FPPDIR/etc/foo\n'
+            'mkdir -p /opt/fpp/www/myplugin\n'),
+            [(1, '${FPPDIR}/www/x.php'), (2, '/opt/fpp/www/js/y.js'),
+             (3, '${FPPDIR:-/opt/fpp}/www/index.php'), (4, '$FPPDIR/etc/foo'),
+             (5, '/opt/fpp/www/myplugin')])
+
+    def test_reads_and_execs_are_silent(self):
+        self.assertEqual(self.hits(
+            '. "${FPPDIR}/scripts/common" 2>/dev/null || true\n'
+            '${FPPDIR}/scripts/ManageApacheContentPolicy.sh add script-src https://x\n'
+            'cp ${FPPDIR}/etc/sample.json "$PLUGINDIR/"\n'
+            '/opt/fpp/src/fpp -g 4,Output,1\n'
+            'exec /opt/fpp/scripts/update_plugin foo\n'
+            'grep -q x /opt/fpp/www/index.php > /tmp/out\n'
+            'X=/opt/fpp-data/foo\necho > "$X"\n'
+            'rm -f "${FPPDIR}/www/jukebox.php"\n'), [])
+
+    def test_php_forms(self):
+        self.assertEqual(self.hits(
+            '<?php\nfile_put_contents($fppDir . "/www/x.php", $s);\n'
+            'copy(__DIR__ . "/a.js", "/opt/fpp/www/js/a.js");\n'
+            'file_put_contents("/tmp/x", $s);\n'
+            '$v = file_get_contents("/opt/fpp/www/fppversion.php");\n', "api.php"),
+            [(2, "${fppDir}/www/x.php"), (3, "/opt/fpp/www/js/a.js")])
+
+    def test_python_open_mode(self):
+        self.assertEqual(self.hits(
+            'open("/opt/fpp/src/fppversion_defines.h").read()\n'
+            'open("/opt/fpp/www/x.html", "w").write(s)\n', "daemon.py"),
+            [(2, "/opt/fpp/www/x.html")])
+
+
 class SetEHereString(unittest.TestCase):
     """_set_e_position: `<<<` and `<<` in arithmetic are not heredoc openers."""
 
