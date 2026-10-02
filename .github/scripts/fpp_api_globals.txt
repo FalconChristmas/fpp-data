@@ -1,7 +1,7 @@
 # Global PHP function names defined on every FPP /api/* request (www/api/index.php loads
 # api/lib/limonade.php, config.php and common.php, plus every file those two include, then api/controllers/*.php).
 # A plugin api.php declaring any of these is a redeclare fatal on FPP 9 and a skipped API on 10+.
-# Generated from FalconChristmas/fpp 795efc47a (2026-09-22). To regenerate, in fpp/www:
+# Generated from FalconChristmas/fpp fd7b98898 (2026-10-03). To regenerate, in fpp/www:
 #   incs=$(grep -hoE "(require|include)(_once)?\s*\(?\s*(__DIR__\s*\.\s*)?['\"][^'\"]+\.(php|inc)['\"]" config.php common.php | grep -oE "[^'\"/]+\.(php|inc)" | sort -u)
 #   grep -rhoE '^\s*function\s+[A-Za-z_]\w*' api/lib/limonade.php config.php common.php $incs api/controllers/*.php 2>/dev/null | sed -E 's/^\s*function\s+//' | sort -uf
 addMultiSyncUUID
@@ -25,6 +25,7 @@ ApprovedCape
 autoload_controller
 BackupBlobRefsInJson
 benchmark
+BuildManualCrashReportWithoutFppd
 BuildSimpleAudioGroupsData
 BuildSimpleVideoGroupsData
 BuildSlimPluginPopularity
@@ -53,6 +54,8 @@ ConfigFileValidateOrFail
 ConfigFileWithinBase
 ConfigureEmail
 content_for
+CrashReportError
+CrashReportJsonBody
 CrashReportPath
 CreateDir
 css
@@ -69,6 +72,7 @@ DeleteProxy
 DeleteRoutingPreset
 DeleteSequences
 DeleteSettingFromFile
+DepsMayChangePackages
 DepsRequirePackages
 DepsRequirePython
 DescribeBackupBlobDeletion
@@ -133,6 +137,7 @@ flash
 flash_now
 flash_sweep
 ForgetPluginPrivacyAccepted
+FppdListening
 FPPDPluginLifecycle
 fppSendCacheValidators
 fppSendContentCacheValidators
@@ -176,11 +181,13 @@ GetConfigFileList
 GetConsent
 get_cpu_stats
 get_cpu_stats_raw
+GetCrashDisclosures
 GetCrashUploadTarget
 getDHCPLeases
 GetDirSetting
 GetEEPROMFilename
 GetEEPROMVendorLists
+GetErrorReportPreview
 GetFanThermalZones
 GetFile
 GetFileImpl
@@ -257,8 +264,9 @@ GetPluginList
 GetPluginPageUrl
 GetPluginPopularity
 GetPluginPrivacyStatus
+GetPluginReleaseNotes
 GetPluginSource
-GetPluginUpdatesAvailable
+GetPluginUpdateStatus
 GetProxiedURL
 GetProxies
 get_remote_git_version
@@ -353,6 +361,7 @@ is_valid_domain_name
 isValidSystemUUID
 js
 json
+json_array_validate
 json_object_validate
 json_validate
 layout
@@ -369,7 +378,6 @@ LoadRoutingPreset
 LoadSettingInfos
 LoadSubPlaylist
 LoadTroubleShootingCommands
-loadValidateFiles
 localPeerIdentity
 MakeJSONBackup
 MapDirectoryKey
@@ -395,6 +403,7 @@ network_get_gateway
 network_get_interface
 network_interface_in_use
 network_interface_is_hardware
+network_is_valid_interface_name
 network_list_interfaces
 network_list_interfaces_array
 network_list_interfaces_obj
@@ -422,6 +431,10 @@ params
 ParseBooleanValue
 partial
 PatchFile
+PatchFileAddChunk
+PatchFileAssemble
+PatchFileGlobEscape
+PatchFileReceiveChunk
 peerMacIdentity
 PersistInputGroupMemberVolume
 PipAvailable
@@ -435,6 +448,7 @@ PipeWireProbeFormatRate
 playlist_delete
 playlist_get
 playlist_insert
+playlistIssueText
 playlist_list
 playlist_list_validate
 playlist_pause
@@ -452,28 +466,48 @@ playlist_update
 PluginApiDeclaredFunctions
 PluginApiFunctionConflicts
 PluginApiReservedFunctions
+PluginAptFiles
 PluginBoundedFetch
 PluginCachedIconData
 PluginCurrentBranch
+PluginDeclaredDependencies
+PluginDpkgList
+PluginDpkgStatusStamp
 PluginEchoLog
 PluginEmitIcon
 _PluginExtractPageFromHtml
 _PluginExtractPageFromRaw
 PluginFetchBranch
+PluginFetchFailureReason
+PluginFetchLock
+PluginFetchLockFile
 PluginFetchReinstallTargetByURL
 PluginFileOnUpload
 _PluginGetBestPageUrl
 PluginGetSetting
+PluginGitFetchCmd
+PluginGitHubRepoOf
 PluginGitHubStatsCacheFile
 PluginGitHubStatsFetchChunk
-PluginHasUpdates
+PluginGitUpdateVerdict
+PluginHasOwnScript
+PluginHaveCommand
 PluginIconURLIsAllowed
 PluginInstalledInfo
 PluginInstalledSha
 PluginListCacheFile
 PluginListIsCurrent
 PluginLog
+PluginOfferedReleaseNotesStyle
+PluginPackageChanges
+PluginPackageChangesCap
+PluginPackageChangesKeep
+PluginPackageChangesMerge
+PluginPackageChangesText
+PluginPackageSnapshot
 PluginPendingPrivacy
+PluginPinnedSha
+PluginPinnedVerdict
 PluginPopularityCacheFile
 PluginPrivacyAcceptedFile
 PluginPrivacyBlock
@@ -486,17 +520,48 @@ PluginPrivacyRefuse
 PluginRecordUpgradedPrivacy
 PluginReinstallPendingSync
 PluginReinstallTarget
+PluginReleaseClaimsTracked
+PluginReleaseNotesCacheFile
+PluginReleaseNotesError
+PluginReleaseNotesFromGitHistory
+PluginReleaseNotesFromGitHub
+PluginReleaseNotesFromScript
+PluginReleaseNotesGitHubGet
+PluginReleaseNotesGitLog
+PluginReleaseNotesInfo
+PluginReleaseNotesStyleOf
+PluginReleaseNotesText
 PluginRepoSlugFromURL
+PluginRunScriptBounded
 _PluginScanMenuPagesRaw
+PluginScriptEnv
 PluginServeIcon
 PluginSetSetting
 PluginSrcURLIsListed
 PluginStreaming
+PluginTrackPackages
 PluginTryQuickListFetch
+PluginUnverifiedLock
+PluginUnverifiedUnlock
 PluginUpdateCheckSrcURL
-PluginUpdatesCacheFile
+PluginUpdateMaybeSweep
+PluginUpdateStartSweep
+PluginUpdateStateEmpty
+PluginUpdateStateFile
+PluginUpdateStateForget
+PluginUpdateStateRead
+PluginUpdateStateRecordSweep
+PluginUpdateStateRecordSweepProgress
+PluginUpdateStateSet
+PluginUpdateStateUpdate
+PluginUpdateStateWrite
+PluginUpdateSweepDue
+PluginUpdateSweepRunning
+PluginUpdateVerdict
+PluginUpgradeRev
 PluginVersionToNumber
 PluginWarmListDetached
+PostCrashReport
 PostCrashUpload
 PostFile
 PostProxies
@@ -597,10 +662,12 @@ RecordPrivacyConsent
 RedeemVoucher
 redirect
 redirect_to
+RefreshPluginUpdateStatus
 ReleaseUndeclaredPackageClaims
 ReloadSchedule
 RememberBackupMetadata
 remoteAction
+removedFPPCommands
 removeDir
 remove_outer_quotes
 render
@@ -625,8 +692,9 @@ ResolveAlsaCaptureNodeName
 ResolveAlsaCardIdToNumber
 ResolveAlsaCardNumberToId
 ResolveCardIdToNumber
+ResolveDependencyPlugins
+ResolveLocalDependencies
 ResolvePipeWireNodeChannels
-ResolvePluginDependencies
 ResolvePluginInfoByName
 ResolveUnverifiedPlugins
 RestartFPPD
@@ -764,6 +832,7 @@ testMode_Get
 testMode_Set
 TimeZoneCoordinates
 txt
+UndeclaredPackageClaims
 UninstallPlugin
 UnmountDevice
 UpdateInputGroupEQRealtime
@@ -778,7 +847,14 @@ url_for
 UsbFindTTOwner
 v
 validateAndAdd
-validatePlayListEntries
+validate_commands
+validateFPPCommand
+validatePlaylistByName
+validatePlaylistEntry
+validatePlaylistReference
+validationContext
+validationFileExists
+validationMediaExists
 value_or_default
 VBANNodeName
 VBANSlug
