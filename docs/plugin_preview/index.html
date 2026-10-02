@@ -7,8 +7,10 @@
 <title>Plugin preview - Falcon Player</title>
 <!--
   Renders a plugin's pluginInfo.json the way FPP's Plugin Manager will show it:
-  the card in the plugin list (six privacy dots) and the install dialog (the
-  "name by author" line, label line, the author's summary, six chips whose
+  the card in the plugin list (six privacy dots), the detail popup the card
+  opens (description, then one wrapping row of author, links and badges, then
+  the disclosure) and the install dialog (the "name by author" line, label
+  line, the author's summary, six chips whose
   detail lines are their tooltips, and a collapsed "Full disclosure" holding
   those lines and the author's `other` text; FPP's headline is shown only for
   a block with no disclosure - for a declared block it is the card's tooltip).
@@ -22,6 +24,11 @@
   The styling below is the subset of Bootstrap 5.3 + FPP's own classes that
   the renderer and plugins.php emit, with the theme tokens inlined so the page
   needs no Bootstrap build. Font Awesome (the dots/carets) is loaded from cdnjs.
+
+  pluginList.json and pluginCategories.json are read from this repo on
+  raw.githubusercontent.com (the URLs FPP itself uses) for the category chip
+  and, for a plugin already listed, its "listed Mon YYYY" date. Without them
+  the preview still renders, as for an unlisted plugin in "Other".
 
   This page only shows what the author DECLARED. The listing check
   (lint_plugin.py) that compares the declaration with the code runs on the
@@ -38,7 +45,7 @@
   --bs-danger-text-emphasis:rgb(88,21.2,27.6); --bs-danger-bg-subtle:rgb(248,214.6,217.8); --bs-danger-border-subtle:rgb(241,174.2,180.6);
   --bs-secondary-text-emphasis:rgb(43.2,46.8,50); --bs-secondary-bg-subtle:rgb(225.6,227.4,229); --bs-secondary-border-subtle:rgb(196.2,199.8,203);
   --bs-primary-text-emphasis:rgb(5.2,44,101.2); --bs-primary-bg-subtle:rgb(206.6,226,254.6); --bs-primary-border-subtle:rgb(158.2,197,254.2);
-  --pp-ground:#f4f5f7; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.15); --bs-btn-close-color:#000;
+  --pp-ground:#f4f5f7; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.15); --bs-btn-close-color:#000; --pp-tag-color:#373232;
   color-scheme:light;
 }
 [data-bs-theme=dark] {
@@ -49,7 +56,7 @@
   --bs-danger-text-emphasis:rgb(234,133.8,143.4); --bs-danger-bg-subtle:rgb(44,10.6,13.8); --bs-danger-border-subtle:rgb(132,31.8,41.4);
   --bs-secondary-text-emphasis:rgb(166.8,172.2,177); --bs-secondary-bg-subtle:rgb(21.6,23.4,25); --bs-secondary-border-subtle:rgb(64.8,70.2,75);
   --bs-primary-text-emphasis:rgb(109.8,168,253.8); --bs-primary-bg-subtle:rgb(2.6,22,50.6); --bs-primary-border-subtle:rgb(7.8,66,151.8);
-  --pp-ground:#16191d; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.5); --bs-btn-close-color:#fff;
+  --pp-ground:#16191d; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.5); --bs-btn-close-color:#fff; --pp-tag-color:#83898f;
   color-scheme:dark;
 }
 @media (prefers-color-scheme: dark) { :root:not([data-bs-theme=light]) {
@@ -60,7 +67,7 @@
   --bs-danger-text-emphasis:rgb(234,133.8,143.4); --bs-danger-bg-subtle:rgb(44,10.6,13.8); --bs-danger-border-subtle:rgb(132,31.8,41.4);
   --bs-secondary-text-emphasis:rgb(166.8,172.2,177); --bs-secondary-bg-subtle:rgb(21.6,23.4,25); --bs-secondary-border-subtle:rgb(64.8,70.2,75);
   --bs-primary-text-emphasis:rgb(109.8,168,253.8); --bs-primary-bg-subtle:rgb(2.6,22,50.6); --bs-primary-border-subtle:rgb(7.8,66,151.8);
-  --pp-ground:#16191d; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.5); --bs-btn-close-color:#fff;
+  --pp-ground:#16191d; --pp-shadow:0 .5rem 1rem rgba(0,0,0,.5); --bs-btn-close-color:#fff; --pp-tag-color:#83898f;
   color-scheme:dark;
 }}
 *,*::before,*::after{box-sizing:border-box}
@@ -77,14 +84,15 @@ b,.fw-bold{font-weight:700} .fw-semibold{font-weight:600}
 .border{border:1px solid var(--bs-border-color)!important}
 .border-success-subtle{border-color:var(--bs-success-border-subtle)!important} .border-warning-subtle{border-color:var(--bs-warning-border-subtle)!important} .border-danger-subtle{border-color:var(--bs-danger-border-subtle)!important} .border-secondary-subtle{border-color:var(--bs-secondary-border-subtle)!important}
 .rounded{border-radius:.375rem!important} .rounded-pill{border-radius:50rem!important}
-.d-flex{display:flex!important} .d-inline-flex{display:inline-flex!important} .d-none{display:none!important}
+.d-flex{display:flex!important} .d-inline-flex{display:inline-flex!important} .d-inline-block{display:inline-block!important} .d-none{display:none!important}
 .flex-wrap{flex-wrap:wrap!important} .flex-column{flex-direction:column!important} .flex-grow-1{flex-grow:1!important}
 .align-items-center{align-items:center!important} .align-items-start{align-items:flex-start!important}
 .ms-auto{margin-left:auto!important} .min-w-0{min-width:0!important}
-.gap-1{gap:.25rem!important} .gap-2{gap:.5rem!important} .gap-3{gap:1rem!important}
+.gap-1{gap:.25rem!important} .gap-2{gap:.5rem!important} .gap-3{gap:1rem!important} .row-gap-1{row-gap:.25rem!important} .column-gap-3{column-gap:1rem!important}
 .mt-1{margin-top:.25rem!important} .mt-2{margin-top:.5rem!important} .mt-3{margin-top:1rem!important}
 .mb-0{margin-bottom:0!important} .mb-1{margin-bottom:.25rem!important} .mb-2{margin-bottom:.5rem!important} .mb-3{margin-bottom:1rem!important}
-.p-2{padding:.5rem!important} .ps-3{padding-left:1rem!important}
+.me-1{margin-right:.25rem!important}
+.p-2{padding:.5rem!important} .ps-3{padding-left:1rem!important} .py-1{padding-top:.25rem!important;padding-bottom:.25rem!important}
 .overflow-auto{overflow:auto!important}
 .list-unstyled{padding-left:0;list-style:none;margin:0}
 p{margin-top:0;margin-bottom:1rem}
@@ -92,6 +100,8 @@ p{margin-top:0;margin-bottom:1rem}
 /* badge (Bootstrap 5.3) */
 .badge{--bs-badge-padding-x:.65em;--bs-badge-padding-y:.35em;--bs-badge-font-size:.75em;--bs-badge-font-weight:700;--bs-badge-border-radius:.375rem;display:inline-block;padding:var(--bs-badge-padding-y) var(--bs-badge-padding-x);font-size:var(--bs-badge-font-size);font-weight:var(--bs-badge-font-weight);line-height:1;text-align:center;white-space:nowrap;vertical-align:baseline;border-radius:var(--bs-badge-border-radius)}
 .text-bg-graceful{background:var(--bs-primary-bg-subtle);color:var(--bs-primary-text-emphasis);border:1px solid var(--bs-primary-border-subtle)}
+/* FPP's quiet metadata pill (css/fpp-system-design.css .fpp-tag) */
+.fpp-tag{display:inline-flex;align-items:center;padding:2px 8px;border-radius:4px;font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;background:var(--bs-secondary-bg);color:var(--pp-tag-color)}
 .pluginPrivacyChip{font-family:inherit;font-size:.8em;padding:.45em .8em;background-clip:padding-box}
 button.pluginPrivacyChip{cursor:pointer}
 .pluginPrivacyChip:focus-visible{outline:2px solid var(--bs-link-color);outline-offset:2px}
@@ -157,7 +167,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
     </div>
     <button type="button" class="pptheme" id="themeBtn" aria-label="Toggle light/dark">Dark</button>
   </div>
-  <p class="pplede">See how FPP's Plugin Manager will show your plugin before you submit it: the card in the plugin list and the install dialog, including the six privacy lights computed from the <code>privacy</code> block of your <code>pluginInfo.json</code>. The colours and wording are FPP's own, produced by the same script FPP runs. The rules are in <a href="https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGIN_GUIDELINES.md" target="_blank" rel="noopener">PLUGIN_GUIDELINES.md</a> §14.15; what a listing needs is in the <a href="https://github.com/FalconChristmas/fpp-data/blob/master/PLUGINS.md" target="_blank" rel="noopener">plugin guidelines</a>.</p>
+  <p class="pplede">See how FPP's Plugin Manager will show your plugin before you submit it: the card in the plugin list, the detail popup it opens and the install dialog, including the six privacy lights computed from the <code>privacy</code> block of your <code>pluginInfo.json</code>. The colours and wording are FPP's own, produced by the same script FPP runs. The rules are in <a href="https://github.com/FalconChristmas/fpp-plugin-Template/blob/master/PLUGIN_GUIDELINES.md" target="_blank" rel="noopener">PLUGIN_GUIDELINES.md</a> §14.15; what a listing needs is in the <a href="https://github.com/FalconChristmas/fpp-data/blob/master/PLUGINS.md" target="_blank" rel="noopener">plugin guidelines</a>.</p>
 
   <form class="ppform" id="form" autocomplete="off">
     <label for="repo">GitHub repo or pluginInfo.json URL <span class="hint">- <code>owner/repo</code>, a github.com URL, or a direct URL to a <code>pluginInfo.json</code></span></label>
@@ -178,6 +188,15 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:
     <section class="ppsection">
       <h2>In the plugin list <small>- the six dots; hover one for its state</small></h2>
       <div id="card"></div>
+    </section>
+
+    <section class="ppsection">
+      <h2>Detail popup <small>- opened by clicking the card</small></h2>
+      <div class="ppmodalwrap"><div class="modal-content" role="dialog" aria-labelledby="dtlTitle">
+        <div class="modal-header"><h5 class="modal-title" id="dtlTitle"></h5><button type="button" class="btn-close" aria-label="Close" tabindex="-1"></button></div>
+        <div class="modal-body" id="pluginDetailDialog"></div>
+        <div class="modal-footer"><button type="button" class="btn btn-success" id="detailInstallBtn">Install</button><button type="button" class="btn btn-secondary">Close</button></div>
+      </div></div>
     </section>
 
     <section class="ppsection">
@@ -242,7 +261,8 @@ function IsOfficialPlugin(data) {
     return seg.length > 0 && seg[0].toLowerCase() === "falconchristmas";
   } catch (e) { return false; }
 }
-function PluginAuthorHtml(data) {
+// cls: extra classes for the link (the detail popup's taller tap target).
+function PluginAuthorHtml(data, cls) {
   var u = data && data.srcURL;
   if (!u) return "";
   try {
@@ -251,7 +271,7 @@ function PluginAuthorHtml(data) {
     if (seg.length === 0) return "";
     var owner = seg[0];
     var profile = (parsed.host.toLowerCase() === "github.com") ? "https://github.com/" + owner : parsed.origin + "/" + owner;
-    return '<a href="' + EscapeAttr(profile) + '" target="_blank" rel="noopener noreferrer">' + EscapeHtml(owner) + "</a>";
+    return '<a href="' + EscapeAttr(profile) + '"' + (cls ? ' class="' + cls + '"' : "") + ' target="_blank" rel="noopener noreferrer">' + EscapeHtml(owner) + "</a>";
   } catch (e) { return ""; }
 }
 // Rendered as FPP will show it once listed, which is what an author is
@@ -271,7 +291,7 @@ function PrivacyRowHtml(data) {
 function PrivacyBlockHtml(r, prefix) {
   // No block at all: FPP's red warning in place of the label line.
   var h = r.declared
-    ? '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span> &middot; checked automatically against its code for the plugin list</div>'
+    ? '<div class="small text-secondary mb-1"><span class="fw-bold text-uppercase">Disclosed by the author</span></div>'
     : '<div class="d-flex gap-2 align-items-start p-2 mb-2 rounded border bg-danger-subtle border-danger-subtle text-danger-emphasis"><i class="fas fa-triangle-exclamation mt-1"></i><div>' +
       "<b>" + EscapeHtml(r.headline.text) + ".</b> " + EscapeHtml(r.headline.explain || "") + "</div></div>";
   h += FPPPluginPrivacy.summaryHtml(r);
@@ -279,13 +299,102 @@ function PrivacyBlockHtml(r, prefix) {
   h += FPPPluginPrivacy.detailsHtml(r, { prefix: prefix });
   return h;
 }
-// "Name by Author [Official]", the line that heads the install dialog.
+// Same address, ignoring a trailing slash or .git: github.com/x/y(.git)(/).
+function PluginSameLink(a, b) {
+  var n = function (u) { return (u || "").replace(/\.git$/i, "").replace(/\/+$/, "").toLowerCase(); };
+  return !!(a && b && n(a) === n(b));
+}
+// Install dialog: the home page, and "Code from:" only when the code is
+// cloned from somewhere else.
+function PluginSourceLinksHtml(data) {
+  var link = function (icon, label, url) {
+    return '<div class="small text-secondary mt-2"><i class="fas ' + icon + '"></i> ' + label +
+      '<a href="' + EscapeAttr(url) + '" target="_blank" rel="noopener noreferrer">' + EscapeHtml(url) + "</a></div>";
+  };
+  var home = IsSafeHttpUrl(data.homeURL) ? data.homeURL : "";
+  var src = IsSafeHttpUrl(data.srcURL) ? data.srcURL : "";
+  var h = home ? link("fa-home", "", home) : "";
+  if (src && !PluginSameLink(src, home)) h += link("fa-code", "Code from: ", src);
+  return h;
+}
+
+// From pluginList.json / pluginCategories.json (loadLists below); empty when
+// they could not be read.
+var pluginListedBySlug = {};   // "owner/repo" of a list entry -> date it joined the list (YYYY-MM-DD)
+var pluginCategoryOf = {};     // lowercased list name -> category name
+var pluginCategoryByName = {}; // category name -> {name, longName, slug, icon}
+var OTHER_CATEGORY = { name: "Other", slug: "other", icon: "fas fa-puzzle-piece" };
+var PLUGIN_MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function PluginRepoSlug(url) {
+  var m = /^https?:\/\/(?:github\.com|raw\.githubusercontent\.com)\/([^\/?#]+)\/([^\/?#]+)/i.exec(url || "");
+  return m ? (m[1] + "/" + m[2].replace(/\.git$/i, "")).toLowerCase() : "";
+}
+// When it joined the plugin list, {text: "Mar 2021", title}, or null. Matched,
+// as FPP does, on the repo its srcURL points at, so a fork gets no date.
+function PluginListedInfo(data) {
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(pluginListedBySlug[PluginRepoSlug(data.srcURL)] || "");
+  if (!m || +m[2] < 1 || +m[2] > 12) return null;
+  var text = PLUGIN_MONTH_NAMES[+m[2] - 1] + " " + m[1];
+  return { text: text, title: "Added to the FPP plugin list in " + text };
+}
+function PluginCategoryInfo(data) {
+  var name = pluginCategoryOf[(data.repoName || "").toLowerCase()] || pluginCategoryOf[(data.name || "").toLowerCase()] || "Other";
+  var known = pluginCategoryByName[name];
+  return { name: known ? known.name : "Other", obj: known || OTHER_CATEGORY };
+}
+
+// "Name by Author", the Official badge, and when it joined the plugin list:
+// the line that heads the install dialog.
 function PluginByLineHtml(data) {
   var author = PluginAuthorHtml(data) || EscapeHtml(data.author || "");
+  var listed = PluginListedInfo(data);
   return '<div class="mb-2"><b>' + EscapeHtml(data.name) + "</b>" +
     (author ? ' <span class="text-secondary">by ' + author + "</span>" : "") +
+    (listed ? ' <span class="text-secondary" title="' + listed.title + '">&middot; listed ' + listed.text + "</span>" : "") +
     (IsOfficialPlugin(data) ? ' <span class="badge text-bg-graceful"><i class="fas fa-certificate"></i> Official</span>' : "") +
     "</div>";
+}
+
+// PluginBadgesHtml's badges that depend only on the plugin: Official,
+// Private, the listing date (detail popup only) and the category. Installed,
+// "Not updated"/"Incompatible", RAM/CPU and popularity depend on the player.
+function PluginBadgesHtml(data, includeCategory, includeListed) {
+  var h = "";
+  if (IsOfficialPlugin(data))
+    h += '<span class="badge text-bg-graceful me-1" title="Official FPP plugin (maintained in the FalconChristmas GitHub organization)"><i class="fas fa-certificate"></i> Official</span>';
+  if (data.private)
+    h += '<span class="fpp-tag gap-1 me-1" title="Hosted in a private GitHub repository"><i class="fas fa-lock"></i> Private</span>';
+  var listed = includeListed ? PluginListedInfo(data) : null;
+  if (listed)
+    h += '<span class="fpp-tag gap-1 me-1 pluginListedChip" title="' + listed.title + '"><i class="fas fa-calendar"></i> Listed ' + listed.text + "</span>";
+  if (includeCategory) {
+    var cat = PluginCategoryInfo(data);
+    h += '<span class="fpp-tag gap-1 me-1 pluginCatChip" title="' + EscapeAttr(cat.obj.longName || cat.name) + '"><i class="' + EscapeAttr(cat.obj.icon) + '"></i> ' + EscapeHtml(cat.name) + "</span>";
+  }
+  return h;
+}
+
+// The detail popup's one wrapping row: "by owner", the home page (GitHub for
+// a github.com repo), Source only when it is somewhere else, Report a bug,
+// then the badges. (Release notes are offered for installed plugins only.)
+function PluginDetailMetaHtml(data, badgesHtml) {
+  var link = function (url, icon, text) {
+    return '<a class="d-inline-block py-1" href="' + EscapeAttr(url) + '" title="' + EscapeAttr(url) +
+      '" target="_blank" rel="noopener noreferrer"><i class="' + icon + ' me-1" aria-hidden="true"></i>' + text + "</a>";
+  };
+  var items = [];
+  var author = PluginAuthorHtml(data, "d-inline-block");
+  if (author) items.push('<span class="py-1"><i class="fas fa-user me-1" aria-hidden="true"></i>by ' + author + "</span>");
+  var home = IsSafeHttpUrl(data.homeURL) ? data.homeURL : "";
+  if (home) {
+    var gh = /^https?:\/\/github\.com\/[^\/?#]+\/[^\/?#]+\/?$/i.test(home.replace(/\.git$/i, ""));
+    items.push(gh ? link(home, "fab fa-github", "GitHub") : link(home, "fas fa-home", "Home page"));
+  }
+  if (IsSafeHttpUrl(data.srcURL) && !PluginSameLink(data.srcURL, home)) items.push(link(data.srcURL, "fas fa-code", "Source"));
+  if (IsSafeHttpUrl(data.bugURL)) items.push(link(data.bugURL, "fas fa-bug", "Report a bug"));
+  if (badgesHtml) items.push('<span class="d-inline-flex flex-wrap align-items-center row-gap-1 py-1">' + badgesHtml + "</span>");
+  if (!items.length) return "";
+  return '<div class="d-flex flex-wrap align-items-center column-gap-3 small text-secondary mb-3">' + items.join("") + "</div>";
 }
 
 // ---- render ---------------------------------------------------------------
@@ -301,13 +410,12 @@ function render(data, sourceUrl) {
     if (m) data.srcURL = "https://github.com/" + m[1] + "/" + m[2];
   }
 
-  // Card, as plugins.php builds it (minus the category/version badges and
-  // the GitHub stats, which need the plugin list / GitHub API).
-  var official = IsOfficialPlugin(data);
+  // Card, as plugins.php builds it (minus the icon, the Install button, the
+  // player-dependent badges and the GitHub stats).
   var h = '<div class="card"><div class="card-body d-flex flex-column">';
   h += '<div class="d-flex align-items-start gap-3 mb-1"><div class="min-w-0 flex-grow-1">';
   h += '<h5 class="card-title pluginTitle mb-1">' + EscapeHtml(data.name) + "</h5>";
-  if (official) h += '<div><span class="badge text-bg-graceful"><i class="fas fa-certificate"></i> Official</span></div>';
+  h += '<div class="pluginCardBadges">' + PluginBadgesHtml(data, true, false) + "</div>";
   h += "</div></div>";
   var cardAuthorHtml = PluginAuthorHtml(data);
   if (cardAuthorHtml) h += '<div class="text-secondary small mb-1 pluginAuthor"><i class="fas fa-user"></i> ' + cardAuthorHtml + "</div>";
@@ -316,20 +424,35 @@ function render(data, sourceUrl) {
   h += "</div></div>";
   $("card").innerHTML = h;
 
-  // Install dialog, as ShowInstallDialog in plugins.php builds it. The
-  // "installing from a URL" developer callout is left out: it is about the
-  // install path, not the plugin. The Install button reads "Install", or
-  // "Install anyway" for a plugin with no privacy block; FPP's device and
-  // version checks, which also force it, are not previewed.
-  var src = data.srcURL || "";
-  var body = PluginByLineHtml(data);
+  // The Install button reads "Install", or "Install anyway" for a plugin
+  // with no privacy block; FPP's device and version checks, which also force
+  // it, are not previewed. Nor is the "installing from a URL" developer
+  // callout: it is about the install path, not the plugin. Dependency
+  // plugins' sections need the plugin list's pluginInfo files; left out.
   var r = PluginPrivacyResult(data);
+  var btnText = r.declared ? "Install" : "Install anyway";
+  var btnCls = "btn " + (r.declared ? "btn-success" : "btn-warning");
+
+  // Detail popup, as ShowPluginDetail builds it for a plugin that can be
+  // installed: the description, the author/links/badges row, then what the
+  // install dialog shows minus its links (the row has them). The title's
+  // icon and the "Compatible FPP versions" line (Developer UI only) are left out.
+  var body = "<p>" + EscapeHtml(data.description || "") + "</p>";
+  body += PluginDetailMetaHtml(data, PluginBadgesHtml(data, true, true));
+  body += '<div class="mt-2">' + PrivacyBlockHtml(r, "dt") + "</div>";
+  $("dtlTitle").textContent = data.name;
+  $("pluginDetailDialog").innerHTML = body;
+  $("detailInstallBtn").textContent = btnText;
+  $("detailInstallBtn").className = btnCls;
+  FPPPluginPrivacy.bind("pluginDetailDialog");
+
+  // Install dialog, as ShowInstallDialog in plugins.php builds it.
+  body = PluginByLineHtml(data);
   body += PrivacyBlockHtml(r, "ci");
-  if (IsSafeHttpUrl(src)) body += '<div class="small text-secondary mt-2"><i class="fas fa-code"></i> Source: ' +
-    '<a href="' + EscapeAttr(src) + '" target="_blank" rel="noopener noreferrer">' + EscapeHtml(src) + "</a></div>";
+  body += PluginSourceLinksHtml(data);
   $("confirmInstallDialog").innerHTML = body;
-  $("installBtn").textContent = r.declared ? "Install" : "Install anyway";
-  $("installBtn").className = "btn " + (r.declared ? "btn-success" : "btn-warning");
+  $("installBtn").textContent = btnText;
+  $("installBtn").className = btnCls;
   FPPPluginPrivacy.bind("confirmInstallDialog");
 
   $("srcNote").innerHTML = sourceUrl
@@ -341,6 +464,22 @@ function render(data, sourceUrl) {
   $("out").classList.add("show");
   $("out").scrollIntoView({ behavior: "smooth", block: "start" });
 }
+
+// The plugin list and its categories, fetched once; never rejects (a failed
+// read leaves the maps empty: no listing date, category "Other").
+var FPP_DATA_RAW = "https://raw.githubusercontent.com/FalconChristmas/fpp-data/master/";
+var listsReady = Promise.all([
+  fetch(FPP_DATA_RAW + "pluginList.json").then(function (res) { return res.json(); }).then(function (j) {
+    (j.pluginList || []).forEach(function (e) {
+      if (!Array.isArray(e)) return;
+      if (e.length > 2 && e[2]) pluginCategoryOf[String(e[0] || "").toLowerCase()] = e[2];
+      if (e.length > 3 && typeof e[3] === "string" && PluginRepoSlug(e[1])) pluginListedBySlug[PluginRepoSlug(e[1])] = e[3];
+    });
+  }).catch(function () {}),
+  fetch(FPP_DATA_RAW + "pluginCategories.json").then(function (res) { return res.json(); }).then(function (j) {
+    (j.categories || []).forEach(function (c) { if (c && c.name) pluginCategoryByName[c.name] = c; });
+  }).catch(function () {})
+]);
 
 var msg = $("msg");
 function setMsg(text, cls) { msg.textContent = text; msg.className = "ppmsg" + (cls ? " " + cls : ""); }
@@ -375,6 +514,7 @@ async function previewFromUrl(raw) {
     var text = await res.text();
     var data;
     try { data = JSON.parse(text); } catch (e) { throw new Error("pluginInfo.json is not valid JSON: " + e.message); }
+    await listsReady;
     render(data, url);
     setMsg("", "ok");
     try { history.replaceState(null, "", "?repo=" + encodeURIComponent(raw.trim())); } catch (e) {}
@@ -392,13 +532,11 @@ $("form").addEventListener("submit", function (ev) {
   previewFromUrl(raw);
 });
 $("goJson").addEventListener("click", function () {
-  try {
-    var data = JSON.parse($("json").value);
-    render(data, null);
-    setMsg("");
-  } catch (e) {
-    setMsg("Not valid JSON: " + e.message, "err");
-  }
+  var data;
+  try { data = JSON.parse($("json").value); } catch (e) { return setMsg("Not valid JSON: " + e.message, "err"); }
+  listsReady.then(function () {
+    try { render(data, null); setMsg(""); } catch (e) { setMsg(e.message, "err"); }
+  });
 });
 
 // ?repo=owner/repo deep link (for the submit page and bot comments).
