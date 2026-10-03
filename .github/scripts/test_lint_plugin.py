@@ -1234,5 +1234,39 @@ class SubmissionScan(unittest.TestCase):
         self.assertEqual(result["num_blocking"], 1)
 
 
+class CaseSensitiveFlags(unittest.TestCase):
+    """_grep() is re.I by default, but CLI short flags are case-sensitive: `curl -K`
+    is --config (harmless), `curl -k` is --insecure. fpp-EncoreRadio's
+    `curl -K "$cfg_file"` tripped tls-verify-disabled (fpp-data #264)."""
+
+    def tls(self, line: str) -> bool:
+        return "tls-verify-disabled" in _lint({"scripts/fetch.sh": "#!/bin/bash\nset -e\n" + line + "\n"},
+                                              codes=("tls-verify-disabled",))
+
+    def test_curl_config_file_does_not_fire(self):
+        self.assertFalse(self.tls('curl -K "$f" https://example.com/x'))
+        self.assertFalse(self.tls('curl -sK cfg https://example.com/x'))
+
+    def test_insecure_fires(self):
+        for line in ("curl -k https://example.com/x", "curl --insecure https://example.com/x",
+                     "curl -sk https://example.com/x", "curl -fsSLk https://example.com/x"):
+            self.assertTrue(self.tls(line), line)
+
+    def test_k_as_an_argument_or_after_a_pipe_does_not_fire(self):
+        for line in ("curl -obackup.tar https://example.com/x", "curl -s https://example.com/x | sort -k2",
+                     "curl -H key:1 https://example.com/x-k"):
+            self.assertFalse(self.tls(line), line)
+
+    def test_fpp_reload_schedule_is_not_a_restart(self):
+        code = ("fppd-restart",)
+        self.assertEqual(_lint({"scripts/r.sh": "#!/bin/bash\nset -e\nfpp -R\n"}, codes=code), {})
+        self.assertIn("fppd-restart", _lint({"scripts/r.sh": "#!/bin/bash\nset -e\nfpp -r\n"}, codes=code))
+
+    def test_sox_no_dither_is_not_a_microphone(self):
+        mic = L._PRIV_SENSOR_RX["microphone"]
+        self.assertIsNone(mic.search("sox -D in.wav out.wav"))
+        self.assertIsNotNone(mic.search("sox -d out.wav"))
+
+
 if __name__ == "__main__":
     unittest.main()

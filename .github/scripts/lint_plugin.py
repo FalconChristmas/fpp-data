@@ -2390,11 +2390,13 @@ def _priv_privilege_hits(root: str) -> dict[str, tuple[str, int, str]]:
 
 # Only sensor types with an unmistakable code signature. `presence`/`gpio-input`
 # are disclosed by the author but not grepped for: a GPIO read is far too generic.
+# A CLI flag whose meaning changes with case is scoped (?-i:) inside these re.I
+# patterns - `sox -d` records from the default device, `sox -D` is --no-dither.
 _PRIV_SENSOR_RX = {
     "camera": re.compile(r'/dev/video\d*|\bv4l2\b|v4l2src|\bpicamera2?\b|\blibcamera\b|\brpicam-(?:still|vid|hello|jpeg)\b'
                          r'|\braspi(?:still|vid)\b|cv2\.VideoCapture|\bVideoCapture\s*\(|\bnvarguscamerasrc\b|ffmpeg\s+[^#\n]*-f\s+v4l2', re.I),
     "microphone": re.compile(r'\barecord\b|\bpyaudio\b|\bsounddevice\b|\balsasrc\b|\bpulsesrc\b|SND_PCM_STREAM_CAPTURE'
-                             r'|ffmpeg\s+[^#\n]*-f\s+(?:alsa|pulse)\b|\bsox\s+-d\b|\brec\s+(?:-\S+\s+)*\S+\.(?:wav|flac|mp3)\b|speech_recognition|\bvosk\.|import\s+(?:vosk|whisper|faster_whisper)\b|whisper\.load_model', re.I),
+                             r'|ffmpeg\s+[^#\n]*-f\s+(?:alsa|pulse)\b|\bsox\s+(?-i:-d)\b|\brec\s+(?:-\S+\s+)*\S+\.(?:wav|flac|mp3)\b|speech_recognition|\bvosk\.|import\s+(?:vosk|whisper|faster_whisper)\b|whisper\.load_model', re.I),
     "face-tracking": re.compile(r'\bface_recognition\b|\bmediapipe\b|\bdlib\b|haarcascade|\bFaceMesh\b|\bFaceDetection\b|\bdeepface\b|\binsightface\b', re.I),
     "body-tracking": re.compile(r'\bopenpose\b|\bposenet\b|\bmovenet\b|mp\.solutions\.pose|\bmediapipe\b|\bBlazePose\b|\bultralytics\b|\byolo\w*\b', re.I),
     "rfid": re.compile(r'\bMFRC522\b|\brfid\b|\bpn532\b|\bnfcpy\b|\blibnfc\b', re.I),
@@ -3510,10 +3512,10 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"mid-show"))
 
     # Restarting fppd DIRECTLY (RestartFPPD(), systemctl/service/kill, `fpp -r`) is
-    # the anti-pattern. The sanctioned way is SetRestartFlag()/`setSetting restartFlag`
+    # the anti-pattern (`-r` is case-sensitive: `fpp -R` only reloads the schedule). The sanctioned way is SetRestartFlag()/`setSetting restartFlag`
     # (deferred, sequenced around a running show) - those are NOT flagged.
     hit = first(r'\bRestartFPPD\s*\(|\bfppd_restart\b|systemctl\s+(restart|stop|start)\s+fppd'
-                r'|service\s+fppd\s+(restart|stop)|(pkill|killall)\s+[^\n]*fppd|\bfpp\s+-r\b|\bfpp\s+--restart\b'
+                r'|service\s+fppd\s+(restart|stop)|(pkill|killall)\s+[^\n]*fppd|\bfpp\s+(?-i:-r)\b|\bfpp\s+--restart\b'
                 r'|/api/system/fppd/(restart|reboot)|api/system/restart')
     if hit:
         out.append(Finding(BLOCKER, "fppd-restart",
@@ -4216,10 +4218,18 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
 
     # TLS certificate verification explicitly disabled - always a deliberate
     # opt-out, so this is low false-positive (contrast: `break-system-packages`).
+    # curl's short flags are case-sensitive and _grep() defaults to re.I, so the
+    # `-k` arm is scoped (?-i:): `-K` is --config (read a config file) and must
+    # not match. It counts as its own option token (whitespace before it) or
+    # inside a short-option bundle (`-sk`, `-fsSLk`) whose letters before the k
+    # are all boolean flags - in `-ofile-k` / `-Hkey` the k is an argument. An
+    # arg-taking flag may follow it (`-ko out`). Stops at `|` so `| sort -k2`
+    # after the curl isn't read as curl's own option.
     hit = first(r'CURLOPT_SSL_VERIFYPEER\s*,\s*(false|0)\b') \
         or first(r'CURLOPT_SSL_VERIFYHOST\s*,\s*(0|false)\b') \
         or first(r'verify\s*=\s*False\b') \
-        or first(r'curl\s+[^\n]*(-k\b|--insecure\b)', exts=(".sh",)) \
+        or first(r'curl\s+[^\n|]*(?<!\S)(?-i:-[#aBfgGiIjJlLMnNOpqRsSvVZ]*k[#aBfgGiIjJlLMnNOpqRsSvVZ]*'
+                 r'(?:[AbcCdDeEFhHKmoPQrtTuUwxXyYz]\S*)?(?![^\s\'"\\);`])|--(?:proxy-)?insecure\b)', exts=(".sh",)) \
         or first(r'''NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*['"]?0''')
     if hit:
         out.append(Finding(BLOCKER, "tls-verify-disabled",
