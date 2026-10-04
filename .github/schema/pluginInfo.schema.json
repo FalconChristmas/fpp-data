@@ -212,7 +212,7 @@
                     "items": {
                         "type": "string"
                     },
-                    "description": "Python (PyPI) packages, installed via `pip install --break-system-packages` into FPP's system Python (not isolated per plugin, not reference-counted). pip ships by default with FPP."
+                    "description": "Python (PyPI) packages, only for what Debian does not package (prefer `python3-<name>` in `packages`). Installed via `pip install --break-system-packages` into FPP's system Python (not isolated per plugin, not reference-counted). pip ships by default with FPP."
                 },
                 "scripts": {
                     "type": "array",

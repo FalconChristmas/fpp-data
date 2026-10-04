@@ -257,6 +257,54 @@ class RestartFlagOneRule(unittest.TestCase):
         pinned = [dict(self.SPANNING[0], sha="0123456789abcdef0123456789abcdef01234567"), self.SPANNING[1]]
         self.assertEqual(self.restart_findings(pinned, self.NOFLAG), {})
 
+    def test_php_writesettingtofile_counts(self):
+        # fpp-data#205: a #!/usr/bin/php fpp_uninstall.sh using core's PHP helper
+        for call in ("WriteSettingToFile('restartFlag', 1);", 'writesettingtofile("rebootFlag", "1");'):
+            php = "#!/usr/bin/php\n<?php\ninclude_once '/opt/fpp/www/common.php';\n" + call + "\n"
+            self.assertEqual(self.restart_findings(self.SPANNING, php), {}, call)
+
+    def test_php_writesettingtofile_plugin_scoped_does_not_count(self):
+        # third arg writes config/plugin.<name>, not media/settings
+        php = "#!/usr/bin/php\n<?php\nWriteSettingToFile('restartFlag', 1, 'fpp-synthetic');\n"
+        self.assertEqual(list(self.restart_findings(self.SPANNING, php)), ["no-restart-flag"])
+
+
+class DevicePathAllowlist(unittest.TestCase):
+    """device-path-no-allowlist clears on a ttyUSB/ACM/AMA allow-list nearby, or on an
+    anchored regex / membership guard on the same variable before the build line
+    (fpp-data#205: Projector-Control's ^tty[ASU][A-Z0-9]+$ guard was flagged)."""
+
+    def hits(self, text, rel="proj.php"):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_tree(tmp, {rel: text})
+            return list(L._device_path_no_allowlist_hits(tmp))
+
+    def test_unguarded_fires(self):
+        self.assertEqual(len(self.hits('<?php\n$d = "/dev/".$DEVICE;\n')), 1)
+
+    def test_if_guard_clears(self):
+        self.assertEqual(self.hits("<?php\nif (preg_match('/^tty[ASU][A-Z0-9]+$/', $DEVICE)) {\n"
+                                   '\t$d = "/dev/".$DEVICE;\n}\n'), [])
+
+    def test_ternary_guard_clears(self):
+        self.assertEqual(self.hits("<?php\n$d = preg_match('/^tty[ASU][A-Z0-9]+$/', $DEVICE) ? \"/dev/\".$DEVICE : \"\";\n"), [])
+
+    def test_in_array_clears(self):
+        self.assertEqual(self.hits('<?php\nif (!in_array($DEVICE, $allowed)) exit(1);\n$d = "/dev/".$DEVICE;\n'), [])
+
+    def test_python_fullmatch_and_in_clear(self):
+        self.assertEqual(self.hits('import re\nif not re.fullmatch(r"^tty[SA]\\d+$", dev):\n    raise ValueError\np = "/dev/" + dev\n', "a.py"), [])
+        self.assertEqual(self.hits('if dev in ALLOWED:\n    p = f"/dev/{dev}"\n', "b.py"), [])
+
+    def test_unanchored_pattern_still_fires(self):
+        self.assertEqual(len(self.hits("<?php\nif (preg_match('/tty/', $DEVICE)) {\n\t$d = \"/dev/\".$DEVICE;\n}\n")), 1)
+
+    def test_guard_on_other_variable_still_fires(self):
+        self.assertEqual(len(self.hits("<?php\nif (preg_match('/^tty[A-Z]+$/', $DEVICE2)) {}\n$d = \"/dev/\".$DEVICE;\n")), 1)
+
+    def test_guard_after_build_still_fires(self):
+        self.assertEqual(len(self.hits("<?php\n$d = \"/dev/\".$DEVICE;\nif (preg_match('/^tty[A-Z]+$/', $DEVICE)) {}\n")), 1)
+
 
 class SudoInComments(unittest.TestCase):
     """`sudo` in a comment explaining a choice is not a sudo call (fpp-data#266:

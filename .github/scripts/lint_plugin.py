@@ -1499,9 +1499,33 @@ def _device_path_no_allowlist_hits(root: str, exts=(".cpp", ".c", ".h", ".hpp", 
             if not build_rx.search(line):
                 continue
             lo, hi = max(0, i - window), min(len(lines), i + window)
-            if not allowlist_rx.search("\n".join(lines[lo:hi])):
-                yield rel, i + 1, line.strip()
-                break
+            if allowlist_rx.search("\n".join(lines[lo:hi])):
+                continue
+            if _same_var_guard_before(build_rx.search(line).group(0), lines[lo:i + 1]):
+                continue
+            yield rel, i + 1, line.strip()
+            break
+
+
+def _same_var_guard_before(build: str, before: list) -> bool:
+    """True if the variable concatenated in `build` is validated in `before` (the
+    window up to and including the build line) by an anchored ^...$ regex match
+    (preg_match / re.match / re.fullmatch / std::regex_match) or a membership test
+    (in_array / Python `in`). Catches allow-lists that don't spell out USB/ACM/AMA -
+    FPP-Plugin-Projector-Control's `preg_match('/^tty[ASU][A-Z0-9]+$/', $DEVICE)`
+    (fpp-data#205), flagged both as an if-guard and as an inline ternary. An
+    unanchored pattern, a guard on a different variable, or one after the build
+    line doesn't count."""
+    vm = re.search(r'["\']\s*[+.]\s*(\$?\w+)|\{(\w+)', build)
+    if not vm:
+        return False
+    var = re.escape(vm.group(1) or vm.group(2)) + r'(?!\w)'
+    guard_rx = re.compile(
+        r'(?:preg_match|re\.(?:full)?match|regex_match)\s*\(\s*r?([\'"])[^\'"\n]*\^[^\'"\n]*\$[^\'"\n]*\1\s*,\s*' + var
+        + r'|regex_match\s*\(\s*' + var
+        + r'|in_array\s*\(\s*' + var
+        + r'|(?<![\w$])' + var + r'\s+in\s+[\w({\[]')
+    return bool(guard_rx.search("\n".join(before)))
 
 
 def _socket_port_hits(root: str, port: int, exts=SCRIPT_EXT, window: int = 3):
@@ -3846,6 +3870,8 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # evidence, fpp-LoRa) apart from a value that's actually an admin-configured
     # setting read from a CLI script (FPP-Plugin-Projector-Control's proj.php,
     # invoked via getopt - not web-reachable at all despite the same shape).
+    # An anchored regex / in_array guard on the same variable before the build
+    # line also clears it (_same_var_guard_before, fpp-data#205).
     hit = next(iter(_device_path_no_allowlist_hits(root)), None)
     if hit:
         out.append(Finding(BEST_PRACTICE, "device-path-no-allowlist",
@@ -4501,7 +4527,14 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         restart_flag_rx = re.compile(
             r'setSetting\s+(restartFlag|rebootFlag)\s+1'
             r'|setSetting\s*\(\s*["\'](restartFlag|rebootFlag)["\']'
-            r'|SetRestartFlag\s*\(|SetRebootFlag\s*\(')
+            r'|SetRestartFlag\s*\(|SetRebootFlag\s*\('
+            # PHP (e.g. a #!/usr/bin/php fpp_uninstall.sh): FPP core's own idiom
+            # (www/backup.php) - writes the same `restartFlag = "1"` line to
+            # media/settings that bash setSetting does, which /api/system/status
+            # reports and the UI banner reads. Two args only: a third (plugin) arg
+            # writes config/plugin.<name> instead. PHP function names are
+            # case-insensitive.
+            r'|(?i:\bWriteSettingToFile)\s*\(\s*["\'](restartFlag|rebootFlag)["\']\s*,\s*["\']?1["\']?\s*\)')
 
         def _restart_flag_gap(cands, required_if_absent):
             """Check one lifecycle slot (a tuple of candidate relative paths, most
