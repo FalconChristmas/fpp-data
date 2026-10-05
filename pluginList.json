@@ -57,6 +57,7 @@
             [ "fpp-plugin-RemoteBackup", "https://raw.githubusercontent.com/bobreese/fpp-plugin-RemoteBackup/refs/heads/master/pluginInfo.json", "Monitoring", "2026-09-15" ],
             [ "fpp-gameday", "https://raw.githubusercontent.com/derwin12/fpp-gameday/refs/heads/main/pluginInfo.json", "Automation", "2026-09-18" ],
             [ "fpp-plugin-SDCardRecover", "https://raw.githubusercontent.com/bobreese/fpp-plugin-SDCardRecover/refs/heads/main/pluginInfo.json", "Monitoring", "2026-09-21" ],
-            [ "FPP-Plugin-DailyShowCountdown", "https://raw.githubusercontent.com/colinedwards308/FPP-Plugin-DailyShowCountdown/refs/heads/main/pluginInfo.json", "Messaging", "2026-09-21" ]
+            [ "FPP-Plugin-DailyShowCountdown", "https://raw.githubusercontent.com/colinedwards308/FPP-Plugin-DailyShowCountdown/refs/heads/main/pluginInfo.json", "Messaging", "2026-09-21" ],
+            [ "fpp-plugin-textmylights", "https://raw.githubusercontent.com/thespica93/fpp-plugin-textmylights/refs/heads/stable/pluginInfo.json", "Messaging", "2026-10-03" ]
         ]
 }
