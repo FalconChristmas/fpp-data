@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Insert an accepted submission's entry into pluginList.json.
 
-Edits the file as TEXT, appending one compact `[ "name", "url", "category" ]` line in
+Edits the file as TEXT, appending one compact `[ "name", "url", "category", "YYYY-MM-DD" ]`
+line (the 4th element is dateAdded - today's UTC date, the date the listing PR is
+prepared; the bot re-runs this on every /recheck or /submit, so it is the last run's) in
 the same hand-formatted style the file already uses (one entry per line) - a full
 json.dump() round-trip would reformat the whole file and bury the real change in an
 unreviewable diff.
@@ -24,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import sys
 
@@ -44,13 +47,21 @@ def already_listed(text: str, repo_name: str) -> bool:
                for e in data.get("pluginList", []))
 
 
-def insert_entry(text: str, repo_name: str, plugininfo_url: str, category: str) -> str:
+def today_utc() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+
+def insert_entry(text: str, repo_name: str, plugininfo_url: str, category: str,
+                 date_added: str | None = None) -> str:
+    """`date_added` defaults to today (UTC): the date the listing PR is prepared,
+    which stands for the date the plugin was first listed."""
+    date_added = date_added or today_utc()
     lines = text.splitlines(keepends=True)
     close_idx = next(i for i, l in enumerate(lines) if l.strip() == "]")
     prev_idx = close_idx - 1
     if not lines[prev_idx].rstrip().endswith(","):
         lines[prev_idx] = lines[prev_idx].rstrip("\n") + ",\n"
-    new_line = f'            [ "{repo_name}", "{plugininfo_url}", "{category}" ]\n'
+    new_line = f'            [ "{repo_name}", "{plugininfo_url}", "{category}", "{date_added}" ]\n'
     lines.insert(close_idx, new_line)
     return "".join(lines)
 

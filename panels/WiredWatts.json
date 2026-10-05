@@ -32,7 +32,7 @@
         }
     },
     {
-        "name": "Outdoor P5 Panel",
+        "name": "Outdoor P5 Panel v1",
         "url": "https://www.wiredwatts.com/products/pnp5o2pk",
         "settings": {
             "all": {
@@ -54,6 +54,31 @@
             },
             "RGBMatrix": {
                 "panelInterleave": "1"
+            }
+        }
+    },
+    {
+        "name": "Outdoor P5 Panel v2",
+        "url": "https://www.wiredwatts.com/products/pnp5o2pk",
+        "settings": {
+            "all": {
+                "panelWidth": 64,
+                "panelHeight": 32,
+                "panelScan": 8,
+                "panelType": 0,
+                "panelColorOrder": "GBR"
+            },
+            "BBShiftPanel-v10.2": {
+                "panelAddressing": 3,
+                "panelInterleave": "1",
+                "panelOutputOrder": false,
+                "panelOutputBlankRow": false
+            },
+            "LEDscapeMatrix-v10.2": {
+                "panelAddressing": 3,
+                "panelInterleave": "1",
+                "panelOutputOrder": false,
+                "panelOutputBlankRow": false
             }
         }
     }

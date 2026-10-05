@@ -51,8 +51,12 @@ def _major(v) -> Optional[int]:
     return int(head) if head.isdigit() else None
 
 
-def compatible_with_major(versions, m: int) -> bool:
-    """Is any versions[] entry certified for FPP major `m`?
+def _version_key(v) -> tuple:
+    return tuple(int(p) if p.isdigit() else 0 for p in str(v).split("."))
+
+
+def entry_for_major(versions, m: int) -> Optional[dict]:
+    """The versions[] entry certified for FPP major `m`, else None.
 
     Mirrors the Plugin Manager's own logic (D21): an OPEN-ended max ("0"/""/"0.0")
     only certifies the major the entry was built for - an open entry built for an
@@ -68,12 +72,36 @@ def compatible_with_major(versions, m: int) -> bool:
         mx = v.get("maxFPPVersion")
         if mx in (None, "", "0", "0.0"):
             if mn == m:            # open-ended: certifies only its own major
-                return True
+                return v
         else:
             mxm = _major(mx)
             if mxm is not None and mn <= m <= mxm:
-                return True
-    return False
+                return v
+    return None
+
+
+def compatible_with_major(versions, m: int) -> bool:
+    """Is any versions[] entry certified for FPP major `m`?"""
+    return entry_for_major(versions, m) is not None
+
+
+def branch_for_major(versions, m: Optional[int] = None) -> Optional[str]:
+    """The git branch FPP actually installs, per pluginInfo.json's versions[].
+
+    Prefers the entry certified for major `m`; otherwise the entry for the newest
+    FPP version (highest minFPPVersion). Returns None when no entry names a
+    branch - callers fall back to the repo's default branch. Used so the plugin
+    lint/scan reads the code users on FPP <m> get, not whatever the GitHub
+    default branch happens to be (the two often differ - e.g. a plugin whose
+    master targets FPP 4 and a newer branch serves FPP 5+).
+    """
+    e = entry_for_major(versions, m) if m is not None else None
+    if e is None:
+        cands = [v for v in versions or []
+                 if isinstance(v, dict) and _major(v.get("minFPPVersion")) is not None]
+        e = max(cands, key=lambda v: _version_key(v["minFPPVersion"]), default=None)
+    b = (e or {}).get("branch")
+    return b.strip() if isinstance(b, str) and b.strip() else None
 
 
 def owner_ref(login: str) -> str:
@@ -165,15 +193,127 @@ def parse_github_repo(url: str) -> Optional[tuple[str, str]]:
     return owner, repo
 
 
+# raw.githubusercontent.com/<o>/<r>/<ref>/<path>, or the github.com/<o>/<r>/raw|blob/
+# <ref>/<path> forms that redirect there.
+_RAW_FILE_RX = re.compile(r"^https?://(?:raw\.githubusercontent\.com/([^/]+)/([^/]+)"
+                          r"|(?:www\.)?github\.com/([^/]+)/([^/]+)/(?:raw|blob))/(.+)$", re.I)
+
+
 def parse_raw_github_repo(url: str) -> Optional[tuple[str, str]]:
-    """(owner, repo) from a raw.githubusercontent.com file URL, else None.
+    """(owner, repo) from a raw.githubusercontent.com (or github.com raw/blob) file
+    URL, else None.
 
     Complements parse_github_repo() above, which only handles github.com repo pages -
     a pluginInfo.json URL is a raw.githubusercontent.com file URL instead, and is
     sometimes the only URL a caller has (e.g. a submission with no srcURL yet).
     """
-    m = re.match(r"^https?://raw\.githubusercontent\.com/([^/]+)/([^/]+)/", url or "")
-    return (m.group(1), m.group(2)) if m else None
+    m = _RAW_FILE_RX.match(url or "")
+    if not m:
+        return None
+    return (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+
+
+def raw_github_ref_candidates(url: str) -> list[str]:
+    """The refs a raw file URL may name, longest first. The ref and the file's path
+    share the slashes (`feature/x/pluginInfo.json`), so every directory prefix of
+    the path is a candidate; a `refs/heads/` prefix is dropped (it names the same
+    branch). Empty for a URL parse_raw_github_repo() doesn't accept."""
+    m = _RAW_FILE_RX.match(url or "")
+    if not m:
+        return []
+    parts = m.group(5).split("?")[0].split("/")[:-1]
+    if parts[:2] == ["refs", "heads"] and len(parts) > 2:
+        parts = parts[2:]
+    return ["/".join(parts[:n]) for n in range(len(parts), 0, -1)]
+
+
+# A ref anyone can make raw.githubusercontent.com serve without write access to the
+# repo: a commit SHA (any fork's commit is reachable through the parent) or a pull
+# request's head.
+_UNTRUSTED_REF_RX = re.compile(r"^(?:[0-9a-f]{7,40}|refs/(?!heads/|tags/).*)$", re.I)
+
+
+def source_repo_findings(info: dict, listed_url: Optional[str],
+                         resolved_repo: Optional[tuple[str, str]],
+                         branches: Optional[set[str]] = None) -> list[tuple[str, str, str]]:
+    """Whose code FPP would install is srcURL's repo. Blockers when the listing's
+    pluginInfo.json URL (`listed_url`) is not a GitHub file URL, lives in another
+    repo (an author can point srcURL at any repo at any time, and FPP clones
+    whatever it names), or is read from something other than a branch of it
+    (`branches`, from gh_list_branches; None skips the membership test but not the
+    SHA / pull-request test); and when GitHub now resolves srcURL to another
+    owner/repo (`resolved_repo`, from the API's full_name: a rename or a transfer,
+    which GitHub's redirect otherwise follows silently).
+
+    Pure (no network), for the scans that have no clone as much as those that do.
+    Same (severity, code, message) tuples as repo_metadata_findings()."""
+    if not isinstance(info, dict):
+        return []
+    src = parse_github_repo(info.get("srcURL", "") or "")
+    if not src:
+        return []
+
+    def key(r):
+        return r[0].lower(), r[1].lower().removesuffix(".git")
+
+    out: list[tuple[str, str, str]] = []
+    if listed_url:
+        listed = parse_raw_github_repo(listed_url)
+        if not listed:
+            out.append(("blocker", "listing-url-not-github",
+                        f"the pluginInfo.json URL `{listed_url}` is not a raw.githubusercontent.com URL - "
+                        f"list pluginInfo.json from `{src[0]}/{src[1]}`, the repo srcURL installs, "
+                        f"so the listing and the code FPP installs come from the same place."))
+        elif key(listed) != key(src):
+            out.append(("blocker", "srcurl-not-listed-repo",
+                        f"pluginInfo.json is listed from `{listed[0]}/{listed[1]}` but its srcURL installs "
+                        f"`{src[0]}/{src[1]}` - FPP clones srcURL, so the code users get comes from a repo the "
+                        f"listing does not point at. If the plugin has moved, list the new repo's pluginInfo.json "
+                        f"instead; either way a maintainer needs to review the change."))
+        else:
+            refs = raw_github_ref_candidates(listed_url)
+            example = f"`https://raw.githubusercontent.com/{src[0]}/{src[1]}/<branch>/pluginInfo.json`"
+            if not refs or any(_UNTRUSTED_REF_RX.match(r) for r in refs):
+                out.append(("blocker", "listing-ref-not-branch",
+                            f"the pluginInfo.json URL `{listed_url}` reads it from a commit or a pull request "
+                            f"ref of `{src[0]}/{src[1]}`, not a branch - those can be created without write "
+                            f"access to the repo. Use a branch: {example}."))
+            elif branches is not None and not any(r in branches for r in refs):
+                # Most likely a renamed branch (master -> main), which GitHub keeps
+                # redirecting; only the owner can rename one, so it is stale, not unsafe.
+                out.append(("best-practice", "listing-ref-not-branch",
+                            f"the pluginInfo.json URL `{listed_url}` names a branch `{src[0]}/{src[1]}` no "
+                            f"longer has (renamed?) - GitHub redirects it for now. Point it at the current "
+                            f"branch: {example}."))
+    if resolved_repo and key(resolved_repo) != key(src):
+        out.append(("blocker", "srcurl-repo-moved",
+                    f"srcURL `{src[0]}/{src[1]}` now resolves to `{resolved_repo[0]}/{resolved_repo[1]}` on "
+                    f"GitHub (renamed or transferred). Update srcURL (and the pluginList.json URL) to the new "
+                    f"name; a change of owner needs a maintainer to review who now controls the code."))
+    return out
+
+
+def resolved_repo(meta: Optional[dict]) -> Optional[tuple[str, str]]:
+    """(owner, repo) GitHub's API resolved a repo request to (its full_name), or None."""
+    owner, _, repo = ((meta or {}).get("full_name") or "").partition("/")
+    return (owner, repo) if owner and repo else None
+
+
+# pluginList.json entries that are reference material, not a distributed plugin,
+# so major-release scans (new_major_release_scan.py) shouldn't file a tracking
+# issue for them - fpp-plugin-Template deliberately ships placeholder
+# ask-for-money/phone-home text and an unedited privacy block for authors to
+# copy from, which the linter is supposed to flag on a real plugin, not on the
+# template itself (fpp-data#200).
+EXCLUDE_FROM_MAJOR_RELEASE_SCAN = {"fpp-plugin-Template"}
+
+
+def filter_excluded(entries: list) -> list:
+    """Drop pluginList entries in EXCLUDE_FROM_MAJOR_RELEASE_SCAN (case-insensitive
+    on entry name), for the major-release scan/tracking-issue pipeline only -
+    other tools (scan_submission.py, clone_plugins.py's general use) are unaffected."""
+    excluded = {n.lower() for n in EXCLUDE_FROM_MAJOR_RELEASE_SCAN}
+    return [e for e in entries if (e[0] if e else "").lower() not in excluded]
 
 
 def filter_by_owner(entries: list, only_owner: Optional[str]) -> list:

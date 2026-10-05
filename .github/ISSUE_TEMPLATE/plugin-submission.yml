@@ -105,6 +105,8 @@ body:
           required: true
         - label: My plugin is not malicious and does not and will not in future exfiltrate data or run unexpected remote code.
           required: true
+        - label: My `pluginInfo.json` carries a `privacy` block (the eight keys in the schema) that honestly describes what the plugin sends, collects, senses, opens and changes - required for every listing. The [Privacy disclosure builder](https://falconchristmas.github.io/fpp-data/plugin_privacy_builder/) writes it for you, and the [Plugin preview](https://falconchristmas.github.io/fpp-data/plugin_preview/) shows the install dialog FPP will build from it.
+          required: true
         - label: I understand inclusion is at the FPP developers' discretion and is not guaranteed.
           required: true
 

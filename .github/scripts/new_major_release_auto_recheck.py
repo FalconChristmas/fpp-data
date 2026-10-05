@@ -41,7 +41,8 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from lib_plugin_schema import (  # noqa: E402
-    adopt_renamed_issue, load_pluginlist, parse_plugin_marker, resolve_renamed_repo,
+    adopt_renamed_issue, branch_for_major, fetch_json, load_pluginlist, parse_plugin_marker,
+    resolve_renamed_repo,
 )
 from new_major_release_scan import scan_plugin, issue_body  # noqa: E402
 from scan_submission import clone_repo  # noqa: E402
@@ -96,8 +97,10 @@ def last_checkpoint(issue, comments, name, target):
     return checkpoint
 
 
-def has_new_commits(owner, repo, since_iso, token):
+def has_new_commits(owner, repo, since_iso, token, branch=None):
     url = f"{API}/repos/{owner}/{repo}/commits?since={urllib.parse.quote(since_iso)}&per_page=1"
+    if branch:
+        url += f"&sha={urllib.parse.quote(branch)}"
     try:
         commits = _req("GET", url, token)
     except Exception:  # noqa: BLE001 - best-effort; treat lookup failure as "nothing to do"
@@ -177,13 +180,19 @@ def main():
                                 f"?per_page=100", token)
         since = last_checkpoint(issue, comments, name, target)
 
-        if not args.force and not has_new_commits(r["owner"], r["repo"], since, token):
-            noop += 1
-            continue
-
         entry = entries_by_name.get(name.lower())
         if entry is None:
             skipped += 1
+            continue
+
+        # Watch (and clone) the branch pluginInfo.json says FPP <target> installs,
+        # not the GitHub default branch - a fix merged to that branch is what
+        # users get and what should clear the issue.
+        info, _ = fetch_json(entry[1]) if len(entry) > 1 and entry[1] else (None, None)
+        branch = branch_for_major((info or {}).get("versions"), target)
+
+        if not args.force and not has_new_commits(r["owner"], r["repo"], since, token, branch):
+            noop += 1
             continue
 
         if args.dry_run:
@@ -192,7 +201,7 @@ def main():
             continue
 
         with tempfile.TemporaryDirectory() as plugins_dir:
-            clone_repo(r["owner"], r["repo"], os.path.join(plugins_dir, name))
+            clone_repo(r["owner"], r["repo"], os.path.join(plugins_dir, name), branch)
             fresh = scan_plugin(entry, target, plugins_dir, token, schema)
 
         # Unlike a human-triggered /recheck (where the triggering comment itself

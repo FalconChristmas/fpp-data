@@ -57,6 +57,16 @@ SCRIPT_EXT = (".sh", ".py", ".php", ".js")
 # be legitimate.
 SUDO_SCOPE = HOOKS + ("fpp_upgrade.sh",)
 
+# The one-liner every restart-flag finding recommends. Deliberately NOT the bare
+# `source ${FPPDIR}/scripts/common; setSetting restartFlag 1` older advice
+# suggested: under `set -u` that form aborts the whole script instead of setting
+# the flag - FPPDIR is unset on the uninstall path (uninstall_plugin passes it
+# only as a trailing arg and sudo strips the exported one) and scripts/common
+# itself expands a bare $LD_LIBRARY_PATH, so even with FPPDIR set the sourced
+# file trips nounset. fpp-live-follow followed the old advice verbatim and its
+# install AND uninstall silently exited on that line (fpp-data #231).
+RESTART_FLAG_SNIPPET = '( set +u; source "${FPPDIR:-/opt/fpp}/scripts/common" && setSetting restartFlag 1 ) || true'
+
 
 @dataclass
 class Finding:
@@ -471,6 +481,172 @@ def _is_comment_line(line: str) -> bool:
             or stripped.startswith("<!--") or stripped in ("*", "*/"))
 
 
+def _busy_wait_poll_hits(root: str):
+    """Yield (relpath, lineno, line) for an UNBOUNDED loop (`while(true)`/
+    `while(1)`/`for(;;)`, not any `while`) with a `sleep()` call in its next
+    10 lines, in a .php file that has no evidence of being CLI-only: no
+    php_sapi_name()/PHP_SAPI guard, no shebang, and not launched backgrounded
+    (nohup/setsid/trailing `&`) from any .sh script in the repo.
+
+    All three are real, common ways an FPP plugin's own author already rules
+    out web reachability - checking none of them false-positived on every
+    single real-world hit this rule had (remote-falcon, showpilot-plugin,
+    fpp-sms-control-too, fpp-SETIQ all guard or launch a `*_listener.php`/
+    `*-bg.php` daemon exactly this way; FPP-Plugin-Matrix-Message's loop was
+    also bounded (`while ($isLocked && $maxWait-- > 0)`), not unbounded, a
+    separate reason it wasn't a poll worth flagging at all - busy-wait-poll
+    false-positive audit, 2026-09). A 0% true-positive rate on the full
+    tracked-plugin corpus at the time this was tightened."""
+    # Anything that can launch the daemon detached: a .sh (nohup/setsid/`&`),
+    # a systemd unit's ExecStart=, PHP exec()/shell_exec()/popen() with a
+    # trailing `&`, Python subprocess.Popen(). Their text is pooled and the
+    # candidate .php file's basename looked for in it.
+    launch_line_rx = re.compile(r'\b(?:nohup|setsid|Popen|ExecStart|systemd-run)\b|@reboot\b|&\s*(?:["\']\s*[,)]|$)')
+    launcher_text = "\n".join(
+        l for p in _iter_files(root, (".sh", ".service", ".php", ".py"))
+        if not any(v in ("/" + os.path.relpath(p, root).lower()) for v in _VENDOR_DIRS)
+        for l in _read(p).splitlines() if launch_line_rx.search(l))
+    unbounded_rx = re.compile(r'\bwhile\s*\(\s*(?:true|1)\s*\)|\bfor\s*\(\s*;\s*;\s*\)', re.I)
+    for path in _iter_files(root, (".php",)):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        src = _read(path)
+        if src.startswith("#!"):
+            continue
+        if re.search(r'\b(?:php_sapi_name\s*\(\s*\)|PHP_SAPI)\s*(?:[!=]==?)\s*[\'"]cli[\'"]', src):
+            continue
+        fname = re.escape(os.path.basename(rel))
+        if re.search(r'(?:\b(?:nohup|setsid)\b[^\n]*\b' + fname + r'\b'
+                     r'|\b' + fname + r'\b[^\n]*&\s*(?:["\']\s*[,)]|$)'      # `... &` in shell, or `... &"` in exec()
+                     r'|^\s*ExecStart\s*=[^\n]*\b' + fname + r'\b'
+                     r'|(?:\bsystemd-run\b|@reboot\b)[^\n]*\b' + fname + r'\b'
+                     r'|\bPopen\s*\([^\n]*\b' + fname + r'\b)', launcher_text, re.M):
+            continue
+        lines = src.splitlines()
+        for i, line in enumerate(lines):
+            if _is_comment_line(line) or not unbounded_rx.search(line):
+                continue
+            window = "\n".join(lines[i:i + 10])
+            if re.search(r'\bsleep\s*\(', window):
+                yield rel, i + 1, line.strip()
+                break
+
+
+def _blocking_sleep_in_hook_hits(root: str):
+    """Yield (relpath, lineno, line) for a flat, unconditional `sleep N` in
+    one of FPP's four start/stop lifecycle hooks (preStart/postStart/
+    preStop/postStop - any extension; fpp_install.sh/fpp_uninstall.sh run
+    once at install/uninstall time, not on every fppd start/stop, so callers
+    already exclude those by name).
+
+    Two shapes are NOT actually blocking despite matching a naive sleep-in-
+    hook grep, and both are exactly what this finding's own remediation text
+    tells an author to do instead of a flat sleep - flagging them told an
+    author their correct fix was itself the defect (a 0% true-positive rate
+    on the full tracked-plugin corpus before this was tightened -
+    blocking-sleep-in-hook false-positive audit, 2026-09):
+      - the sleep is inside a shell function only ever invoked, elsewhere in
+        the same file, from within a backgrounded call (`nohup`/`setsid`, or
+        a bare trailing `&`) - the hook itself returns immediately
+        (fpp-plugin-AdvancedStats: `wait_for_broker` is only ever called
+        inside `( ... ) ... &`);
+      - the sleep sits in a short poll/retry loop that re-checks a real
+        liveness condition (`kill -0`, `pgrep`, `nc -z`) or is visibly
+        bounded (a numeric `for` loop, or a counter comparison like
+        `ticks < max`/`$i -lt 3`) rather than being a flat delay
+        (remote-falcon: `for i in 1 2 3; do kill -0 "$OLDPID" || break;
+        sleep 1; done`; showpilot-plugin: `while kill -0 ... && ticks <
+        max`)."""
+    # A sleep is "bounded" only when it sits in a LOOP (window has a
+    # while/until/for) that also re-checks liveness or a counter - a bare
+    # `pgrep ... | xargs kill` followed by `sleep 5` is still a flat delay.
+    loop_rx = re.compile(r'\b(?:while|until|for)\b')
+    bounded_rx = re.compile(
+        r'\bkill\s+-0\b|\bpgrep\b|\bpidof\b|\bnc\s+-z\b|\bcurl\s+-s\S*\s+.*-o\s*/dev/null'
+        r'|\bfor\s+\w+\s+in\s+(?:[\d\s]+;|\{\d+\.\.\d+\}|\$\(\s*seq\b)'
+        r'|\buntil\s+(?:!\s*)?\[\[?\s+(?:!\s+)?-[a-zA-Z]\s|\bwhile\s+(?:!\s*\[\[?\s+|\[\[?\s+!\s+)-[a-zA-Z]\s'   # until [ -S sock ] / while [ ! -e f ]
+        r'|\buntil\s+(?:curl|wget|nc|test|\[|systemctl\s+is-active|pgrep|pidof)\b'                   # until <probe>; do sleep
+        r'|\b\w+\s*(?:-lt|-le|-gt|-ge)\s*\$?\{?\w+\}?'
+        r'|\(\([^)]*[<>][^)]*\)\)|\[\[[^\]]*\s[<>]\s[^\]]*\]\]'   # (( i < n )) / [[ $i < $n ]], not `> file`
+        r'|(?:\|\||&&)\s*break\b')
+
+    def _hits_in(p, rel, note):
+        src = _read(p)
+        lines = src.splitlines()
+
+        # (start_line, end_line) for each shell function whose body only ever
+        # runs backgrounded elsewhere in this same file.
+        backgrounded_ranges = []
+        for name, _b0, _b1, start_line, end_line in _shell_functions(src):
+            call_rx = re.compile(r'\b' + re.escape(name) + r'\b')
+            for k, line in enumerate(lines):
+                if start_line <= k <= end_line:
+                    continue  # the definition/body itself, not a call site
+                code = line.split('#', 1)[0]
+                if not call_rx.search(code):
+                    continue
+                # Backgrounded either on the call's own line (nohup/setsid,
+                # or a bare trailing &), or the call sits inside a `( ...`
+                # subshell that closes with `) ... &` a few lines below -
+                # `wait_for_broker` called on its own line, the subshell's
+                # `) >> "$LOG_FILE" 2>&1 &` several lines later, is the real
+                # shape (fpp-plugin-AdvancedStats), not a one-liner.
+                same_line = (re.search(r'\b(?:nohup|setsid)\b', code)
+                             or code.rstrip().endswith('&'))
+                closes_backgrounded = any(
+                    re.match(r'^\s*\)', l.split('#', 1)[0]) and l.split('#', 1)[0].rstrip().endswith('&')
+                    for l in lines[k + 1:k + 15])
+                if same_line or closes_backgrounded:
+                    backgrounded_ranges.append((start_line, end_line))
+                    break
+
+        # Line ranges of `( ... ) &` subshells - a sleep inside runs detached.
+        bg_subshell = []
+        for k, line in enumerate(lines):
+            if re.match(r'^\s*\(\s*$', line.split('#', 1)[0]):
+                for e in range(k + 1, min(len(lines), k + 40)):
+                    c = lines[e].split('#', 1)[0]
+                    if re.match(r'^\s*\)', c):
+                        if c.rstrip().endswith('&'):
+                            bg_subshell.append((k, e))
+                        break
+        for i, line in enumerate(lines):
+            code = line.split('#', 1)[0]
+            if _is_comment_line(line) or not re.search(r'\bsleep\s+[0-9.]+', code):
+                continue
+            if code.rstrip().endswith('&') or re.search(r'\b(?:nohup|setsid)\b', code):
+                continue  # `sleep 5 &` / `(sleep 5; start) &` - not blocking
+            if any(s <= i <= e for s, e in bg_subshell):
+                continue
+            if any(s <= i <= e for s, e in backgrounded_ranges):
+                continue
+            window = "\n".join(l.split('#', 1)[0] for l in lines[max(0, i - 6):i + 1])
+            if loop_rx.search(window) and bounded_rx.search(window):
+                continue
+            yield rel, i + 1, line.strip(), note
+
+    # fppd runs exactly plugins/<name>/scripts/{preStart,postStart,preStop,
+    # postStop}.sh (scripts/functions runPreStartScripts etc.) - a file with a
+    # hook-like name anywhere else (backup/preStart.sh.orig, a monorepo
+    # subproject's copy) never executes on its own.
+    for hook in ("preStart", "postStart", "preStop", "postStop"):
+        rel = f"scripts/{hook}.sh"
+        p = os.path.join(root, rel)
+        if not os.path.isfile(p):
+            continue
+        # A hook that just `exec`s into the real script elsewhere in the repo
+        # hands the whole process over, so a blocking sleep in THAT script
+        # blocks fppd exactly the same way. Checked in addition to the
+        # wrapper, not instead of it.
+        scan = [(p, rel, "")]
+        t = _exec_delegation_target(p, root)
+        if t and t != rel:
+            scan.append((os.path.join(root, t), t, f" (the real script {rel} `exec`s into)"))
+        for sp, srel, note in scan:
+            yield from _hits_in(sp, srel, note)
+
+
 def _unescaped_html_attr_hits(root: str, exts=(".php",)):
     """Yield (relpath, lineno, line) where an `echo`/short-echo statement writes a known
     HTML attribute (value/action/href/src/placeholder) built by concatenating a PHP
@@ -495,6 +671,52 @@ def _unescaped_html_attr_hits(root: str, exts=(".php",)):
                 break
 
 
+def _cli_only_php_includes(root: str) -> set:
+    """Relpaths of .php/.inc files that are only ever include/require'd by
+    shebang'd CLI scripts (directly, or via another such CLI-only include) and
+    never by a web-facing page - so, like the CLI script itself, there is no GET
+    request that can reach them. Include targets are matched by basename (the
+    usual `require("lock.helper.php")` / `require __DIR__ . '/x.php'` shapes both
+    end in the literal filename). A file nobody includes is NOT CLI-only - it's
+    a page (fpp-data#202: lock.helper.php, a lock-file class used only by the
+    `#!/usr/bin/php` runEventDate.php, tripping destructive-no-csrf)."""
+    include_rx = re.compile(r'\b(?:require|include)(?:_once)?\b[^;]*?([\w.\-]+\.(?:php|inc))\s*[\'"]')
+    files = {}
+    for path in _iter_files(root, (".php", ".inc")):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        files[rel] = (text.startswith("#!"),
+                      {m.group(1) for m in include_rx.finditer(text)})
+    by_base = {}
+    for rel in files:
+        by_base.setdefault(os.path.basename(rel), set()).add(rel)
+    includers = {}
+    for rel, (_, targets) in files.items():
+        for base in targets:
+            for target in by_base.get(base, ()):
+                if target != rel:
+                    includers.setdefault(target, set()).add(rel)
+
+    memo = {}
+
+    def is_cli(rel, stack=()):
+        if rel in memo:
+            return memo[rel]
+        if files[rel][0]:
+            memo[rel] = True
+            return True
+        incs = includers.get(rel)
+        if not incs or rel in stack:
+            return False
+        ok = all(is_cli(i, stack + (rel,)) for i in incs)
+        memo[rel] = ok
+        return ok
+
+    return {rel for rel in files if rel in includers and is_cli(rel)}
+
+
 def _destructive_no_guard_hits(root: str, exts=(".php",)):
     """Yield (relpath, lineno, line) for a file that runs a destructive call
     (unlink/rm/exec-rm) with no HTTP-method or $_POST check anywhere in that same
@@ -503,15 +725,20 @@ def _destructive_no_guard_hits(root: str, exts=(".php",)):
     file on exit) and `@`-suppressed calls (the error-suppression idiom is a strong
     signal for "best-effort internal cleanup", e.g. removing a temp file after an
     atomic rename or a PID file when stopping a process, rather than a page whose
-    entire job is the destructive action) - neither is the shape this rule targets."""
+    entire job is the destructive action) - neither is the shape this rule targets.
+    Also skips a .php file that starts with a shebang (`#!/usr/bin/env php`): that's a
+    CLI script (a poller/daemon started from callbacks.sh, a command script), not a
+    page - there is no GET request to reach it with (TwilioPoll.php clearing its own
+    stop file, fpp-data#206)."""
     destructive_rx = re.compile(r'(?<!@)\bunlink\s*\(|(?<!@)\brm\s+-[rf]|(?:exec|system|shell_exec)\s*\([^)]*\brm\s+')
     guard_rx = re.compile(r"\$_SERVER\s*\[\s*['\"]REQUEST_METHOD['\"]\s*\]|\$_POST\b")
+    cli_only = _cli_only_php_includes(root)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
         if _skippable(rel):
             continue
         text = _read(path)
-        if guard_rx.search(text):
+        if text.startswith("#!") or rel in cli_only or guard_rx.search(text):
             continue
         for i, line in enumerate(text.splitlines(), 1):
             if _is_comment_line(line) or "register_shutdown_function" in line:
@@ -582,14 +809,15 @@ def _outside_plugin_territory_hits(root: str, exts=SCRIPT_EXT):
     that falls outside the directories a plugin is expected to touch on its own -
     its own log file (/media/logs/, the *kind* of file there is checked separately
     by _log_dir_non_log_hits above), FPP's config storage (/media/config/, see the
-    core-config check's docstring), the plugins directory (/media/plugins/), or the
-    playlists directory (/media/playlists/, an established integration point for
-    plugin-managed temp playlists) - e.g. a state file dropped straight into
+    core-config check's docstring and _config_dir_hits below), its own runtime-data
+    directory (/media/plugindata/<repo>/), the plugins directory (/media/plugins/),
+    or the playlists directory (/media/playlists/, an established integration point
+    for plugin-managed temp playlists) - e.g. a state file dropped straight into
     /home/fpp/media/ itself. fpp_install.sh/fpp_uninstall.sh are excluded: an
     installer legitimately reaches outside the plugin's own footprint (systemd
     units, Apache config, cron, etc.) as part of installing/removing itself."""
     file_rx = re.compile(r'''(['"])(/home/fpp/media/[^'"]*\.\w{1,8})\1''')
-    allowed_rx = re.compile(r'^/home/fpp/media/(?:config|plugins|playlists|logs)/', re.I)
+    allowed_rx = re.compile(r'^/home/fpp/media/(?:config|plugins|plugindata|playlists|logs)/', re.I)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
         if _skippable(rel) or os.path.basename(path) in ("fpp_install.sh", "fpp_uninstall.sh"):
@@ -603,21 +831,405 @@ def _outside_plugin_territory_hits(root: str, exts=SCRIPT_EXT):
             yield rel, i, line.strip()
 
 
-def _log_naming_hits(root: str, exts=SCRIPT_EXT):
-    """Yield (relpath, lineno, line) for a log filename built from logDirectory/LOGDIR
-    that doesn't include the mandated "plugin-" prefix - e.g. `$pluginName.".log"` instead
-    of `"plugin-".$pluginName.".log"`."""
-    rx = re.compile(r'(logDirectory|LOGDIR)\b.*\.log\b', re.I)
+# Every shape a plugin uses to spell "FPP's config directory": the literal path
+# (with or without trailing slash), `<mediaDir>/config` in its shell/PHP
+# interpolated and concatenated forms, FPP's own accessors (`$settings
+# ['configDirectory']`, `$(getSetting configDirectory)`, `FPP_DIR_CONFIG(...)`),
+# and the usual `$cfgDir`/`$configDir`/`${CFGDIR}` local variable names. `$`-
+# prefixed only - a bare `config_dir` identifier (Python/JS/C++) is too often
+# assigned to something that isn't config/ at all (plugindata, /etc, ...).
+_CFG_DIR_ANCHOR_RX = re.compile(
+    r'/home/fpp/media/config(?=[\'"/])'
+    r'|\$\{?(?:FPP_)?MEDIA_?DIR\}?/config(?=[\'"/])'
+    r'|\$\{?mediaDir(?:ectory)?\}?/config(?=[\'"/])'
+    r'|\$settings\s*\[\s*[\'"]mediaDirectory[\'"]\s*\]\s*\.\s*[\'"]/config(?=[\'"/])'
+    r'|\$mediaDir(?:ectory)?\s*\.\s*[\'"]/config(?=[\'"/])'
+    r'|\$settings\s*\[\s*[\'"]configDirectory[\'"]\s*\]'
+    r'|\$\(\s*getSetting\s+configDirectory\s*\)'
+    r'|\bFPP_DIR_CONFIG\s*\(\s*'
+    r'|\$\{?(?:CFGDIR|CFG_DIR|CONFIG_DIR|FPP_CONFIG_DIR|configDirectory|configDir|config_dir|cfgDir|cfg_dir)\}?(?!\w)')
+# The local-alias names above (not FPP's own `$configDirectory` global) only count
+# in a file that actually assigns them to a config-dir spelling - `$config_dir =
+# ".../plugindata/x"` is a different directory with a confusable name.
+_CFG_ALIAS_RX = re.compile(r'^\$\{?(CFGDIR|CFG_DIR|CONFIG_DIR|FPP_CONFIG_DIR|configDir|config_dir|cfgDir|cfg_dir)\}?$')
+_CFG_ALIAS_ASSIGN_RX = re.compile(r'(?m)^\s*(?:local\s+|export\s+)?\$?(\w+)\s*=[^;\n]*?(?:/config\b|configDirectory|FPP_DIR_CONFIG)')
+# Filename literal after the anchor, past any concat/quote glue (` . "/`, `+ '/`,
+# `}/`, `, "` for os.path.join, `"/"."` - BetaBrite's idiom), and the last `.ext`
+# in the path expression (terminated by a quote/space/bracket, so a `.write(` or
+# `.stringify(` method call later on the line doesn't count as an extension).
+_CFG_NAME_RX = re.compile(r'^(?:[\s.+,]|[\'"]|/|[{}])*([^\'"\s,)]*)')
+_CFG_EXT_RX = re.compile(r'\.([A-Za-z0-9-]{1,8})(?=[\'"\s),;\]]|$)')
+_CFG_BINARY_EXTS = frozenset((
+    "db", "db3", "s3db", "sqlite", "sqlite3", "db-wal", "db-shm", "sqlite-wal", "sqlite-shm", "wal", "shm",
+    "bin", "dat", "gz", "tgz", "bz2", "xz", "zip", "tar", "7z",
+    "png", "jpg", "jpeg", "gif", "bmp", "webp", "mp3", "wav", "mp4", "pkl", "pickle"))
+_CFG_STATE_EXTS = frozenset(("log", "cache", "lock", "pid", "tmp"))
+# FPP core's own non-settings files under config/ - a plugin READING one is fine.
+_CFG_CORE_NAMES = frozenset(("cape-eeprom.bin", "media_durations.cache", "sequence_fps.cache"))
+_CFG_DB_SINK_RX = re.compile(
+    r'sqlite3\.connect\s*\(|new\s+SQLite3\s*\(|new\s+\\?PDO\s*\(\s*[\'"]sqlite:|sqlite3_open(?:_v2)?\s*\('
+    r'|new\s+(?:sqlite3\.)?Database\s*\(|\bsqlite3\s+[\'"]?[/$]', re.I)
+# Opening/writing the path for output, on the same line. Reads (file_get_contents,
+# fopen 'r', open() with no mode) don't match.
+_CFG_WRITE_SINK_RX = re.compile(
+    r'file_put_contents\s*\(|\bf?open\s*\(.*?,\s*(?:mode\s*=\s*)?[\'"][waxc]|\.write_(?:text|bytes)\s*\('
+    r'|fs\.(?:write|append)File(?:Sync)?\s*\(|fs\.createWriteStream\s*\(|\bofstream\b', re.I)
+# Sinks where the config path must be the DESTINATION, matched against the text
+# BEFORE the anchor: 2nd arg of copy/rename/move (anchor after the comma), a
+# shell redirect (not `2>&1`/`>&2`) or tee/touch target, or cp/mv/rsync/install
+# with the anchor as the last argument (`cp <config file> /tmp/x` is a read).
+_CFG_DEST_PREFIX_RX = re.compile(
+    r'\b(?:copy|rename|move_uploaded_file|shutil\.(?:copy2?|copyfile|move)|os\.rename)\s*\([^,]*,\s*$'
+    r'|(?<![-=<&0-9])>>?\s*[\'"]?$|\btee\s+(?:-a\s+)?[\'"]?$|\btouch\s+(?:-\w+\s+)*[\'"]?$'
+    r'|\b(?:cp|mv|rsync|install)\s+(?!.*\s(?:cp|mv|rsync|install)\s)')
+_CFG_LAST_ARG_RX = re.compile(r'[^\'"\s]*[\'"]?\s*(?:[;&|#].*)?$')
+# A file being moved OUT of config/ - rename()/os.rename()/shutil.move() with the
+# config path as the FIRST argument, or `mv <config path> <elsewhere>` - is the
+# one-time migration the fix text below suggests, not a write. Matched against
+# the text BEFORE the anchor (prefix-anchored, unlike the whole-line rm/unlink
+# skip), so the same call with config/ as the destination (the
+# `_CFG_DEST_PREFIX_RX` shape) still fires; so does a move whose destination is
+# also under config/ (checked by the caller).
+_CFG_MOVE_SRC_PREFIX_RX = re.compile(
+    r'\b(?:rename|shutil\.move|os\.rename|os\.replace)\s*\(\s*(?:os\.path\.join\s*\(\s*)?[\'"]?$'
+    r'|\bmv\s+(?:-\w+\s+)*[\'"]?$')
+_CFG_SCAN_EXTS = SCRIPT_EXT + (".inc", ".cpp", ".cc", ".c", ".h", ".hpp")
+
+
+def _config_dir_hits(root: str, exts=_CFG_SCAN_EXTS):
+    """Yield (relpath, lineno, line, fname, kind) for a line that builds a path under
+    FPP's config directory (/home/fpp/media/config/) for a file that doesn't belong
+    there. Single-line only - no variable tracking. `kind`:
+      "binary" - a database/binary extension (.db/.sqlite/.bin/.gz/.png/...), or a
+                 SQLite open (sqlite3.connect / new SQLite3 / new PDO('sqlite: /
+                 sqlite3_open / `sqlite3` CLI) on any config-dir path. Fires on the
+                 path expression alone, read or write - a .db under config/ got there
+                 by the plugin creating it, and opening a SQLite file creates it.
+      "state"  - a .log/.cache/.lock/.pid/.tmp path, likewise on the expression alone.
+      "text"   - any other non-`plugin.*` filename with a write sink on the SAME line
+                 (file_put_contents, fopen/open for write, fs.writeFile, shell
+                 redirect/cp/tee TO the path, ...). `plugin.<name>` / `plugin.<name>.json`
+                 is the settings-file convention (WriteSettingToFile/setPluginJSON)
+                 and never fires.
+    FPP core's own non-settings files (cape-eeprom.bin, *.cache) only fire with a
+    write/db sink on the line; rm/unlink lines are skipped (an uninstall cleaning up
+    is not a write). Motivating cases: AdvancedStats' plugin.<repo>.db, TwilioControl/
+    MessageQueue's FPP.<name>.db. Every hit is yielded; the caller sorts and dedupes."""
+    skip_rx = re.compile(r'\brm\s|\bunlink\s*\(')
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
         if _skippable(rel):
             continue
+        is_shell = path.endswith(".sh")
+        text = _read(path)
+        aliases = set(_CFG_ALIAS_ASSIGN_RX.findall(text))
+        for i, line in enumerate(text.splitlines(), 1):
+            if _is_comment_line(line) or skip_rx.search(line):
+                continue
+            m = _CFG_DIR_ANCHOR_RX.search(line)
+            if not m or re.match(r'\s*=[^=]', line[m.end():]):
+                continue  # no anchor, or `$cfgDir = ...` (the dir itself being assigned)
+            if _CFG_MOVE_SRC_PREFIX_RX.search(line[:m.start()]) and not _CFG_DIR_ANCHOR_RX.search(line[m.end():]):
+                continue  # migrating a file out of config/ - the fix, not the problem
+            am = _CFG_ALIAS_RX.match(m.group(0))
+            if am and am.group(1) not in aliases:
+                continue
+            rest = line[m.end():].split(";", 1)[0]
+            name = _CFG_NAME_RX.match(rest).group(1)
+            exts_found = _CFG_EXT_RX.findall(rest)
+            ext = exts_found[-1].lower() if exts_found else ""
+            fname = name if not ext or name.lower().endswith("." + ext) else (name or "<var>") + "..." + ext
+            db_sink = _CFG_DB_SINK_RX.search(line)
+            write_sink = _CFG_WRITE_SINK_RX.search(line) or (
+                _CFG_DEST_PREFIX_RX.search(line[:m.start()]) and (not is_shell or _CFG_LAST_ARG_RX.match(rest)))
+            if ext in _CFG_BINARY_EXTS or db_sink:
+                kind = "binary"
+            elif ext in _CFG_STATE_EXTS:
+                kind = "state"
+            elif name and not name.lower().startswith("plugin.") and write_sink:
+                kind = "text"
+            else:
+                continue
+            if fname.lower() in _CFG_CORE_NAMES and not (db_sink or write_sink):
+                continue
+            yield rel, i, line.strip(), fname, kind
+
+
+# The files FPP's WriteSettingToFile() writes (and parses with its own readers,
+# never PHP's stock INI parser): the global settings file (/home/fpp/media/
+# settings - `$settingsFile`, `$settings['settingsFile']`, `$mediaDirectory .
+# "/settings"`, the SETTINGSFILE env var) and the per-plugin `plugin.<name>`
+# config files under config/. A `plugin.ini`/`plugin.defaults.ini`/... literal
+# (any name that ends in a file extension) is a plugin's own INI file, not FPP's
+# `plugin.<name>` convention.
+_INI_FPP_FILE_RX = re.compile(
+    r'/home/fpp/media/settings\b|\bmedia/settings\b'
+    r'|\$settingsFile\b|\[\s*[\'"]settingsFile[\'"]\s*\]|\bSETTINGSFILE\b'
+    r'|(?:\$mediaDir(?:ectory)?|\[\s*[\'"]mediaDirectory[\'"]\s*\])\s*\.\s*[\'"]/settings[\'"]'
+    r'|[\'"/]plugin\.(?!(?:[\w-]+\.)*(?:ini|conf|cfg|txt|php|inc|json)\b)')
+_INI_CALL_RX = re.compile(r'(?<![\w$>:])(parse_ini_(?:file|string))\s*\(')
+_INI_VAR_RX = re.compile(r'\$(\w+)\b(?!\s*\[)')
+_INI_ASSIGN_RX = re.compile(r'\$(\w+)\s*(?:\.=|=(?![=>]))\s*([^;]*);')
+_INI_FUNC_RX = re.compile(r'\bfunction\s*&?\s*\w*\s*\(([^)]*)\)')
+# Variable names that, with no assignment anywhere in the plugin, still mean an
+# FPP-written file: `$settingsFile` is FPP's own global (www/config.php) and
+# `$pluginConfigFile` the name template-derived plugins give
+# `$settings['configDirectory'] . "/plugin." . $pluginName`.
+_INI_CONVENTION_VARS = frozenset({"settingsFile", "pluginConfigFile", "pluginSettingsFile"})
+
+
+def _call_first_arg(text: str, start: int, limit: int = 400) -> str:
+    """Text of the first argument of the call whose `(` ends just before
+    text[start]: everything up to the top-level `,` or the matching `)`."""
+    depth, quote, i, end = 0, None, start, min(len(text), start + limit)
+    while i < end:
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "'\"":
+            quote = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif c == "," and depth == 0:
+            break
+        i += 1
+    return text[start:i]
+
+
+def _stock_ini_parse_hits(root: str, exts=(".php", ".inc")):
+    """Yield (relpath, lineno, line, func) for a PHP parse_ini_file()/parse_ini_string()
+    call whose first argument is an FPP settings or `plugin.<name>` config file (or,
+    for parse_ini_string, that file's contents). Precision over recall: the argument
+    must reference one of the _INI_FPP_FILE_RX spellings directly, or through
+    `$var = ...` assignments up to two levels deep (`$cfg = $dir . "/plugin." . $n;
+    $raw = file_get_contents($cfg); parse_ini_string($raw)`) - looked up in the same
+    file first, else in any of the plugin's PHP files (the path is often built in
+    functions.inc.php and parsed from a page that includes it). An unassigned
+    `$pluginConfigFile`/`$settingsFile` still counts (_INI_CONVENTION_VARS). Any
+    other target - /etc/os-release, a plugin's own `config.ini` - is legitimate INI
+    and never fires. Motivating case: AdvancedStats' functions.inc.php
+    `$pluginSettings = parse_ini_file($pluginConfigFile);`."""
+    files = []
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        local: dict[str, list[str]] = {}
+        for m in _INI_ASSIGN_RX.finditer(text):
+            local.setdefault(m.group(1), []).append(m.group(2))
+        files.append((rel, text, local))
+    everywhere: dict[str, list[str]] = {}
+    for _, _, local in files:
+        for name, rhs in local.items():
+            everywhere.setdefault(name, []).extend(rhs)
+
+    def refs_fpp_file(expr: str, local: dict[str, list[str]], depth: int = 2,
+                      params: frozenset = frozenset()) -> bool:
+        if _INI_FPP_FILE_RX.search(expr):
+            return True
+        for name in _INI_VAR_RX.findall(expr):
+            # A parameter of the function the call sits in is whatever the caller
+            # passes: a `$file` assigned in some other file says nothing about it.
+            rhs_list = local.get(name) or (None if name in params else everywhere.get(name))
+            if not rhs_list:
+                if name in _INI_CONVENTION_VARS:
+                    return True
+            elif depth and any(refs_fpp_file(rhs, local, depth - 1) for rhs in rhs_list):
+                return True
+        return False
+
+    for rel, text, local in files:
+        lines = text.split("\n")
+        for m in _INI_CALL_RX.finditer(text):
+            lineno = text.count("\n", 0, m.start()) + 1
+            line = lines[lineno - 1]
+            if _is_comment_line(line) or re.search(r'\bfunction\s+$', text[max(0, m.start() - 20):m.start()]):
+                continue
+            # Parameters of the nearest function defined above the call (the one
+            # it most likely sits in; a closed one only costs a missed hit).
+            funcs = list(_INI_FUNC_RX.finditer(text, 0, m.start()))
+            params = frozenset(re.findall(r'\$(\w+)', funcs[-1].group(1))) if funcs else frozenset()
+            if refs_fpp_file(_call_first_arg(text, m.end()), local, params=params):
+                yield rel, lineno, line.strip(), m.group(1)
+
+# limonade lifecycle hooks - www/api/controllers/plugin.php PluginApiReservedFunctions().
+_LIMONADE_RESERVED_NAMES = frozenset({
+    "configure", "initialize", "before", "autorender", "before_exit",
+    "before_sending_header", "after", "route_missing", "autoload_controller",
+    "not_found", "server_error",
+})
+_FPP_API_GLOBALS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fpp_api_globals.txt")
+_fpp_api_globals_cache: frozenset[str] | None = None
+
+
+def _fpp_api_globals() -> frozenset[str]:
+    """Lower-cased names of every global PHP function FPP core defines on an
+    /api/* request (fpp_api_globals.txt, generated from the FPP tree - the
+    header says how). Empty if the file is missing, so the check degrades to
+    the curated generic list rather than failing."""
+    global _fpp_api_globals_cache
+    if _fpp_api_globals_cache is None:
+        names = set()
+        for l in _read(_FPP_API_GLOBALS_FILE).splitlines():
+            l = l.strip()
+            if l and not l.startswith("#"):
+                names.add(l.lower())
+        _fpp_api_globals_cache = frozenset(names)
+    return _fpp_api_globals_cache
+
+
+# PHP built-in functions a plugin author might plausibly try to declare -
+# "Cannot redeclare" at compile time, whatever FPP version.
+_PHP_BUILTIN_NAMES = frozenset({
+    "log", "reset", "exec", "system", "header", "settype", "gettype", "count", "sort",
+    "filter", "time", "date", "mail", "link", "unlink", "copy", "rename", "stat", "each",
+    "end", "next", "current", "key", "list", "array", "min", "max", "abs", "round",
+    "trim", "split", "join", "implode", "explode", "print", "echo", "empty", "isset",
+    "unset", "die", "exit", "sleep", "usleep", "file", "dir", "glob", "chdir", "mkdir",
+    "rmdir", "touch", "chmod", "chown", "readfile", "fopen", "fclose", "fread", "fwrite",
+    "serialize", "unserialize", "compact", "extract", "assert", "checkdate", "levenshtein",
+})
+
+# Short generic names that two plugins' api.php files could plausibly both pick.
+_GENERIC_API_NAMES = frozenset({
+    "status", "getstatus", "save", "update", "delete", "remove", "get", "set",
+    "init", "config", "log", "notify", "send", "check", "test", "reset",
+    "start", "stop", "run", "execute", "process", "handle", "callback",
+    "response", "request", "error", "success", "validate", "verify",
+})
+
+
+# Everything that can hide a brace in PHP source, as ONE alternation so the
+# leftmost match wins: a `//` inside a string ("http://...") must be string,
+# not comment, and a `"` inside a `//` comment must be comment, not string -
+# stripping them in two passes (comments first) turned every URL literal
+# inside a function into an unterminated string that swallowed braces up to
+# the next quote anywhere in the file. Strings can't span lines here (a PHP
+# string can, but a multi-line string in an api.php is a heredoc's job, and
+# a bounded miss beats an unbounded one). Heredoc/nowdoc bodies are blanked
+# whole. Every replacement keeps its newlines so stripped line numbers still
+# index the original.
+_PHP_OPAQUE_RX = re.compile(
+    r'<<<\s*(["\']?)([A-Za-z_]\w*)\1\s*\n.*?\n\s*\2\b'   # heredoc / nowdoc
+    r'|/\*.*?\*/'                                             # block comment
+    r'|"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\''             # single-line strings
+    r'|(?://|#)[^\n]*',                                        # line comment
+    re.S)
+
+
+def _php_strip_opaque(src: str) -> str:
+    """`src` with strings, comments and heredocs replaced by a same-line-count
+    blank (strings become `""` so `$a = "x";` still reads as a statement)."""
+    def _blank(m):
+        t = m.group(0)
+        if t[0] in "\"'":
+            return '""'
+        return "\n" * t.count("\n")
+    return _PHP_OPAQUE_RX.sub(_blank, src)
+
+
+_SHELL_FN_DEF_RX = re.compile(
+    r'(?m)^\s*(?:function\s+(\w+)\s*(?:\(\s*\))?|(\w+)\s*\(\s*\))\s*\{')
+
+
+def _shell_functions(src: str) -> list[tuple[str, int, int, int, int]]:
+    """Every `name() {`, `function name {` and `function name() {` in a shell
+    script as (name, body_start, body_end, start_line, end_line): character
+    offsets of the body (just inside the braces) and 0-based line numbers of
+    the definition's first and last line. Brace matching is naive (a `}` in a
+    string counts) - good enough for the install/hook scripts this is used on."""
+    out = []
+    for m in _SHELL_FN_DEF_RX.finditer(src):
+        name = m.group(1) or m.group(2)
+        depth, j = 1, m.end()
+        while j < len(src) and depth > 0:
+            if src[j] == '{':
+                depth += 1
+            elif src[j] == '}':
+                depth -= 1
+            j += 1
+        out.append((name, m.end(), j - 1, src.count('\n', 0, m.start()), src.count('\n', 0, j)))
+    return out
+
+
+def _api_php_top_level_hits(path: str):
+    """Yield (lineno, line) for a statement at brace depth 0 in a PHP file that
+    does something (echo/header/exec/switch/assigns FROM a superglobal, ...)
+    rather than just declaring functions/classes or pulling in FPP's helpers.
+    Strings, comments and heredocs are blanked first (see _php_strip_opaque)
+    so braces inside them don't skew the depth count."""
+    side = re.compile(
+        r'^\s*(echo\b|print\b|header\s*\(|http_response_code\s*\(|exec\s*\(|shell_exec\s*\(|'
+        r'passthru\s*\(|system\s*\(|proc_open\s*\(|switch\s*\(|foreach\s*\(|while\s*\(|'
+        r'die\b|exit\b|readfile\s*\(|file_put_contents\s*\(|'
+        r'\$\w+\s*=\s*\$_(GET|POST|REQUEST)\b)')
+    original = _read(path).splitlines()
+    src = _php_strip_opaque("\n".join(original))
+    depth = 0
+    for i, line in enumerate(src.splitlines(), 1):
+        if depth == 0 and side.match(line):
+            yield i, original[i - 1].strip()
+        depth += line.count('{') - line.count('}')
+
+
+def _log_naming_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line) for a log filename built from logDirectory/LOGDIR
+    that doesn't include the mandated "plugin-" prefix - e.g. `$pluginName.".log"` instead
+    of `"plugin-".$pluginName.".log"`.
+
+    One hop of aliasing is followed within a file: a variable assigned from
+    LOGDIR/logDirectory (`LOG_DIR="${LOGDIR:-/home/fpp/media/logs}"`,
+    `$logDir = $settings['logDirectory']`, `logdir = os.environ.get('LOGDIR', ...)`)
+    is treated as the log directory on later lines, so a `.log` filename built from
+    that alias is checked too. Confirmed miss before this (fpp-plugin-SDCardRecover,
+    2026-09): `LOG_DIR="${LOGDIR:-...}"` on one line and
+    `LOG_FILE="$LOG_DIR/SDCardRecover.log"` on the next was invisible to the
+    same-line-only regex, and the mis-named log never gets rotated by FPP."""
+    rx = re.compile(r'(logDirectory|LOGDIR)\b.*\.log\b', re.I)
+    alias_rx = re.compile(r'^\s*(?:local\s+|export\s+|var\s+|let\s+|const\s+)?\$?(\w+)\s*=\s*[^=].*?\b(logDirectory|LOGDIR)\b', re.I)
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        aliases = set()
         for i, line in enumerate(_read(path).splitlines(), 1):
             if _is_comment_line(line):
                 continue
+            if re.search(r'\b(?:fppd|fpp|fppinit|apache2(?:-\w+)?)\.log\b', line, re.I):
+                continue  # reading/tailing FPP's own log isn't naming one
             if rx.search(line) and "plugin-" not in line.lower():
                 yield rel, i, line.strip()
                 break
+            m = alias_rx.match(line)
+            if m and m.group(1).lower() not in ('logdir', 'logdirectory'):
+                aliases.add(m.group(1))
+                continue
+            if aliases and '.log' in line.lower() and 'plugin-' not in line.lower():
+                # `$ALIAS`/`${ALIAS}` (shell, PHP) or bare word `ALIAS` (Python, JS)
+                # used in an expression that NAMES a log file - an assignment,
+                # a redirect/tee target, or an open-for-write - not one that
+                # reads, tails or rotates logs. Reading FPP's own fppd.log via
+                # the alias isn't naming a log either.
+                if re.search(r'\b(?:fppd|fpp|fppinit|apache2(?:-\w+)?)\.log\b', line, re.I):
+                    continue
+                names_log = re.search(
+                    r'^\s*(?:local\s+|export\s+|var\s+|let\s+|const\s+|readonly\s+)?\$?\w+\s*=[^=]'
+                    r'|(?<![-=<&0-9\w])>>?\s*["\']?\$?\{?\w|\btee\b|\bfopen\s*\(|file_put_contents\s*\('
+                    r'|\bopen\s*\([^)]*["\'][aw]|FileHandler\s*\(|logging\.basicConfig\s*\(|createWriteStream\s*\(',
+                    line)
+                if names_log and any(
+                        re.search(r'\$\{?' + re.escape(a) + r'\b|(?<![\w$])' + re.escape(a) + r'\b', line)
+                        for a in aliases) and re.search(r'\.log\b', line, re.I):
+                    yield rel, i, line.strip()
+                    break
 
 
 def _missing_timeout_hits(root: str, exts=(".php", ".py", ".sh")):
@@ -775,8 +1387,12 @@ def _unpinned_third_party_clone_hits(root: str, own_owner: str | None, own_repo:
     clone_rx = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?clone\b[^\n]*?(https?://github\.com/\S+)')
     # A real commit SHA (hex only) pins the checkout to a specific reviewed state;
     # a branch name like "origin/master" isn't hex-only and won't match this, so
-    # that shape is correctly still treated as floating/unpinned.
-    pin_rx = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?(?:checkout|reset\s+--hard)\s+(?:origin/)?([0-9a-f]{7,40})\b', re.I)
+    # that shape is correctly still treated as floating/unpinned. Flags between
+    # the subcommand and the sha (`checkout --quiet <sha>`, `checkout -q <sha>`,
+    # `reset --hard -q <sha>`) are tolerated: fpp-live-follow pinned exactly as
+    # the finding text asked and still tripped this through four /recheck rounds
+    # (fpp-data #231) because `--quiet` sat between `checkout` and the sha.
+    pin_rx = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?(?:checkout|reset\s+--hard)\s+(?:-\S+\s+)*(?:origin/)?([0-9a-f]{7,40})\b', re.I)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
         if _skippable(rel):
@@ -797,6 +1413,63 @@ def _unpinned_third_party_clone_hits(root: str, own_owner: str | None, own_repo:
             if (own_owner and own_repo
                     and owner.lower() == own_owner.lower() and repo_name_hit.lower() == own_repo.lower()):
                 continue  # cloning its own repo (e.g. a self-reference) - not third-party
+            yield rel, i, line.strip()
+
+
+def _nounset_fppdir_hits(root: str):
+    """Yield (relpath, lineno, line) for a shell script that enables `set -u`
+    (nounset) and then, while it is still in effect, either sources
+    ${FPPDIR}/scripts/common or expands FPPDIR with no default. Both abort the
+    script instead of failing soft, and the guidelines' own restart-flag advice
+    used to produce exactly this shape:
+      - on the uninstall path FPPDIR is unset (uninstall_plugin passes it only as
+        a trailing argument and the Plugin Manager's plain `sudo` strips the
+        exported one) -> "FPPDIR: unbound variable", script exits before any
+        cleanup runs;
+      - on the install path FPPDIR IS set, but scripts/common expands a bare
+        $LD_LIBRARY_PATH (always stripped by sudo) so sourcing it under nounset
+        dies inside common - usually hidden by a 2>/dev/null on the source line.
+    Confirmed real (fpp-data #231, 2026-09): fpp-live-follow's fpp_install.sh
+    exited right after its first echo for three weeks; nobody noticed because the
+    error was silenced. Statement-level `set +u` (or `set +o nounset`) after the
+    enabling line ends the window; `set +u` earlier on the same line (the
+    recommended subshell form) exempts that line. A script that assigns FPPDIR
+    itself first (`FPPDIR="${FPPDIR:-}"`, `: "${FPPDIR:=/opt/fpp}"`) has made
+    later bare expansions safe (fpp-AnnouncementAssistant does this), so those
+    are exempt from that point on - sourcing common under nounset is not."""
+    assigns = re.compile(r'^\s*(export\s+)?FPPDIR=|\$\{FPPDIR:=')
+    nounset_on = re.compile(r'(^|[;&|(]\s*|\bthen\s+|\bdo\s+)set\s+(-[a-zA-Z]*u[a-zA-Z]*\b|-o\s+nounset\b)')
+    nounset_off = re.compile(r'^\s*set\s+(\+[a-zA-Z]*u[a-zA-Z]*\b|\+o\s+nounset\b)')
+    same_line_off = re.compile(r'set\s+(\+[a-zA-Z]*u[a-zA-Z]*\b|\+o\s+nounset\b)')
+    source_common = re.compile(r'(^|[;&|(]\s*|\bthen\s+|\bdo\s+)(source|\.)\s+"?\$\{?FPPDIR\}?[^\s"]*/scripts/common\b')
+    bare_fppdir = re.compile(r'\$FPPDIR\b|\$\{FPPDIR\}')
+    shebang = re.compile(r'^#!\s*\S*/(ba)?sh\b|^#!\s*\S*/env\s+(ba)?sh\b')
+    for path in _iter_files(root):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        if not rel.endswith(".sh") and not shebang.match(text):
+            continue
+        armed = assigned = False
+        for i, line in enumerate(text.splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            if assigns.search(line):
+                assigned = True
+            if not armed:
+                if nounset_on.search(line):
+                    armed = True
+                continue
+            if nounset_off.match(line):
+                armed = False
+                continue
+            m = source_common.search(line) or (None if assigned else bare_fppdir.search(line))
+            if not m:
+                continue
+            off = same_line_off.search(line)
+            if off and off.start() < m.start():
+                continue
             yield rel, i, line.strip()
 
 
@@ -826,9 +1499,33 @@ def _device_path_no_allowlist_hits(root: str, exts=(".cpp", ".c", ".h", ".hpp", 
             if not build_rx.search(line):
                 continue
             lo, hi = max(0, i - window), min(len(lines), i + window)
-            if not allowlist_rx.search("\n".join(lines[lo:hi])):
-                yield rel, i + 1, line.strip()
-                break
+            if allowlist_rx.search("\n".join(lines[lo:hi])):
+                continue
+            if _same_var_guard_before(build_rx.search(line).group(0), lines[lo:i + 1]):
+                continue
+            yield rel, i + 1, line.strip()
+            break
+
+
+def _same_var_guard_before(build: str, before: list) -> bool:
+    """True if the variable concatenated in `build` is validated in `before` (the
+    window up to and including the build line) by an anchored ^...$ regex match
+    (preg_match / re.match / re.fullmatch / std::regex_match) or a membership test
+    (in_array / Python `in`). Catches allow-lists that don't spell out USB/ACM/AMA -
+    FPP-Plugin-Projector-Control's `preg_match('/^tty[ASU][A-Z0-9]+$/', $DEVICE)`
+    (fpp-data#205), flagged both as an if-guard and as an inline ternary. An
+    unanchored pattern, a guard on a different variable, or one after the build
+    line doesn't count."""
+    vm = re.search(r'["\']\s*[+.]\s*(\$?\w+)|\{(\w+)', build)
+    if not vm:
+        return False
+    var = re.escape(vm.group(1) or vm.group(2)) + r'(?!\w)'
+    guard_rx = re.compile(
+        r'(?:preg_match|re\.(?:full)?match|regex_match)\s*\(\s*r?([\'"])[^\'"\n]*\^[^\'"\n]*\$[^\'"\n]*\1\s*,\s*' + var
+        + r'|regex_match\s*\(\s*' + var
+        + r'|in_array\s*\(\s*' + var
+        + r'|(?<![\w$])' + var + r'\s+in\s+[\w({\[]')
+    return bool(guard_rx.search("\n".join(before)))
 
 
 def _socket_port_hits(root: str, port: int, exts=SCRIPT_EXT, window: int = 3):
@@ -940,6 +1637,1789 @@ def _default_credential_hits(root: str, exts=(".php", ".js")):
                 yield rel, i, line.strip()
 
 
+# --- privacy disclosure (pluginInfo.json `privacy` block) --------------------
+# The `privacy` block (pluginInfo.schema.json `$defs/privacy`, PLUGIN_GUIDELINES.md
+# §14, PLUGININFO_FORMAT.md `privacy`) is self-declared, so the listing check greps the
+# plugin's code against it and fails on a contradiction: a host in the code that
+# no `sends[].to` covers, an install-time fetch or package source with no
+# download/package-source change, a camera device with no camera sensor, a
+# bind() while remoteAccess is "none", and so on. Each category is its own
+# `privacy-undeclared-<category>` finding so an author can fix one line of the
+# manifest per finding. Everything here is single-line and literal-only, like
+# the other checks: a host built from variables is invisible to it and still
+# needs the human review.
+
+# A missing block is a listing BLOCKER outright - the original 2027-01-01 grace
+# period was dropped, for listing and (since late September 2026) in FPP's own
+# install dialog, which shows a plugin with no block in red.
+
+# The v3 vocabulary: eight keys, the keys inside each array item, the enums the
+# linter reasons about, and the soft length caps (spec §1; the schema carries
+# the enums, the linter the lengths - warn, never block).
+_PRIV_V3_KEYS = ("summary", "sends", "collects", "sensors", "remoteAccess", "systemChanges", "closedCode", "other")
+_PRIV_V3_ITEM_KEYS = {
+    "sends": ("to", "what", "why", "alwaysOn"),
+    "collects": ("what", "about", "keptDays", "canDelete", "where"),
+    "sensors": ("type", "stored"),
+    "systemChanges": ("kind", "what"),
+}
+_PRIV_V3_KINDS = ("service", "network", "core-settings", "download", "package-source", "tunnel", "reads-core-credentials", "privilege")
+_PRIV_LEN_SUMMARY, _PRIV_LEN_TEXT, _PRIV_LEN_CHANGE = 200, 100, 150
+# The placeholder fpp-plugin-Template ships in privacy.summary / privacy.other
+# (matched case-insensitively, so a half-edited copy still trips it).
+_PRIV_TEMPLATE_MARK = "template text"
+# What a v2 key became, for the privacy-unknown-key message.
+_PRIV_V2_KEY_HINTS = {
+    "schemaVersion": "dropped in v3", "recipients": "now `sends`", "install": "now `systemChanges` kinds download / package-source, and `closedCode`",
+    "inProcess": "dropped - say it in `other` if it matters", "subjects": "now `collects[].about`", "broadcasts": "now a `sends` entry with to = \"anyone in FM range\"",
+    "visitorUI": "dropped - describe it in `other`", "payments": "dropped - describe it in `other`", "credentials": "now `systemChanges` kind reads-core-credentials; the plugin's own credentials are its settings.json type: password",
+    "hostChanges": "now `remoteAccess` and `systemChanges`", "leftAfterUninstall": "dropped - say it in `other`", "revertedOnUninstall": "dropped - say it in `other`",
+}
+
+_PRIVACY_SETTING_KEYS = ("statsPublish", "statsPublishUrl", "ShareCrashData", "FetchVendorLogos",
+                         "SendVendorSerial", "SendVendorLogos", "privacyConsent", "LegalJurisdiction")
+_PRIVACY_SETTING_RX = re.compile(r'(?<![\w.$-])(' + "|".join(_PRIVACY_SETTING_KEYS) + r')(?![\w-])')
+# Core settings that hold a credential - a read has to be declared under
+# a systemChanges entry of kind reads-core-credentials (PLUGIN_GUIDELINES.md §14.9). Case-exact:
+# these are FPP's own key spellings, and `password` as a plugin's OWN 2-arg
+# setting is filtered out by the arg-count check below.
+_CORE_CREDENTIAL_KEYS = ("password", "osPassword", "emailpass", "emailuser", "MQTTPassword", "MQTTUsername", "TetherPSK")
+
+_PRIV_EXTS = _CFG_SCAN_EXTS + (".html", ".htm", ".css")
+# A committed virtualenv/site-packages (fpp-performance-capture ships one) and
+# bundled UI libraries carry hundreds of doc/CDN URLs that say nothing about the
+# plugin's own traffic - skipped here on top of _skippable()'s vendor dirs.
+_PRIV_SKIP_DIRS = ("/venv/", "/.venv/", "/site-packages/", "/dist-packages/", "/__pycache__/")
+# A basename that is the library's own name (or a jquery.<plugin> / jquery-<plugin>
+# name), then only a version and build words (jquery-3.7.1.min.js,
+# jquery-ui-1.13.2.custom.min.js, jquery.validate.min.js, react-dom.production.min.js):
+# a plugin's own file that merely contains a library name (chart-helper.js,
+# plugin-chart.js, my.jquery.js) is the plugin's code. JavaScript and CSS only:
+# PHP libraries (PHPMailer, Guzzle) live under vendor/, which is skipped anyway,
+# and a plugin's own chart.php or bootstrap.php is its code.
+_PRIV_LIB_FILE_RX = re.compile(
+    r'^(?:jquery[.-][a-z]\w*|chartjs-plugin-[a-z]\w*|(?:jquery|bootstrap|sweetalert|popper|chart|chartjs|moment'
+    r'|lodash|underscore|select2|datatables?|fontawesome|font-awesome|d3|three|socket\.io|axios|vue|react|angular)\d*)'
+    r'(?:[.-](?:v?\d[\w]*|ui|dom|bundle|slim|min|umd|esm|cjs|amd|global|browser|runtime|common|core|all|full'
+    r'|with|locales|dist|module|prod|production|dev|development|custom|js|structure|theme|icons|timezone|data))*'
+    r'\.(js|css)$', re.I)
+
+_PRIV_URL_RX = re.compile(
+    r'''(?<![\w/@-])(https?|wss?|mqtts?|ftp|git|ssh|smtps?|imaps?|pop3s?)://'''
+    r'''([A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]|\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?(/[^\s'"`<>)]*)?''')
+# Reference/documentation hosts that turn up in code as spec links, license
+# headers, badge images, XML namespaces and "see also" strings, never as a data
+# recipient.
+_PRIV_DOC_HOST_RX = re.compile(
+    r'(^|\.)(ietf\.org|rfc-editor\.org|wikipedia\.org|php\.net|w3\.org|whatwg\.org|example\.(com|org|net)'
+    r'|gnu\.org|creativecommons\.org|opensource\.org|mozilla\.org|stackoverflow\.com|iana\.org|iso\.org'
+    r'|unicode\.org|apache\.org|oracle\.com|wordpress\.org|promisesaplus\.com|php-fig\.org|jquery\.org'
+    r'|jqueryui\.com|jquery\.com|curl\.haxx\.se|curl\.se|sourceforge\.net|schema\.org|json-schema\.org'
+    r'|purl\.org|falconchristmas\.com|github\.io|python\.org|npmjs\.com|pypi\.org|debian\.org'
+    r'|raspberrypi\.(com|org)|ubuntu\.com|nodejs\.org|readthedocs\.io|shields\.io|brew\.sh'
+    r'|placehold\.co|youtube\.com|youtu\.be|docs\.\w+\.\w+|openxmlformats\.org|oasis-open\.org'
+    r'|schemas\.[\w-]+\.\w+|purl\.[\w-]+\.\w+)$', re.I)
+
+
+def _priv_private_host(h: str) -> bool:
+    """localhost, link-local, RFC1918/loopback/multicast literals, mDNS `.local` and the other
+    LAN-only suffixes the install dialog's HOST_RE treats as private - not off-box."""
+    m = re.match(r'^(\d+)\.(\d+)\.', h)
+    if not m:
+        return h in ("localhost", "0.0.0.0", "::1", "::") or h.endswith((".local", ".localhost", ".lan", ".home", ".internal", ".localdomain"))
+    a, b = int(m.group(1)), int(m.group(2))
+    return a in (0, 10, 127) or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31) or (a == 169 and b == 254) or a >= 224
+
+
+def _priv_reg_domain(h: str) -> str:
+    """Registrable domain for recipient matching (api.twilio.com -> twilio.com,
+    fpp-zettle.s3.dualstack.eu-west-2.amazonaws.com -> amazonaws.com, x.co.uk -> x.co.uk).
+    Two hosts under one registrable domain are one recipient organisation, which is
+    what the dialog names; a declared `twilio.com` covers every Twilio endpoint."""
+    h = h.lower().strip().rstrip(".")
+    if h.startswith("www."):
+        h = h[4:]
+    if re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', h):
+        return h
+    parts = h.split(".")
+    if len(parts) >= 3 and parts[-2] in ("co", "com", "org", "net", "ac", "gov", "edu", "or", "ne") and len(parts[-1]) == 2:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else h
+
+
+_PRIV_HOST_TOKEN_RX = re.compile(r'(?<![\w-])((?:[a-z0-9-]+\.)+[a-z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?![\w-])', re.I)
+
+
+def _priv_host_declared(host: str, declared: set[str]) -> bool:
+    """`declared` holds every host string from the manifest. Each may be a bare host or
+    free text naming several ("oauth.zettle.com / pusher.izettle.com", "pypi.org via
+    pip") - every host-shaped token in it counts. Text naming no host ("the broker you
+    configure") never matches a literal, as intended: a literal host in the code is
+    exactly the kind of fixed recipient the block has to name."""
+    rd = _priv_reg_domain(host)
+    for d in declared:
+        for tok in _PRIV_HOST_TOKEN_RX.findall(d.lower()):
+            tok = tok.lstrip("*.")
+            if host.lower() == tok or host.lower().endswith("." + tok) or _priv_reg_domain(tok) == rd:
+                return True
+    return False
+
+
+def _priv_lines(root: str, exts=_PRIV_EXTS, minified: bool = False):
+    """(relpath, lineno, line) for every code line the privacy checks look at: same
+    doc/help/test/vendor exclusions as _grep, plus committed venvs, bundled UI
+    libraries and minified lines (a 30 KB one-line library has no bearing on what
+    the plugin does). `minified` keeps the bundled libraries and long lines, for
+    the host scan: a recipient hidden in minified code, or in a file named like a
+    library, is still a recipient."""
+    for path in sorted(_iter_files(root, exts)):
+        rel = os.path.relpath(path, root)
+        low = "/" + rel.lower()
+        if _skippable(rel) or any(d in low for d in _PRIV_SKIP_DIRS):
+            continue
+        if not minified and _PRIV_LIB_FILE_RX.search(os.path.basename(rel)):
+            continue
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if (len(line) > 600 and not minified) or _is_comment_line(line):
+                continue
+            yield rel, i, line
+
+
+def _priv_split_args(text: str) -> list[str] | None:
+    """Split the argument list that `text` starts with (just after the opening paren)
+    at top-level commas; None if the closing paren isn't on this line. Quote- and
+    paren-aware so `f(a, g(b, c), 'x,y')` is three args."""
+    depth, quote, args, cur = 0, None, [], []
+    for ch in text:
+        if quote:
+            cur.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in "'\"":
+            quote = ch
+        elif ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                args.append("".join(cur).strip())
+                return [a for a in args if a != ""] if args != [""] else []
+            depth -= 1
+        elif ch == "," and depth == 0:
+            args.append("".join(cur).strip())
+            cur = []
+            continue
+        cur.append(ch)
+    return None
+
+
+_PRIV_INSTALL_HOOK_RX = re.compile(r'(^|/)(fpp_install\.sh|fpp_uninstall\.sh|fpp_upgrade\.sh|install[\w.-]*\.sh|setup[\w.-]*\.sh|Makefile|makefile)$', re.I)
+_PRIV_TRAILING_COMMENT_RX = re.compile(r'''(?:^|\s)(?://|#|\*|;)\s*[^'"`]*$''')
+# The server-side request calls and commands that make a URL in minified or
+# library code a recipient (see _priv_host_hits); browser-side loads and fetch()
+# calls are _priv_url_context's "browser".
+_PRIV_STRICT_SINK_RX = re.compile(
+    r'(?:\b(?:file_get_contents|fopen|curl_init|get_headers|simplexml_load_file|urlopen|url(?:Get|Post|Put|Delete)'
+    r'|requests\.(?:get|post|put|patch|delete|head|request)|https?\.(?:get|post|put|request)|wp_remote_\w+)'
+    r'\s*\(\s*["\'`]|\bCURLOPT_URL\s*,\s*["\']|\b(?:curl|wget)\s+[^\'"`;|&\n]*["\'`]?)$')
+_PRIV_STRICT_PRE_RX = re.compile(r'''(?:[=(:]|@import)\s*["'`]?\s*$''')
+_PRIV_URL_CMD_RX = re.compile(
+    r'\b(curl|wget|git\s+clone|git\s+remote|pip3?\s+install|npm\s+(?:install|i)|add-apt-repository|ping|ssh|scp|rsync'
+    r'|nc|ncat|openssl|mosquitto_(?:pub|sub)|ffmpeg|ffplay|mpv|mpg123|mplayer|cvlc|vlc|yt-dlp)\b[^#\n]*$', re.I)
+
+
+# Where a URL sits in the text before it (`pre`), for the browser-side rule below.
+# Attributes that are never a load (a form target, an XML namespace, a citation)
+# and tags whose href is a navigation the user may click, not a fetch.
+_PRIV_NONLOAD_ATTR_RX = re.compile(r'\b(action|xmlns(?::[\w-]+)?|xsi:[\w-]+|namespace|formaction|cite|ping|manifest)\s*=\s*["\']?$', re.I)
+_PRIV_TAG_RX = re.compile(r'<([A-Za-z][\w-]*)\b[^<>]*$')
+_PRIV_LOAD_TAGS = ("script", "link", "img", "iframe", "frame", "video", "audio", "source", "track", "embed", "object", "picture", "use", "image")
+_PRIV_NAV_TAGS = ("a", "area", "form", "base")
+_PRIV_SRC_ATTR_RX = re.compile(r'\b(src|srcset|poster|data-src|data-srcset|data-href|xlink:href)\s*=\s*["\']?$', re.I)
+_PRIV_HREF_ATTR_RX = re.compile(r'\bhref\s*=\s*["\']?$', re.I)
+# CSS `url(https://...)` and `@import "https://..."` (`@import url(...)` is the former).
+# Case-sensitive so JS `new URL("https://...")` is a plain literal, not a load.
+_PRIV_CSS_URL_RX = re.compile(r'(?<![\w-])url\(\s*["\']?$|@import\s+["\']$')
+# Browser-side request sinks with a literal URL: fetch(), XMLHttpRequest.open(),
+# jQuery's $.ajax/$.get/$.post/$.getJSON/$.getScript (positional or `url:` option),
+# axios, EventSource, WebSocket, Worker, navigator.sendBeacon, importScripts.
+_PRIV_JS_FETCH_RX = re.compile(
+    r'(?:\bfetch|\$\.(?:ajax|get|post|getJSON|getScript)|\baxios(?:\.(?:get|post|put|patch|delete|request))?'
+    r'|\bnew\s+(?:EventSource|WebSocket|Worker|SharedWorker)|\bsendBeacon|\bimportScripts)\s*\(\s*["\'`]$'
+    r'|\.open\s*\(\s*["\'][A-Za-z]+["\']\s*,\s*["\'`]$'
+    r'|\burl\s*:\s*["\'`]$', re.I)
+# Content-Security-Policy: every host in a *-src directive is a host the page tells
+# the browser it may load from - it is there because the page loads from it.
+_PRIV_CSP_RX = re.compile(r'Content-Security-Policy(?:-Report-Only)?', re.I)
+_PRIV_CSP_DIRECTIVE_RX = re.compile(r'\b((?:default|script|style|img|font|connect|media|frame|child|worker|manifest|prefetch|object)-src(?:-elem|-attr)?)\s+([^;"\\<]*)', re.I)
+_PRIV_CSP_SOURCE_RX = re.compile(r'(?:(?:https?|wss?):)?(?://)?(\*\.)?((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}|\d{1,3}(?:\.\d{1,3}){3})(?::(?:\d+|\*))?(?:/\S*)?')
+
+
+def _priv_url_context(pre: str) -> str | None:
+    """How the URL that follows `pre` is used: "browser" when the plugin's own page
+    makes the operator's browser load it (script/link/img/iframe/media `src=`/`href=`,
+    CSS url()/@import, fetch()/XHR/$.ajax literals), "link" when it is a hyperlink,
+    form target or namespace the browser never fetches on its own (`<a href>` - a
+    link the user may click is not the plugin sending anything) or text the operator
+    reads (`<code>`, a placeholder/title - _PRIV_PROSE_RX), None for a plain
+    code literal handled by the server-side rules."""
+    if _PRIV_NONLOAD_ATTR_RX.search(pre) or _PRIV_PROSE_RX.search(pre):
+        return "link"
+    m = _PRIV_TAG_RX.search(pre)
+    tag = m.group(1).lower() if m else None
+    if _PRIV_SRC_ATTR_RX.search(pre):
+        return "link" if tag in _PRIV_NAV_TAGS else "browser"
+    if _PRIV_HREF_ATTR_RX.search(pre):
+        return "browser" if tag in _PRIV_LOAD_TAGS else "link"
+    if tag in _PRIV_LOAD_TAGS:
+        return "browser"
+    if tag in _PRIV_NAV_TAGS:
+        return "link"
+    if _PRIV_CSS_URL_RX.search(pre) or _PRIV_JS_FETCH_RX.search(pre):
+        return "browser"
+    return None
+
+
+# FPP serves every plugin page under etc/apache2.csp, generated at boot by
+# scripts/ManageApacheContentPolicy.sh from its DEFAULT_VALUES: default-src 'self';
+# script-src 'self' (+inline/eval); style-src 'self' (+inline); img-src 'self'
+# blob: data:; font-src 'self' data:; object-src 'none'; connect-src 'self' plus
+# FPP's own service hosts and local ws://. A directive the header does not name
+# (frame-src, media-src, child-src, worker-src, manifest-src) falls back to
+# default-src 'self'. So a plugin page's <script src="https://cdn...">, CDN
+# stylesheet, font, badge or fetch() never leaves the browser unless the plugin's
+# install hook whitelists the host with `ManageApacheContentPolicy.sh add
+# <directive> <host>` - the mechanism fpp-plugin-Template's scripts/fpp_install.sh
+# documents. `_priv_load_directive` says which directive governs a load;
+# `_priv_csp_adds` collects what the plugin whitelists; `_priv_csp_allows` joins
+# them with CSP's fallback chain (a directive the header names explicitly is NOT
+# covered by default-src).
+# The directives ManageApacheContentPolicy.sh will accept for `add` (its JSON
+# template); anything else falls back to default-src on FPP's policy.
+_PRIV_CSP_SCRIPT_KEYS = ("default-src", "img-src", "script-src", "style-src", "connect-src", "object-src", "font-src")
+_PRIV_FPP_CSP_CHAIN = {
+    "frame-src": ("frame-src", "child-src", "default-src"),
+    "media-src": ("media-src", "default-src"),
+    "worker-src": ("worker-src", "child-src", "script-src"),
+    "manifest-src": ("manifest-src", "default-src"),
+}
+# Hosts FPP's own connect-src already names (the update check, stats, crash
+# reports, the cape vendors' EEPROM lists); a browser-side fetch() to one of these
+# is not blocked. api.github.com / raw.githubusercontent.com are there too, and
+# exempt anyway.
+_PRIV_FPP_CSP_CONNECT_HOSTS = frozenset((
+    "api.falconplayer.com", "crashes.falconplayer.com", "fppstats.falconchristmas.com",
+    "hansonelectronics.com.au", "www.hansonelectronics.com.au", "kulplights.com", "www.kulplights.com",
+    "wiredwatts.com", "www.wiredwatts.com",
+))
+_PRIV_CSP_ADD_RX = re.compile(r'ManageApacheContentPolicy\.sh["\']?\s+["\']?add["\']?\s+["\']?([a-z-]+-src)["\']?\s+(\S+)', re.I)
+_PRIV_FONT_EXT_RX = re.compile(r'\.(woff2?|ttf|otf|eot)(\?|#|$)', re.I)
+_PRIV_IMAGE_EXT_RX = re.compile(r'\.(png|jpe?g|gif|svg|webp|avif|ico|bmp)(\?|#|$)', re.I)
+_PRIV_REL_ICON_RX = re.compile(r'\brel\s*=\s*["\']?[^"\'>]*icon', re.I)
+_PRIV_JS_SCRIPT_SINK_RX = re.compile(r'(?:\bimportScripts|\$\.getScript)\s*\(\s*["\'`]$', re.I)
+_PRIV_JS_WORKER_SINK_RX = re.compile(r'\bnew\s+(?:Worker|SharedWorker)\s*\(\s*["\'`]$', re.I)
+
+
+def _priv_load_directive(pre: str, urlpath: str) -> str:
+    """The CSP directive that governs a browser-side load `_priv_url_context` called
+    "browser": which tag/attribute/sink the URL sits in, and for a CSS url() or a
+    <source>, the file's extension."""
+    m = _PRIV_TAG_RX.search(pre)
+    tag = m.group(1).lower() if m else None
+    if tag == "script":
+        return "script-src"
+    if tag == "link":
+        return "img-src" if _PRIV_REL_ICON_RX.search(pre) else "style-src"
+    if tag in ("iframe", "frame"):
+        return "frame-src"
+    if tag in ("embed", "object"):
+        return "object-src"
+    if tag in ("video", "audio", "track") or (tag == "source" and not _PRIV_IMAGE_EXT_RX.search(urlpath or "")):
+        return "img-src" if re.search(r'\bposter\s*=\s*["\']?$', pre, re.I) else "media-src"
+    if tag in _PRIV_LOAD_TAGS:
+        return "img-src"
+    if _PRIV_CSS_URL_RX.search(pre):
+        if pre.rstrip().endswith(("@import", '@import "', "@import '")) or re.search(r'@import\s+["\']$', pre):
+            return "style-src"
+        return "font-src" if _PRIV_FONT_EXT_RX.search(urlpath or "") else "img-src"
+    if _PRIV_JS_SCRIPT_SINK_RX.search(pre):
+        return "script-src"
+    if _PRIV_JS_WORKER_SINK_RX.search(pre):
+        return "worker-src"
+    return "connect-src"
+
+
+def _priv_csp_adds(root: str) -> dict[str, set[str]]:
+    """directive -> source tokens the plugin adds to FPP's Content-Security-Policy
+    with `ManageApacheContentPolicy.sh add <directive> <host>` anywhere in its code
+    (install hooks, helper scripts, a PHP page shelling out). Tokens are lowercased
+    with the scheme, port and path stripped; a shell variable becomes "*" (the host
+    is unknowable, so it is taken to cover anything in that directive)."""
+    out: dict[str, set[str]] = {}
+    for _, _, line in _priv_lines(root):
+        for directive, tok in _PRIV_CSP_ADD_RX.findall(line):
+            tok = tok.strip("\"';)")
+            if tok.startswith("$") or "${" in tok:
+                tok = "*"
+            elif tok in ("*", "https:", "http:", "*:"):
+                tok = "*"
+            else:
+                tok = re.sub(r'^(?:https?|wss?):(?://)?', "", tok.lower())
+                tok = re.sub(r'(?::(?:\d+|\*))?(?:/.*)?$', "", tok)
+                if not tok:
+                    continue
+            out.setdefault(directive.lower(), set()).add(tok)
+    return out
+
+
+def _priv_csp_allows(adds: dict[str, set[str]], directive: str, host: str) -> bool:
+    """Whether FPP's policy, plus what the plugin adds to it, lets a page served by
+    FPP's Apache load `host` under `directive`."""
+    host = host.lower()
+    if directive == "connect-src" and host in _PRIV_FPP_CSP_CONNECT_HOSTS:
+        return True
+    for d in _PRIV_FPP_CSP_CHAIN.get(directive, (directive,)):
+        for tok in adds.get(d, ()):
+            if tok == "*":
+                return True
+            if tok.startswith("*."):
+                if host == tok[2:] or host.endswith(tok[1:]):
+                    return True
+            elif host == tok:
+                return True
+        if d in adds:
+            # In CSP a directive that is present is the whole answer for its kind of
+            # load; the fallback chain only applies while it is absent.
+            break
+    return False
+
+
+_PRIV_SERVED_EXTS = (".php", ".html", ".htm", ".inc", ".js", ".css")
+# A command shown to the operator on a plugin page - inside <code>/<pre>/<kbd> or a
+# placeholder/title/alt attribute - is one the operator may run, not one the plugin
+# runs (Statistics-Fpp-Plugin's "sudo systemctl start mosquitto" warning, Dynamic_RDS's
+# "add dtoverlay=pwm" help, fpp-zettle's "curl ... | sudo python" placeholder).
+_PRIV_PROSE_RX = re.compile(r'<(?:code|pre|kbd|samp)\b[^<>]*>[^<]*$|\b(?:placeholder|title|alt|aria-label)\s*=\s*(?:"[^"]*|\'[^\']*)$', re.I)
+
+
+def _priv_in_prose(rel: str, line: str, pos: int) -> bool:
+    """Whether the match at `pos` of `line` in a file the web server serves sits in
+    operator-facing prose (see _PRIV_PROSE_RX) rather than in code."""
+    return rel.lower().endswith(_PRIV_SERVED_EXTS) and bool(_PRIV_PROSE_RX.search(line[:pos]))
+_PRIV_GITHUB_HOSTS = ("github.com", "www.github.com", "raw.githubusercontent.com", "api.github.com",
+                      "objects.githubusercontent.com", "codeload.github.com", "gist.github.com",
+                      "gist.githubusercontent.com")
+# A write next to an api.github.com or gist.github.com URL: creating a gist, an
+# issue or a comment, or pushing a file, puts data where the account behind it
+# can read it. The text around the URL on its own line is looked at, and - for
+# an endpoint that can be written to (_PRIV_GITHUB_WRITABLE_RX) on a short line -
+# the statement it starts (_priv_github_context): the usual PHP request
+# assigns the URL on one line and sets CURLOPT_POST a few lines below it.
+# curl's short flags are case-sensitive and only count after `curl` (`-f` is
+# --fail, `-d` in `[ -d dir ]` is a test; `-sd`, `-d"{}"`, `-F`, `-T` are writes).
+_PRIV_GITHUB_WRITE_RX = re.compile(
+    r'(?:(?-i:-X)|--request|--method)[\s=]*[\'"]?(?:POST|PUT|PATCH)\b|--(?:data(?:-\w+)?|json|form|upload-file'
+    r'|post-data|post-file|body-data|body-file)\b|\bcurl\b[^|;&\n]*?(?<!\S)-(?-i:[a-zA-Z]*[dFT])'
+    r'|\bCURLOPT_(?:POST|POSTFIELDS|CUSTOMREQUEST|UPLOAD)\b|\b(?:requests|axios|http)\.(?:post|put|patch)\s*\('
+    r'|\b(?:method|type)\s*[:=]\s*[\'"](?:POST|PUT|PATCH)[\'"]|\$\.post\s*\(|\burl(?:Post|Put)\s*\(', re.I)
+# curl -G / --get sends its -d data as a query string on a GET: a read.
+_PRIV_GITHUB_GET_RX = re.compile(r'\bcurl\b[^|;&\n]*?(?:(?<!\S)-(?-i:[a-zA-Z]*G)|--get\b)', re.I)
+# How far either side of a GitHub URL the write check looks: a minified line can
+# hold an unrelated POST thousands of characters away.
+_PRIV_GITHUB_WRITE_WINDOW = 300
+# api.github.com paths that accept a write: issues and their comments, pull
+# requests, gists, file contents, release assets, workflow dispatches, statuses.
+# Only these get the multi-line look - a release check (/releases/latest,
+# /tags, /zipball) a few lines from an unrelated POST stays a read.
+_PRIV_GITHUB_WRITABLE_RX = re.compile(
+    r'^/(?:gists\b|repos/[^/]+/[^/]+/(?:issues|pulls|comments|contents|statuses|dispatches|actions/workflows'
+    r'|releases/[^/]+/assets|releases/?$|git/))', re.I)
+# How many lines past the URL the multi-line look reads (_priv_github_context).
+_PRIV_GITHUB_WRITE_LINES = 6
+
+
+def _priv_github_context(lines: list[str], i: int) -> str:
+    """The statement around line i (1-based) of a file, for the GitHub write check:
+    back through shell `\\` continuation lines only (`curl -s \\` / `-d @x \\` /
+    `https://...`), and forward up to _PRIV_GITHUB_WRITE_LINES lines, stopping at
+    the next line with another URL in it - a request set up after that is the
+    next request's, not this one's (`$url = ...; curl_init($url); CURLOPT_POST`)."""
+    start = i - 1
+    while start > 0 and i - start <= _PRIV_GITHUB_WRITE_LINES and lines[start - 1].rstrip().endswith("\\"):
+        start -= 1
+    end = i
+    while end < min(len(lines), i + _PRIV_GITHUB_WRITE_LINES) and "://" not in lines[end]:
+        end += 1
+    return re.sub(r'\\[ \t]*\n', ' ', "\n".join(lines[start:end]))
+
+
+def _priv_host_exempt(host: str, where: str, path: str = "", line: str = "") -> bool:
+    """Hosts that are never a `sends` recipient. GitHub reads (fetching code,
+    releases, update checks or a package from GitHub is the same traffic FPP's own
+    plugin manager already makes - spec §1, `sends[].to`; a binary fetched from there
+    still has to be a `download` system change, which the install rule checks
+    separately), *.github.io (a Pages site's owner never sees who fetched it),
+    private/loopback/LAN names, placeholder names, and - for a server-side literal
+    only - the documentation hosts that turn up as spec links and license headers.
+    GitHub writes are recipients: uploads.github.com, api.github.com's /gists
+    (the create-a-gist endpoint), and any api.github.com or gist.github.com URL
+    with a POST, PUT or PATCH around it (`path` is the URL's path, `line` the
+    text around it on its source line).
+    A browser-side load is a load whoever the host is: a badge from shields.io or
+    a script from code.jquery.com is the operator's browser contacting that host."""
+    if "." not in host or _priv_private_host(host):
+        return True
+    if host in ("api.github.com", "gist.github.com"):
+        if host == "api.github.com" and path.lower().split("?")[0].rstrip("/") == "/gists":
+            return False
+        if _PRIV_GITHUB_WRITE_RX.search(line) and not _PRIV_GITHUB_GET_RX.search(line):
+            return False
+    if host in _PRIV_GITHUB_HOSTS or host.endswith(".github.io"):
+        return True
+    if re.search(r'yourdomain|example|your-?(?:host|server|domain)|placeholder', host):
+        return True
+    return where != "browser" and bool(_PRIV_DOC_HOST_RX.search(host))
+
+
+def _priv_csp_hosts(line: str) -> list[str]:
+    """Hosts named by the *-src directives of a Content-Security-Policy on this line
+    (a PHP header() call, a meta http-equiv tag, an nginx/Apache config line)."""
+    m = _PRIV_CSP_RX.search(line)
+    if not m:
+        return []
+    out = []
+    for _, sources in _PRIV_CSP_DIRECTIVE_RX.findall(line[m.end():]):
+        for tok in sources.split():
+            tok = tok.rstrip("'\");,")   # the closing quote of a header('...') / content='...'
+            if tok.startswith(("'", "data:", "blob:", "mediastream:", "filesystem:")):
+                continue
+            h = _PRIV_CSP_SOURCE_RX.fullmatch(tok)
+            if h:
+                out.append(h.group(2).lower())
+    return out
+
+
+def _priv_host_hits(root: str, own_owner: str | None, csp_adds: dict[str, set[str]] | None = None,
+                    own_server: bool = False) -> dict[str, tuple[str, int, str, str, str | None]]:
+    """host -> (relpath, lineno, line, where, directive) for every off-box host
+    literal in the plugin's code. `where` is "install" inside an install hook,
+    "browser" for a host the plugin's own pages make the operator's browser load
+    (`<script src>`, `<link href>`, `<img src>`, iframe/media sources, CSS
+    url()/@import, fetch()/XHR/$.ajax literals, Content-Security-Policy *-src hosts
+    - PLUGIN_GUIDELINES.md §14.16: a CDN, font or badge host is a `sends` entry like
+    any other hostname), "blocked" for a browser-side load FPP's own
+    Content-Security-Policy stops before the browser opens a connection (the plugin
+    neither whitelists the host with ManageApacheContentPolicy.sh - `csp_adds`, from
+    _priv_csp_adds - nor serves the page itself - `own_server`, remoteAccess != none),
+    else "runtime". `directive` is the CSP directive that governs a browser-side tag
+    load, None otherwise. Skips private/loopback addresses, GitHub, placeholder and
+    (server-side only) documentation hosts, URLs that are hyperlinks rather than
+    loads (`<a href>`, form action - a link the user may click is not the plugin
+    sending anything), and URLs sitting in a trailing comment. Read files in
+    README/docs are out of scope (_priv_lines)."""
+    out: dict[str, tuple[str, int, str, str, str | None]] = {}
+    csp_adds = csp_adds or {}
+    # An install hit outranks the others (it changes the category); a browser hit
+    # outranks a runtime one (its message tells the author how to word the entry);
+    # a blocked load ranks below everything - a host the server also contacts is a
+    # recipient whatever the page does.
+    rank = {"install": 3, "browser": 2, "runtime": 1, "blocked": 0}
+
+    def add(host, rel, i, line, where, directive=None):
+        if host not in out or rank[where] > rank[out[host][3]]:
+            out[host] = (rel, i, line.strip(), where, directive)
+
+    prev: list[str] = []   # the last few lines of the current file, for split tags
+    prev_rel = None
+    file_lines: list[str] = []   # the current file, read only for a GitHub write check
+    for rel, i, line in _priv_lines(root, minified=True):
+        if rel != prev_rel:
+            prev, prev_rel, file_lines = [], rel, []
+        where_file = "install" if _PRIV_INSTALL_HOOK_RX.search(rel) else "runtime"
+        # Only a file the player's web server can serve to a browser makes a
+        # browser-side load; `src=https://...` in a shell or Python file is a
+        # server-side literal like any other.
+        served = rel.lower().endswith(_PRIV_SERVED_EXTS) and where_file != "install"
+        csp = _priv_csp_hosts(line) if served else []
+        if csp:
+            for host in csp:
+                if not _priv_host_exempt(host, "browser"):
+                    add(host, rel, i, line, "browser")
+            prev.append(line)
+            del prev[:-6]
+            continue
+        # A minified line or a bundled library is full of URL strings that are
+        # namespaces, doc links and defaults nothing loads (xlsx's
+        # schemas.openxmlformats.org): there only a URL handed straight to a load,
+        # a request call or a command counts. Each URL's context comes from a
+        # bounded window, and a long line has at most 500 URLs looked at past the
+        # cheap first cuts, or a 1 MB line with thousands of URLs goes quadratic.
+        # Exempt hosts never count against that budget, and each host counts at
+        # most three times, so a run of decoy URLs cannot hide a real one behind it.
+        long_line = len(line) > 600
+        strict = long_line or bool(_PRIV_LIB_FILE_RX.search(os.path.basename(rel)))
+        budget = 500
+        per_host: dict[str, int] = {}
+        w = _PRIV_GITHUB_WRITE_WINDOW
+        for m in _PRIV_URL_RX.finditer(line):
+            pre = line[max(0, m.start() - 1000):m.start()] if long_line else line[:m.start()]
+            # Cheap first cut: a load or a request call leaves an `=`, `(`, `:`,
+            # `@import` or a curl/wget command just before the URL.
+            if strict and not (_PRIV_STRICT_PRE_RX.search(pre[-40:]) or _PRIV_STRICT_SINK_RX.search(pre[-300:])):
+                continue
+            host = m.group(2).lower()
+            near = line[max(0, m.start() - w):m.end() + w]
+            if host == "api.github.com" and not long_line and _PRIV_GITHUB_WRITABLE_RX.match(m.group(3) or ""):
+                if not file_lines:
+                    file_lines = _read(os.path.join(root, rel)).splitlines()
+                near = _priv_github_context(file_lines, i)
+            # Exempt even as a browser load (the narrowest exemption): exempt everywhere.
+            if _priv_host_exempt(host, "browser", m.group(3) or "", near):
+                continue
+            if long_line:
+                seen = per_host.get(host, 0)
+                if seen >= 3:
+                    continue
+                per_host[host] = seen + 1
+                budget -= 1
+                if budget < 0:
+                    break
+            # A tag written over several lines (`<img\n    src="https://...">`)
+            # leaves this line with the attribute but no tag, so the directive
+            # would fall through to connect-src. Pull the tag opener in from the
+            # preceding lines when the attribute is one, and keep it only when it
+            # really is still open.
+            if not _PRIV_TAG_RX.search(pre) and (_PRIV_SRC_ATTR_RX.search(pre) or _PRIV_HREF_ATTR_RX.search(pre)):
+                joined = pre
+                for back in reversed(prev[-6:]):
+                    joined = back.strip() + " " + joined
+                    if "<" in back:
+                        break
+                if _PRIV_TAG_RX.search(joined):
+                    pre = joined
+            ctx = _priv_url_context(pre)
+            if ctx == "link":
+                continue
+            if strict and ctx != "browser" and not _PRIV_STRICT_SINK_RX.search(pre[-300:]):
+                continue
+            if _PRIV_TRAILING_COMMENT_RX.search(pre) and not re.search(r'''['"`]\s*$''', pre):
+                continue
+            # A code literal ("https://...", `=https://` in shell) or a command-line
+            # argument (curl https://...) - not a URL sitting in UI prose or a help
+            # sentence, which the user reads rather than the plugin contacting.
+            if not (re.search(r'''['"`=(,:\[]\s*$''', pre) or _PRIV_URL_CMD_RX.search(pre)):
+                continue
+            where = "browser" if ctx == "browser" and served else where_file
+            if _priv_host_exempt(host, where, m.group(3) or "", near):
+                continue
+            directive = None
+            if where == "browser":
+                directive = _priv_load_directive(pre, m.group(3) or "")
+                if not own_server and not _priv_csp_allows(csp_adds, directive, host):
+                    where = "blocked"
+            add(host, rel, i, line, where, directive)
+        prev.append(line)
+        del prev[:-6]
+    return out
+
+
+# Server-side outbound network sinks whose destination is a variable, not a literal
+# (literal destinations go through _priv_host_hits, which also covers browser-side
+# fetch()/$.ajax with a literal URL). Deliberately no variable-destination browser
+# fetch()/$.ajax here - those overwhelmingly hit FPP's own /api on the same host.
+_PRIV_OUTBOUND_RX = re.compile(
+    r'\bCurlManager\b|\burl(?:Get|Post|Put|Delete)\s*\(|mqtt->Publish\s*\(|->Publish\s*\(|\.publish\s*\('
+    r'|\bpaho\.mqtt\b|\bcurl_exec\s*\(|\bfsockopen\s*\(|\bsocket_connect\s*\(|\bstream_socket_client\s*\('
+    r'|\brequests\.(?:get|post|put|patch|delete|request)\s*\(|\burlopen\s*\(|http\.client\.HTTPS?Connection\s*\('
+    r'|\bsmtplib\.|new\s+PHPMailer\b|\bmail\s*\(\s*\$|\bsendto\s*\(|\.connect\s*\(\s*\((?!\s*["\']?(?:127|localhost|0\.0))'
+    r'|(?:^|[;&|(\s])(?:curl|wget)\s+(?!.*(?:localhost|127\.0\.0\.1))', re.I)
+_PRIV_LOCAL_CONTEXT_RX = re.compile(r'localhost|127\.0\.0\.1|::1\b|0\.0\.0\.0|/api/|\$_SERVER|gethostname|HTTP_HOST|fppd?\b.*:\d{4}', re.I)
+
+
+_PRIV_CONST_RX = re.compile(r'''^\s*(?:(?:const|final|static|var|let|my|our|define\()\s*)?[$]?([A-Za-z_]\w*)\s*(?:=|,)\s*(?:"([^"\n]*)"|'([^'\n]*)')''')
+
+
+def _priv_local_consts(lines: list[str]) -> set[str]:
+    """Names of the file's simple string constants (`HOST = '127.0.0.1'`, `$api =
+    "http://localhost/api"`, `define('X', '...')`) whose value is localhost/FPP's
+    own API - a sink or bind that names one of them is not off-box."""
+    out = set()
+    for l in lines:
+        m = _PRIV_CONST_RX.match(l)
+        if m and re.search(r'localhost|127\.0\.0\.1|::1\b|/api/', m.group(2) or m.group(3) or ""):
+            out.add(m.group(1))
+    return out
+
+
+def _priv_names_local_const(line: str, consts: set[str]) -> bool:
+    return bool(consts) and any(re.search(r'(?<![\w.])[$]?' + re.escape(c) + r'(?![\w])', line) for c in consts)
+
+
+def _priv_outbound_hits(root: str, window: int = 12):
+    """(relpath, lineno, line) for an outbound sink with a non-literal destination and
+    no sign of localhost/FPP's own API within the previous `window` lines or the next
+    three (a `curl \\` continued onto the line that carries the URL), and no use of a
+    file-level constant that holds such an address."""
+    for path in sorted(_iter_files(root, _CFG_SCAN_EXTS)):
+        rel = os.path.relpath(path, root)
+        low = "/" + rel.lower()
+        if _skippable(rel) or any(d in low for d in _PRIV_SKIP_DIRS) or _PRIV_LIB_FILE_RX.search(os.path.basename(rel)):
+            continue
+        lines = _read(path).splitlines()
+        consts = _priv_local_consts(lines)
+        for i, line in enumerate(lines):
+            if _is_comment_line(line) or not _PRIV_OUTBOUND_RX.search(line) or _PRIV_URL_RX.search(line):
+                continue
+            if any(_PRIV_LOCAL_CONTEXT_RX.search(l) for l in lines[max(0, i - window):i + 4]):
+                continue
+            if any(_priv_names_local_const(l, consts) for l in lines[max(0, i - window):i + 4]):
+                continue
+            yield rel, i + 1, line.strip()
+
+
+_PRIV_PKG_SOURCE_RX = {
+    # A source is ADDED: add-apt-repository, apt-key add/adv, a write (redirect, tee,
+    # cp, curl -o) into sources.list.d/keyrings/trusted.gpg.d, or a Signed-By line.
+    # The bare path in an echo/rm/comment is not (PulseMesh's cleanup message).
+    "apt": re.compile(r'add-apt-repository\s+(?!.*(?:-r\b|--remove))|\bapt-key\s+(?:add|adv)\b'
+                      r'|(?:>>?|\btee\s+(?:-a\s+)?|\bcp\s+(?:-\S+\s+)*\S+\s+|\binstall\s+(?:-\S+\s+)*\S+\s+|-o\s+|\bmv\s+\S+\s+)\s*["\']?/etc/apt/(?:sources\.list|keyrings|trusted\.gpg)'
+                      r'|\bsigned-by=|gpg\s+--dearmor', re.I),
+    "pip": re.compile(r'--(?:extra-)?index-url\b|\bpip\.conf\b|PIP_(?:EXTRA_)?INDEX_URL|--find-links\b|\bpip3?\s+install\s+[^#\n]*(?:git\+|https?://)', re.I),
+    "npm": re.compile(r'npm\s+config\s+set\s+registry|--registry[=\s]|\.npmrc\b|npm\s+(?:install|i|ci)\s+[^#\n]*(?:git\+|https?://|github:)', re.I),
+    "docker": re.compile(r'\bdocker\s+(?:pull|run|compose)\b|docker-compose\b', re.I),
+    "flatpak": re.compile(r'\bflatpak\s+(?:remote-add|install)\b', re.I),
+}
+_PRIV_REMOTE_SCRIPT_RX = re.compile(
+    r'(curl|wget)\b[^|\n]*\|\s*(sudo\s+(?:-\S+\s+)*)?(bash|sh|python3?|perl|ruby|node)\b'
+    r'|\b(bash|sh|python3?|perl|ruby|node)\s*<\(\s*(curl|wget)\b|\beval\s+["\'`]?\$?\(\s*(curl|wget)\b')
+
+
+def _priv_install_hits(root: str):
+    """(sources, remote_script): sources is type -> (relpath, lineno, line) for a
+    non-default package source being added, remote_script is a `curl | sh` hit or
+    None. Plain apt/pip/npm installs are not collected: software from those is
+    what the Open code light's green wording allows."""
+    sources: dict[str, tuple] = {}
+    remote = None
+    # `rm /etc/apt/sources.list.d/old.list` is an uninstall or a cleanup of a source
+    # the plugin USED to add (PulseMesh), not adding one.
+    cleanup_rx = re.compile(r'\brm\s|\bunlink\b|\bapt-key\s+del\b|add-apt-repository\s+(?:-\S+\s+)*(?:-r|--remove)\b')
+    for rel, i, line in _priv_lines(root, (".sh", ".py", ".php", "Makefile", ".mk")):
+        for name, rx in _PRIV_PKG_SOURCE_RX.items():
+            m = rx.search(line)
+            if name not in sources and m and not cleanup_rx.search(line) and not _priv_in_prose(rel, line, m.start()):
+                sources[name] = (rel, i, line.strip())
+        m = _PRIV_REMOTE_SCRIPT_RX.search(line)
+        if remote is None and m and not _priv_in_prose(rel, line, m.start()):
+            remote = (rel, i, line.strip())
+    return sources, remote
+
+
+_PRIV_SELF_UPDATE_RX = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?(?:pull\b|reset\s+(?:-\S+\s+)*--hard\s+(?:origin|upstream)/|checkout\s+(?:-\S+\s+)*(?:origin|upstream)/|fetch\b.*&&.*\breset\s+--hard)')
+
+
+def _priv_self_update_hits(root: str):
+    """A `git pull` / `git reset --hard origin/<branch>` / `git checkout origin/x` in one
+    of the hooks fppd runs as root (install/uninstall/upgrade/pre-post start-stop)."""
+    for rel, i, line in _priv_lines(root, (".sh", ".py", ".php")):
+        if os.path.basename(rel) in SUDO_SCOPE and _PRIV_SELF_UPDATE_RX.search(line):
+            yield rel, i, line.strip()
+
+
+# closedCode: false says everything that runs can be read by anyone. The listing
+# cannot check that for a package taken from PyPI/npm/CPAN (both host closed binary
+# wheels and vendor SDKs) or for a fetched binary/archive, so those get a one-time
+# "confirm the source is public" nudge (review-C-policy item 13). A Debian package
+# (apt/dpkg) is not collected: Debian's archive carries the source.
+_PRIV_PKG_INSTALL_RX = re.compile(
+    r'\b(?:(?P<mgr>pip3?|npm|pnpm|yarn|gem|cargo)\s+(?:install|i|add)|(?P<cpan>cpanm?)(?:\s+install)?)\b(?P<args>[^#\n|;&]*)', re.I)
+_PRIV_FETCH_ARTEFACT_RX = re.compile(
+    r'\b(?:curl|wget)\b[^#\n|]*?(?P<url>https?://[^\s\'"`)>;&|]+?\.(?:bin|so|deb|rpm|whl|jar|AppImage|run|img'
+    r'|tar(?:\.(?:gz|xz|bz2|zst))?|tgz|txz|zip|7z|gz|xz|bz2|zst))(?=[\s\'"`)>;&|]|$)', re.I)
+_PRIV_PKG_PAGE = {"pip": "https://pypi.org/project/{}/", "pip3": "https://pypi.org/project/{}/",
+                  "npm": "https://www.npmjs.com/package/{}", "pnpm": "https://www.npmjs.com/package/{}",
+                  "yarn": "https://www.npmjs.com/package/{}", "cpan": "https://metacpan.org/pod/{}",
+                  "cpanm": "https://metacpan.org/pod/{}", "gem": "https://rubygems.org/gems/{}",
+                  "cargo": "https://crates.io/crates/{}"}
+
+
+def _priv_unverifiable_code_hits(root: str):
+    """(relpath, lineno, line, what, url) for each install of code the listing
+    cannot read as source: a pip/npm/cpan/gem/cargo package (url = its registry
+    page) or a curl/wget of a binary/archive (url = the fetched URL). apt-get /
+    dpkg installs are never collected."""
+    seen: set[str] = set()
+    for rel, i, line in _priv_lines(root, (".sh", ".py", ".php", "Makefile", ".mk")):
+        if _PRIV_REMOTE_SCRIPT_RX.search(line):
+            continue  # already a remote-exec / privacy-undeclared-install matter
+        m = _PRIV_FETCH_ARTEFACT_RX.search(line)
+        if m and _priv_in_prose(rel, line, m.start()):
+            continue
+        if m:
+            url = m.group("url")
+            # A GitHub release asset is not exempt: it is open code only if the
+            # project publishes its source, which is exactly the one-time look asked for.
+            what = url.rsplit("/", 1)[-1]
+            if what not in seen:
+                seen.add(what)
+                yield rel, i, line.strip(), what, url
+            continue
+        for m in _PRIV_PKG_INSTALL_RX.finditer(line):
+            if _priv_in_prose(rel, line, m.start()):
+                continue
+            mgr = (m.group("mgr") or m.group("cpan")).lower()
+            args = m.group("args")
+            if re.search(r'(?:git\+|https?://|github:)', args):
+                continue  # a package source hit: privacy-undeclared-install covers it
+            # Package names only: no flags, no variables or quoted paths (`--prefix "$DIR"`).
+            names = [a for a in args.split() if not a.startswith(("-", "$", '"', "'")) and "=" not in a]
+            if re.search(r'(?:^|\s)-r\s', args):
+                names = [a for a in args.split() if a.endswith(".txt")] or names
+            for name in names[:3]:
+                key = f"{mgr}:{name}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                base = name[0] + re.split(r'[<>=!~\[@]', name[1:], maxsplit=1)[0]  # keep a leading @scope/
+                if name.endswith(".txt"):
+                    yield rel, i, line.strip(), f"every {mgr} package in `{name}`", ""
+                else:
+                    yield rel, i, line.strip(), f"{mgr} package `{name}`", _PRIV_PKG_PAGE.get(mgr, "").format(base)
+
+
+# kind -> (code pattern, words that count as declaring it). A `rm` of the file is
+# an uninstall reverting, not a grant.
+_PRIV_PRIVILEGE_RX = {
+    "sudoers": (re.compile(r'/etc/sudoers(?:\.d)?\b|\bvisudo\b', re.I), ("sudo",)),
+    "group membership": (re.compile(r'\busermod\b[^#\n]*-[aG]|\bgpasswd\s+(?:-\S+\s+)*-a\b|\badduser\s+\S+\s+\S+\s*$|\badduser\s+\S+\s+(?:video|audio|gpio|i2c|spi|dialout|plugdev|input|render|netdev|docker|sudo)\b', re.I), ("group",)),
+    "kernel module": (re.compile(r'\bmodprobe\s+(?!-r\b)|/etc/modules(?:-load\.d)?\b|\bdtoverlay\b|\binsmod\b', re.I), ("module", "overlay")),
+    "udev rule": (re.compile(r'/etc/udev/rules\.d\b|\budevadm\s+(?:control|trigger)\b', re.I), ("udev",)),
+    "ssh key on another host": (re.compile(r'authorized_keys\b|\bssh-copy-id\b', re.I), ("authorized_keys", "ssh key", "ssh-copy-id", "key")),
+    "capability / setuid": (re.compile(r'\bsetcap\b|\bchmod\s+(?:-\S+\s+)*[ugo]*\+s\b|\bchmod\s+[42]7[0-7]{2}\b', re.I), ("setcap", "setuid", "capabilit")),
+}
+
+
+def _priv_privilege_hits(root: str) -> dict[str, tuple[str, int, str]]:
+    out: dict[str, tuple[str, int, str]] = {}
+    skip_rx = re.compile(r'\brm\s|\bunlink\b|\bsed\s+(?:-\S+\s+)*-i[^#\n]*/d\b|\bgpasswd\s+(?:-\S+\s+)*-d\b|\busermod\b[^#\n]*-r\b|\bdeluser\b')
+    for rel, i, line in _priv_lines(root, (".sh", ".py", ".php")):
+        if skip_rx.search(line):
+            continue
+        for kind, (rx, _) in _PRIV_PRIVILEGE_RX.items():
+            m = rx.search(line)
+            if kind not in out and m and not _priv_in_prose(rel, line, m.start()):
+                out[kind] = (rel, i, line.strip())
+    return out
+
+
+# Only sensor types with an unmistakable code signature. `presence`/`gpio-input`
+# are disclosed by the author but not grepped for: a GPIO read is far too generic.
+# A CLI flag whose meaning changes with case is scoped (?-i:) inside these re.I
+# patterns - `sox -d` records from the default device, `sox -D` is --no-dither.
+_PRIV_SENSOR_RX = {
+    "camera": re.compile(r'/dev/video\d*|\bv4l2\b|v4l2src|\bpicamera2?\b|\blibcamera\b|\brpicam-(?:still|vid|hello|jpeg)\b'
+                         r'|\braspi(?:still|vid)\b|cv2\.VideoCapture|\bVideoCapture\s*\(|\bnvarguscamerasrc\b|ffmpeg\s+[^#\n]*-f\s+v4l2', re.I),
+    "microphone": re.compile(r'\barecord\b|\bpyaudio\b|\bsounddevice\b|\balsasrc\b|\bpulsesrc\b|SND_PCM_STREAM_CAPTURE'
+                             r'|ffmpeg\s+[^#\n]*-f\s+(?:alsa|pulse)\b|\bsox\s+(?-i:-d)\b|\brec\s+(?:-\S+\s+)*\S+\.(?:wav|flac|mp3)\b|speech_recognition|\bvosk\.|import\s+(?:vosk|whisper|faster_whisper)\b|whisper\.load_model', re.I),
+    "face-tracking": re.compile(r'\bface_recognition\b|\bmediapipe\b|\bdlib\b|haarcascade|\bFaceMesh\b|\bFaceDetection\b|\bdeepface\b|\binsightface\b', re.I),
+    "body-tracking": re.compile(r'\bopenpose\b|\bposenet\b|\bmovenet\b|mp\.solutions\.pose|\bmediapipe\b|\bBlazePose\b|\bultralytics\b|\byolo\w*\b', re.I),
+    "rfid": re.compile(r'\bMFRC522\b|\brfid\b|\bpn532\b|\bnfcpy\b|\blibnfc\b', re.I),
+}
+_PRIV_SENSOR_ALT = {"face-tracking": ("face-tracking", "body-tracking"), "body-tracking": ("body-tracking", "face-tracking")}
+
+
+def _priv_sensor_hits(root: str) -> dict[str, tuple[str, int, str]]:
+    out: dict[str, tuple[str, int, str]] = {}
+    for rel, i, line in _priv_lines(root, _CFG_SCAN_EXTS):
+        for name, rx in _PRIV_SENSOR_RX.items():
+            if name not in out and rx.search(line):
+                out[name] = (rel, i, line.strip())
+    return out
+
+
+_PRIV_LISTEN_RX = re.compile(
+    r'\.bind\s*\(\s*\(|\bsocket_bind\s*\(|\bstream_socket_server\s*\(|\bbind\s*\(\s*\w+\s*,\s*\(\s*(?:const\s+)?(?:struct\s+)?sockaddr'
+    r'|\.listen\s*\(\s*(?:\d+|port|PORT|\w*[Pp]ort\w*)\b|\blisten\s*\(\s*\w+\s*,\s*\d+\s*\)'
+    r'|\b(?:Threading)?HTTPServer\s*\(\s*\(|\bsocketserver\.\w+Server\s*\(\s*\(|\bapp\.run\s*\(|\buvicorn\.run\s*\(|\bgunicorn\b|\bwaitress\b'
+    r'|\bListenStream\s*=|\bListenDatagram\s*=|^\s*Listen\s+\d+|<VirtualHost\s+[^>]*:\d+|\bnc\s+-l\b|\bsocat\b[^#\n]*-LISTEN|python3?\s+-m\s+http\.server\b'
+    r'|\bwebsockets\.serve\s*\(|\bWebSocketServer\s*\(|\bcreateServer\s*\(|\bhttp\.listen\s*\(', re.I)
+_PRIV_PORT_RX = re.compile(r'(?<![\d.])(\d{2,5})(?![\d.])')
+
+
+def _priv_listener_hits(root: str):
+    """(relpath, lineno, line, port|None) for a server socket/listener in the plugin's
+    own code, an Apache Listen/VirtualHost or a systemd .socket unit. A bind to
+    127.0.0.1/localhost is skipped: not reachable off-box, so not a privacy fact."""
+    exts = _CFG_SCAN_EXTS + (".conf", ".socket", ".service", ".inc")
+    consts: dict[str, set[str]] = {}
+    for rel, i, line in _priv_lines(root, exts):
+        if not _PRIV_LISTEN_RX.search(line) or re.search(r'127\.0\.0\.1|localhost|::1\b|std::bind|\.bind\s*\(\s*this', line):
+            continue
+        if rel not in consts:
+            consts[rel] = _priv_local_consts(_read(os.path.join(root, rel)).splitlines())
+        if _priv_names_local_const(line, consts[rel]):
+            continue  # HOST = '127.0.0.1' ... HTTPServer((HOST, PORT), ...)
+        ports = [int(p) for p in _PRIV_PORT_RX.findall(line) if 1 <= int(p) <= 65535]
+        yield rel, i, line.strip(), (ports[0] if ports else None)
+
+
+_PRIV_SERVICE_RX = re.compile(r'\bsystemctl\s+(?:--\S+\s+)*(?:enable|start)\b(?:\s+--\S+)*\s+([\w@.:-]+)', re.I)
+# Group 3: the crontab command installing a file/stdin (`crontab -`, `crontab x.cron`,
+# not `crontab -l`) or python-crontab's CronTab() - the bare word/import is not evidence.
+_PRIV_UNIT_FILE_RX = re.compile(
+    r'''/etc/systemd/system/([\w@.-]+\.(?:service|socket|timer))\b|/etc/cron\.d/([\w.-]+)'''
+    r'''|(\bcrontab\s+(?:-u\s+\S+\s+)?(?:-(?!l\b)|/|<|\S+\.\w+)|\bCronTab\s*\()''', re.I)
+
+
+def _priv_service_hits(root: str) -> dict[str, tuple[str, int, str]]:
+    """unit name -> FIRST hit for `systemctl enable/start <unit>` and for a
+    unit/cron file being installed under /etc/systemd or /etc/cron.d. See
+    _priv_service_hits_all for every hit."""
+    return {u: hits[0] for u, hits in _priv_service_hits_all(root).items()}
+
+
+def _priv_service_hits_all(root: str) -> dict[str, list[tuple[str, int, str]]]:
+    out: dict[str, list[tuple[str, int, str]]] = {}
+    skip_rx = re.compile(r'\brm\s|\bunlink\b|systemctl\s+(?:disable|stop)\b')
+    for rel, i, line in _priv_lines(root, (".sh", ".py", ".php")):
+        # an uninstall script only ever removes (`crontab -l | grep -v x | crontab -`)
+        if skip_rx.search(line) or os.path.basename(rel) == "fpp_uninstall.sh":
+            continue
+        m = _PRIV_SERVICE_RX.search(line)
+        if m and _priv_in_prose(rel, line, m.start()):
+            continue
+        if m:
+            unit = m.group(1).lower().removesuffix(".service")
+            if unit not in ("fppd", "fpp", "fppinit", "fpp_postinstall", "apache2", "nginx", "--now"):
+                out.setdefault(unit, []).append((rel, i, line.strip()))
+            continue
+        m = _PRIV_UNIT_FILE_RX.search(line)
+        if m and not _priv_in_prose(rel, line, m.start()) and (m.group(3) or re.search(r'\bcp\b|\binstall\b|\bln\s|\btee\b|>\s*["\']?/etc|file_put_contents|\bcat\b.*>', line)):
+            unit = (m.group(1) or m.group(2) or "crontab").lower().removesuffix(".service")
+            out.setdefault(unit, []).append((rel, i, line.strip()))
+    return out
+
+
+_PRIV_CORE_CFG_FILE_RX = re.compile(
+    r'''media/config/(gpio\.json|schedule\.json|channeloutputs\.json|co-[\w-]+\.json|commandPresets\.json|model-overlays\.json'''
+    r'''|outputprocessors\.json|channelmemorymaps|proxies|ports\.json|virtualdisplaymap|dns|interface\.\w+|fpp-network\w*|sensors\.json|events/[^'"\s]+)\b''', re.I)
+# The /etc path must be the DESTINATION: the 2nd argument of cp/mv/install/ln (the
+# `(?!-)` stops `cp -rf /etc/x <backup>` - a read - from matching), a redirect/tee
+# target, sed -i, or a PHP/Python write call. /etc/systemd and /etc/cron are
+# services; /etc/apt is the package-source check's business; sudoers, udev and
+# modules are privileges'. A `>` glued to a word character is an HTML tag close
+# (`<code>/etc/fpp</code>` in a settings page's help text), not a redirect.
+_PRIV_ETC_WRITE_RX = re.compile(
+    r'''(?:\bsed\s+(?:-\S+\s+)*-i|(?<![-=<&0-9\w])>>?\s*|\btee\s+(?:-a\s+)?|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*(?!-)\S+\s+|file_put_contents\s*\(\s*|\bopen\s*\(\s*)['"]?(/etc/(?!systemd/|cron|apt/|sudoers|udev/|modules)[^'"\s;&|)<]+)''')
+_PRIV_SETTINGS_FILE_WRITE_RX = re.compile(r'''(\bsed\s+(?:-\S+\s+)*-i\b[^#\n]*|>>?\s*['"]?[^'"\s]*|\btee\s+(?:-a\s+)?['"]?[^'"\s]*)media/settings\b''')
+# Same write-sink-destination shape as _PRIV_ETC_WRITE_RX, aimed at FPP's other
+# shared media subdirectories instead of /etc - a file a plugin drops into
+# media/scripts (shows up in FPP's own Scripts UI, still schedulable after the
+# plugin is gone) or media/images/videos/etc (an orphaned asset) survives
+# uninstall exactly like a stray /etc file does, for the same reason: neither
+# lives inside the plugin's own directory, which is all FPP's uninstall
+# actually deletes. plugins/, plugindata/<repo>/, config/ and logs/ are a
+# plugin's own territory (not in this alternation at all, so never match) -
+# this is specifically the OTHER shared subdirectories. Confirmed real via
+# fpp-PictureFrame (cp .../CheckForNewPictureFrameImages.sh media/scripts/),
+# both shipping no fpp_uninstall.sh at all.
+_PRIV_MEDIA_WRITE_RX = re.compile(
+    r'''(?:\bsed\s+(?:-\S+\s+)*-i|(?<![-=<&0-9\w])>>?\s*|\btee\s+(?:-a\s+)?|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*(?!-)\S+\s+|file_put_contents\s*\(\s*|\bopen\s*\(\s*)'''
+    r'''['"]?(/home/fpp/media/(?:scripts|images|videos|sequences|music|effects|upload|playlists)/[^'"\s;&|)<]*)''')
+# One hop of variable aliasing, same pattern as _log_naming_hits: a variable
+# assigned a literal path under one of these subdirectories on an earlier
+# line is treated as that path on a later write-sink line too. Confirmed
+# real miss without this: fpp-jukebox assigns
+# `PLACEHOLDERIMAGE=/home/fpp/media/images/placeholder.jpg` on one line,
+# then `cp ... "${PLACEHOLDERIMAGE}"` on another - invisible to the same-
+# line-only regex above.
+_PRIV_MEDIA_DEST_ALIAS_RX = re.compile(
+    r'''^\s*(?:local\s+|export\s+|readonly\s+)?\$?(\w+)\s*=\s*["']?'''
+    r'''(/home/fpp/media/(?:scripts|images|videos|sequences|music|effects|upload|playlists)(?:/[^\s"']*)?)["']?\s*$''')
+
+
+def _priv_media_alias_sink_rx(name: str) -> "re.Pattern[str]":
+    """A write sink whose DESTINATION is `$name` / `${name}` / PHP `$name` -
+    the same argument-position rule _PRIV_MEDIA_WRITE_RX applies to a literal
+    path, so `cp "$PLACEHOLDER" ./assets/` (a read of the aliased path) doesn't
+    count. Quoted or not, braces or not."""
+    var = r'''["']?\$\{?''' + re.escape(name) + r'''\b'''
+    return re.compile(
+        r'\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*(?!-)\S+\s+' + var
+        + r'|(?<![-=<&0-9\w])>>?\s*' + var
+        + r'|\btee\s+(?:-a\s+)?' + var
+        + r'|\bsed\s+(?:-\S+\s+)*-i\b[^#\n]*\s' + var
+        + r'|(?:file_put_contents|open)\s*\(\s*' + var)
+
+
+def _priv_media_write_hits(root: str, exts=_CFG_SCAN_EXTS):
+    """Yield (relpath, lineno, line, path) for a write-sink destination that
+    lands in one of FPP's other shared media subdirectories, following one
+    hop of variable aliasing within the same file (see _PRIV_MEDIA_DEST_ALIAS_RX)."""
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        aliases: dict[str, tuple[str, "re.Pattern[str]"]] = {}
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = _PRIV_MEDIA_WRITE_RX.search(line)
+            if m and not _priv_in_prose(rel, line, m.start(1)):
+                yield rel, i, line.strip(), m.group(1)
+                continue
+            am = _PRIV_MEDIA_DEST_ALIAS_RX.match(line)
+            if am:
+                aliases[am.group(1)] = (am.group(2), _priv_media_alias_sink_rx(am.group(1)))
+                continue
+            for name, (target, sink_rx) in aliases.items():
+                sm = sink_rx.search(line)
+                if sm and not _priv_in_prose(rel, line, sm.start()):
+                    yield rel, i, line.strip(), target
+                    break
+
+
+# FPP core's install tree: `${FPPDIR}` in any of its default-value spellings,
+# bare `$FPPDIR`, or the literal /opt/fpp/ (not /opt/fpp-data, /opt/fpp2, ...).
+_CORE_TREE_ROOT = r'''(?:\$\{FPPDIR(?::?[-=][^}]*)?\}|\$FPPDIR\b|/opt/fpp(?=/))'''
+_CORE_TREE_PATH = _CORE_TREE_ROOT + r'''/[^\s"';&|)<]*'''
+# A write sink whose DESTINATION is under the core tree - same argument-position
+# rules as _PRIV_MEDIA_WRITE_RX (`cp <core file> /tmp/` and `. ${FPPDIR}/scripts/
+# common` are reads), plus touch/mkdir/rsync, PHP file_put_contents/copy/rename/
+# symlink (literal /opt/fpp/ or core's `$fppDir .` prefix), and a write-mode open().
+_CORE_TREE_WRITE_RX = re.compile(
+    r'''(?:\bsed\s+(?:-\S+\s+)*-i\S*\s+(?:\S+\s+)*|(?<![-=<&0-9\w])>>?\s*|\btee\s+(?:-a\s+)?'''
+    r'''|\b(?:cp|mv|install|ln|rsync)\s+(?:-\S+\s+)*(?!-)\S+\s+|\btouch\s+(?:-\S+\s+)*|\bmkdir\s+(?:-\S+\s+)*)'''
+    r'''['"]?(''' + _CORE_TREE_PATH + r''')'''
+    r'''|(?:\bfile_put_contents\s*\(|\b(?:copy|rename|symlink|link)\s*\([^,]*,)\s*'''
+    r'''(?:\$fppDir\s*\.\s*['"](/[^'"]*)['"]|['"](/opt/fpp/[^'"]*)['"])'''
+    r'''|\bopen\s*\(\s*['"](/opt/fpp/[^'"]*)['"]\s*,\s*(?:mode\s*=\s*)?['"][wax]''')
+_CORE_TREE_ALIAS_RX = re.compile(
+    r'''^\s*(?:local\s+|export\s+|readonly\s+)?\$?(\w+)\s*=\s*["']?(''' + _CORE_TREE_PATH + r''')["']?\s*$''')
+
+
+def _core_tree_write_hits(root: str, exts=_CFG_SCAN_EXTS):
+    """Yield (relpath, lineno, line, path) for a write whose destination is inside
+    FPP core's own install tree (${FPPDIR} / /opt/fpp) - PLUGIN_GUIDELINES §5,
+    "never write into ... FPP core". Follows one hop of variable aliasing within
+    the same file, like _priv_media_write_hits: fpp-jukebox (2026-10) assigned
+    `JUKEBOX_SHORTCUT="${FPPDIR}/www/jukebox.php"` then `cat > "$JUKEBOX_SHORTCUT"`.
+    Reads and execs of core files (`. ${FPPDIR}/scripts/common`, `${FPPDIR}/scripts/
+    ManageApacheContentPolicy.sh add ...`, `cp ${FPPDIR}/etc/x ./`) don't match."""
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        aliases: dict[str, tuple[str, "re.Pattern[str]"]] = {}
+        for i, line in enumerate(_read(path).splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = _CORE_TREE_WRITE_RX.search(line)
+            if m:
+                g = next(n for n in range(1, 5) if m.group(n))
+                target = m.group(g) if g != 2 else "${fppDir}" + m.group(2)
+                if not _priv_in_prose(rel, line, m.start(g)):
+                    yield rel, i, line.strip(), target
+                    continue
+            am = _CORE_TREE_ALIAS_RX.match(line)
+            if am:
+                aliases[am.group(1)] = (am.group(2), _priv_media_alias_sink_rx(am.group(1)))
+                continue
+            for name, (target, sink_rx) in aliases.items():
+                sm = sink_rx.search(line)
+                if sm and not _priv_in_prose(rel, line, sm.start()):
+                    yield rel, i, line.strip(), target
+                    break
+
+
+def _priv_core_write_hits(root: str):
+    """(relpath, lineno, line, target) for a write the plugin makes to configuration it
+    does not own: a 2-argument WriteSettingToFile (core settings, not the plugin's own
+    file), a PUT/POST to /api/settings/<key>, sed/redirect into the settings file, a
+    write sink on one of FPP's own config/ files, or a write under /etc/ (systemd and
+    cron are services, handled by _priv_service_hits). restartFlag/rebootFlag are
+    transient and have their own rules."""
+    skip_rx = re.compile(r'\brm\s|\bunlink\s*\(|\brmdir\b')
+    for rel, i, line in _priv_lines(root, _CFG_SCAN_EXTS):
+        if skip_rx.search(line):
+            continue
+        for m in re.finditer(r'\bWriteSettingToFile\s*\(', line):
+            args = _priv_split_args(line[m.end():])
+            if args is not None and len(args) == 2:
+                key = args[0].strip("'\" ")
+                if key not in ("restartFlag", "rebootFlag") + _PRIVACY_SETTING_KEYS and re.match(r'^[\w-]+$', key):
+                    yield rel, i, line.strip(), "settings:" + key
+        m = re.search(r'/api/settings/([\w-]+)', line)
+        if m and m.group(1) not in ("restartFlag", "rebootFlag") + _PRIVACY_SETTING_KEYS \
+           and re.search(r'\bPUT\b|\bPOST\b|requests\.(?:put|post)|method\s*[:=]\s*["\']P|type\s*:\s*["\']P|-X\s*P|\$\.post\b|\.put\s*\(', line):
+            yield rel, i, line.strip(), "settings:" + m.group(1)
+        if re.search(r'\bsetSetting\s*\(\s*["\']([\w-]+)', line) and not rel.endswith((".js",)):
+            key = re.search(r'\bsetSetting\s*\(\s*["\']([\w-]+)', line).group(1)
+            if key not in ("restartFlag", "rebootFlag") + _PRIVACY_SETTING_KEYS:
+                yield rel, i, line.strip(), "settings:" + key
+        if _PRIV_SETTINGS_FILE_WRITE_RX.search(line) and not _PRIVACY_SETTING_RX.search(line):
+            yield rel, i, line.strip(), "settings"
+        m = _PRIV_CORE_CFG_FILE_RX.search(line)
+        if m and not _priv_in_prose(rel, line, m.start()) and (_CFG_WRITE_SINK_RX.search(line) or _CFG_DEST_PREFIX_RX.search(line[:m.start()]) or re.search(r'\bsed\s+(?:-\S+\s+)*-i', line)):
+            yield rel, i, line.strip(), "config/" + m.group(1)
+        m = _PRIV_ETC_WRITE_RX.search(line)
+        if m and not _priv_in_prose(rel, line, m.start(1)) and not (rel.endswith(".py") and "open(" in line and not re.search(r'''open\s*\(\s*['"]/etc/[^'"]+['"]\s*,\s*['"][wax]''', line)):
+            yield rel, i, line.strip(), m.group(1)
+
+
+_PRIV_SETTING_CALL_RX = re.compile(r'\b(ReadSettingFromFile|WriteSettingToFile|getSetting|GetSetting)\s*\(\s*(["\'])([\w.-]+)\2', re.I)
+_PRIV_SETTING_INDEX_RX = re.compile(r'\$settings\s*\[\s*(["\'])([\w.-]+)\1\s*\]')
+
+
+def _priv_core_credential_hits(root: str) -> dict[str, tuple]:
+    """key -> hit for a read of one of FPP's credential settings
+    (_CORE_CREDENTIAL_KEYS): a 1-argument ReadSettingFromFile/getSetting (the
+    2-argument form reads the plugin's OWN file under that key name, not FPP's),
+    `$settings['MQTTPassword']`, or a GET of /api/settings/<key>."""
+    core: dict[str, tuple] = {}
+    for rel, i, line in _priv_lines(root, _CFG_SCAN_EXTS):
+        for m in _PRIV_SETTING_CALL_RX.finditer(line):
+            key = m.group(3)
+            args = _priv_split_args(line[m.start(2):])
+            nargs = len(args) if args is not None else 1
+            if nargs == 1 and key in _CORE_CREDENTIAL_KEYS:
+                core.setdefault(key, (rel, i, line.strip()))
+        for m in _PRIV_SETTING_INDEX_RX.finditer(line):
+            if m.group(2) in _CORE_CREDENTIAL_KEYS:
+                core.setdefault(m.group(2), (rel, i, line.strip()))
+        m = re.search(r'/api/settings/(' + "|".join(_CORE_CREDENTIAL_KEYS) + r')\b', line)
+        if m:
+            core.setdefault(m.group(1), (rel, i, line.strip()))
+    return core
+
+
+_PRIV_SETTING_WRITE_RX = re.compile(
+    r'\b(?:WriteSettingToFile|setSetting|SetSetting|setSettingValue|SetSettingValue|writeSetting|saveSetting|putSetting)\s*\('
+    r'|\bsed\s|(?<![-=<&0-9])>>?\s|\btee\s|\bPUT\b|\bPOST\b|requests\.(?:put|post)|\$\.post\b|method\s*[:=]\s*["\']P|type\s*:\s*["\']P|-X\s*P'
+    r'|\bsettings\s*\[\s*["\'][\w]+["\']\s*\]\s*=[^=]|setSettingsAndRestart|SaveSettings?\b', re.I)
+
+
+def _privacy_setting_hits(root: str):
+    """(relpath, lineno, line, key, is_write) for every non-comment code line naming one
+    of FPP's eight privacy settings. `is_write` when the line has a write-shaped sink
+    (WriteSettingToFile/setSetting, PUT/POST to /api/settings, sed/redirect/tee, an
+    assignment into $settings[]). A 3-argument WriteSettingToFile writes the plugin's
+    OWN file under that key name, not FPP's, and is not counted at all."""
+    for rel, i, line in _priv_lines(root, _CFG_SCAN_EXTS):
+        m = _PRIVACY_SETTING_RX.search(line)
+        if not m:
+            continue
+        key = m.group(1)
+        w = re.search(r'\bWriteSettingToFile\s*\(', line)
+        if w:
+            args = _priv_split_args(line[w.end():])
+            if args is not None and len(args) >= 3:
+                continue
+        yield rel, i, line.strip(), key, bool(_PRIV_SETTING_WRITE_RX.search(line))
+
+
+# Committed files that run but cannot be read: native executables and libraries
+# (by magic bytes, whatever they are named), compiled Python, and packaged
+# Java/Python code. A .zip/.tar is not collected - an archive may well hold source.
+# Headers are not source: vendor.h shipped with libvendor.so is the closed library's API.
+_BIN_NATIVE_SRC_EXTS = (".c", ".cc", ".cpp", ".cxx", ".rs", ".go", ".swift", ".m")
+# Packaged libraries: often a vendored open-source project, so asked about rather
+# than treated as closed outright.
+_BIN_PACKAGE_EXTS = (".whl", ".egg", ".jar", ".war", ".aar")
+_BIN_BUILD_FILES = ("makefile", "gnumakefile", "cmakelists.txt", "meson.build", "cargo.toml", "go.mod",
+                    "setup.py", "pyproject.toml", "pom.xml", "build.gradle", "build.gradle.kts", "configure.ac")
+_BIN_SOURCE_FOR = {"native": _BIN_NATIVE_SRC_EXTS, "java": (".java", ".kt"), "python": (".py",),
+                   "wasm": _BIN_NATIVE_SRC_EXTS}
+
+
+def _binary_kind(path: str) -> str | None:
+    """'native' / 'java' / 'python' / 'wasm' for a compiled file, else None."""
+    low = path.lower()
+    if low.endswith((".pyc", ".pyo", ".whl", ".egg")):
+        return "python"
+    if low.endswith((".jar", ".class", ".war", ".aar")):
+        return "java"
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64)
+    except OSError:
+        return None
+    if head[:4] == b"\x7fELF" or head[:4] in (b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe"):
+        return "native"
+    if head[:4] == b"\xca\xfe\xba\xbe":   # Java class or a Mach-O fat binary: closed either way
+        return "java" if low.endswith(".class") else "native"
+    if head[:4] == b"\x00asm":
+        return "wasm"
+    if head[:2] == b"MZ" and len(head) >= 64:
+        off = int.from_bytes(head[60:64], "little")
+        try:
+            with open(path, "rb") as f:
+                f.seek(off)
+                if f.read(4) == b"PE\x00\x00":
+                    return "native"
+        except OSError:
+            pass
+    return None
+
+
+def _binary_stem(rel: str) -> str:
+    """libfoo.so.1.2 / foo.cpython-311.pyc / foo.exe -> foo."""
+    b = os.path.basename(rel).lower()
+    b = re.sub(r'\.so(?:\.\d+)*$', '', b)
+    b = b.split(".")[0]
+    return b[3:] if b.startswith("lib") and len(b) > 3 else b
+
+
+def _committed_binary_hits(root: str) -> list[tuple[str, str]]:
+    """(relpath, kind) for each committed compiled file whose source is not in
+    the repository. A binary counts as built from source when a source file of
+    the same name and language exists anywhere (headers are not source), or when
+    it sits in a build tree: a build file (Makefile, CMakeLists.txt, setup.py, ...)
+    in its directory or a parent, and source of its language in its directory, a
+    parent, or a src/ tree under its directory or its top-level directory
+    (libfoo.so at the root with src/*.cpp; tools/bin/x with tools/src/*.c). A
+    build file or source at the root says nothing about a binary under any
+    top-level directory. Vendor directories are included - a vendored binary runs too.
+    Symlinks and special files are never opened."""
+    files = []
+    for p in _iter_files(root):
+        if not os.path.islink(p) and os.path.isfile(p):
+            files.append(os.path.relpath(p, root))
+    stems_by_ext: dict[str, set[str]] = {}
+    build_dirs: set[str] = set()
+    src_dirs_by_ext: dict[str, set[str]] = {}
+    for rel in files:
+        d, base = os.path.split(rel.lower())
+        if base in _BIN_BUILD_FILES:
+            build_dirs.add(d)
+        stem, ext = os.path.splitext(base)
+        stems_by_ext.setdefault(ext, set()).add(stem)
+        src_dirs_by_ext.setdefault(ext, set()).add(d)
+
+    def ancestors(d):
+        out = [d]
+        while d:
+            d = os.path.dirname(d)
+            out.append(d)
+        return out
+
+    def in_build_tree(d, exts):
+        # Only the binary's own top-level directory counts: the repo root is
+        # everyone's ancestor, so a root Makefile and a root plugin.cpp would
+        # otherwise vouch for vendor/closed/libblob.so too.
+        up = ancestors(d)
+        if d:
+            up.remove("")
+        if not any(a in build_dirs for a in up):
+            return False
+        src_roots = {os.path.join(x, "src") for x in (d, d.split("/")[0] if d else "")}
+        for e in exts:
+            for sd in src_dirs_by_ext.get(e, ()):
+                if sd in up or any(sd == r or sd.startswith(r + "/") for r in src_roots):
+                    return True
+        return False
+
+    out = []
+    for rel in sorted(files):
+        low = "/" + rel.lower()
+        if low.endswith((".md", ".markdown")) or "/.git/" in low:
+            continue
+        kind = _binary_kind(os.path.join(root, rel))
+        if kind is None:
+            continue
+        exts = _BIN_SOURCE_FOR[kind]
+        if any(_binary_stem(rel) in stems_by_ext.get(e, ()) for e in exts):
+            continue
+        if in_build_tree(os.path.dirname(rel.lower()), exts):
+            continue
+        out.append((rel, kind))
+    return out
+
+
+def _privacy_findings(root: str, info: dict | None, own_owner: str | None) -> list[Finding]:
+    """The privacy-* rule family (PLUGIN_GUIDELINES.md §14.16). Without a `privacy`
+    block: one privacy-missing BLOCKER. With one:
+    privacy-unknown-key (BLOCKER) for a key outside the v3 vocabulary,
+    privacy-text-length (BEST_PRACTICE) for the §1 length caps,
+    privacy-closedcode-unverified (BEST_PRACTICE) when closedCode is false but a
+    pip/npm/cpan package or fetched binary/archive is installed, and a
+    privacy-undeclared-<category> BLOCKER per category where the code contradicts
+    the declaration. Independently of the block: privacy-setting-write/read on
+    FPP's own privacy settings."""
+    out: list[Finding] = []
+
+    def loc(h):
+        return f"{h[0]}:{h[1]}: `{h[2]}`" if h[1] else f"{h[0]}: `{h[2]}`"
+
+    # --- FPP's privacy settings: never written, ideally never read -----------
+    # A plugin writing statsPublish makes FPP transmit on the operator's behalf
+    # within two minutes; the consent record and jurisdiction are the operator's
+    # alone. BLOCKER on a write; a read is BEST PRACTICE since it can be an
+    # innocent "is the operator OK with sending?" gate, but the plugin should ask
+    # for its own consent rather than borrow FPP's (PLUGIN_GUIDELINES.md §14 rule 9).
+    writes = [h for h in _privacy_setting_hits(root) if h[4]]
+    reads = [h for h in _privacy_setting_hits(root) if not h[4]]
+    if writes:
+        h = writes[0]
+        out.append(Finding(BLOCKER, "privacy-setting-write",
+                   f"writes FPP's privacy setting `{h[3]}` ({loc(h)}) - plugins may never change "
+                   f"{', '.join(_PRIVACY_SETTING_KEYS)}: they record the operator's own consent, and a "
+                   f"write to statsPublish makes FPP transmit on the operator's behalf within two minutes.\n"
+                   f"  - Remove the write; if the plugin needs the operator's consent for its own traffic, "
+                   f"ask for it with its own setting"))
+    if reads:
+        h = reads[0]
+        out.append(Finding(BEST_PRACTICE, "privacy-setting-read",
+                   f"reads FPP's privacy setting `{h[3]}` ({loc(h)}) - FPP's consent settings are the "
+                   f"operator's answer to FPP, not to the plugin; a plugin that sends anything needs its "
+                   f"own opt-in (PLUGIN_GUIDELINES.md §14).\n"
+                   f"  - Gate the plugin's own traffic on its own enable setting, off by default"))
+
+    if info is None:
+        return out
+    pv = info.get("privacy")
+    if not isinstance(pv, dict):
+        out.append(Finding(BLOCKER, "privacy-missing",
+                   "pluginInfo.json has no `privacy` block - FPP builds the install dialog's privacy "
+                   "lights (Sends data, Collects data, Camera & mic, Remote access, System changes, "
+                   "Can it be checked?) from it, and without one the dialog says \"No privacy disclosure\".\n"
+                   "  - Add the block (eight keys, all required, empty arrays allowed; see the `privacy` "
+                   "section of pluginInfo.schema.json and PLUGIN_GUIDELINES.md §14). Every listed "
+                   "plugin must carry one, so this blocks the listing"))
+        return out
+
+    # fpp-plugin-Template ships its block with "TEMPLATE TEXT - replace me" in
+    # `summary` and `other` so an unedited fork can't pass as a "runs on this device
+    # only" plugin (the seven structural keys ARE the do-nothing answer, so nothing
+    # else distinguishes the two). Those strings are end-user text in the install
+    # dialog, so they must never reach the Plugin Manager: blocker, not best practice.
+    template_fields = [k for k in ("summary", "other")
+                       if isinstance(pv.get(k), str) and _PRIV_TEMPLATE_MARK in pv[k].lower()]
+    if template_fields:
+        out.append(Finding(BLOCKER, "privacy-template-text",
+                   f"`privacy.{'` and `privacy.'.join(template_fields)}` still carry fpp-plugin-Template's "
+                   f"\"TEMPLATE TEXT - replace me\" placeholder - the block was never filled in, and FPP "
+                   f"would show that text to everyone in the install dialog.\n"
+                   f"  - Describe what this plugin actually does with data (the Privacy disclosure builder at "
+                   f"https://falconchristmas.github.io/fpp-data/plugin_privacy_builder/ walks through it); if it "
+                   f"truly does nothing off this device, `summary` is \"Runs on this device only.\" and "
+                   f"`other` is \"none\""))
+        return out
+
+    def undeclared(category, msg, fix):
+        out.append(Finding(BLOCKER, f"privacy-undeclared-{category}",
+                   f"{msg} but the pluginInfo.json `privacy` block doesn't declare it.\n  - {fix}"))
+
+    # --- vocabulary: the eight keys and the keys inside each object ------------
+    # The schema rejects these too, but a schema error names a JSON path; this
+    # names the key and what the v3 block calls it.
+    unknown = [k for k in pv if k not in _PRIV_V3_KEYS]
+    for key, allowed in _PRIV_V3_ITEM_KEYS.items():
+        for n, item in enumerate(pv.get(key) or []):
+            if isinstance(item, dict):
+                unknown.extend(f"{key}[{n}].{k}" for k in item if k not in allowed)
+    if unknown:
+        hints = [f"`{k}`" + (f" ({_PRIV_V2_KEY_HINTS[k]})" if k in _PRIV_V2_KEY_HINTS else "") for k in unknown[:8]]
+        out.append(Finding(BLOCKER, "privacy-unknown-key",
+                   f"the pluginInfo.json `privacy` block has {len(unknown)} key(s) outside the v3 vocabulary: "
+                   f"{', '.join(hints)}{' ...' if len(unknown) > 8 else ''}. FPP ignores unknown keys and the "
+                   "listing rejects them.\n"
+                   "  - The block has exactly eight keys - summary, sends[to, what, why, alwaysOn], "
+                   "collects[what, about, keptDays, canDelete, where], sensors[type, stored], remoteAccess, "
+                   "systemChanges[kind, what], closedCode, other; put anything else in `other` "
+                   "(PLUGININFO_FORMAT.md, `privacy` section)"))
+
+    def g(key, default=None):
+        v = pv.get(key)
+        return v if v is not None else default
+
+    def items(key):
+        return [x for x in (g(key, []) or []) if isinstance(x, dict)]
+
+    def changes(*kinds):
+        return [str(c.get("what", "")) for c in items("systemChanges") if c.get("kind") in kinds]
+
+    # --- length caps (soft: warn, never block - PLUGININFO_FORMAT.md `privacy` length caps) ----
+    over = []
+    if len(str(g("summary", ""))) > _PRIV_LEN_SUMMARY:
+        over.append(f"summary ({len(str(g('summary')))} > {_PRIV_LEN_SUMMARY})")
+    for n, s in enumerate(items("sends")):
+        for f in ("what", "why"):
+            if len(str(s.get(f, ""))) > _PRIV_LEN_TEXT:
+                over.append(f"sends[{n}].{f} ({len(str(s.get(f)))} > {_PRIV_LEN_TEXT})")
+    for n, c in enumerate(items("collects")):
+        if len(str(c.get("what", ""))) > _PRIV_LEN_TEXT:
+            over.append(f"collects[{n}].what ({len(str(c.get('what')))} > {_PRIV_LEN_TEXT})")
+    for n, c in enumerate(items("systemChanges")):
+        if len(str(c.get("what", ""))) > _PRIV_LEN_CHANGE:
+            over.append(f"systemChanges[{n}].what ({len(str(c.get('what')))} > {_PRIV_LEN_CHANGE})")
+    if over:
+        out.append(Finding(BEST_PRACTICE, "privacy-text-length",
+                   f"{len(over)} privacy text(s) exceed the install-dialog caps: {', '.join(over[:6])}"
+                   f"{' ...' if len(over) > 6 else ''}. FPP shows every word under its light - nothing is cut "
+                   "off - so a paragraph here makes the install dialog long.\n"
+                   f"  - Keep summary to {_PRIV_LEN_SUMMARY} characters, sends[].what/why and collects[].what to "
+                   f"{_PRIV_LEN_TEXT}, systemChanges[].what to {_PRIV_LEN_CHANGE}; the detail goes in `other`"))
+
+    # --- sends / install fetches ------------------------------------------------
+    # Runtime hosts in the code are matched against every host-shaped token in
+    # sends[].to (an `http://` prefix is just a flag); install-hook hosts against
+    # the `what` of download / package-source changes. A `to` that is a phrase
+    # ("your MQTT broker") never matches a literal - the literal is exactly the
+    # fixed destination the block has to name - but it does cover the code sending
+    # to a destination the operator typed (a variable, not a literal).
+    sends = items("sends")
+    declared_to = {re.sub(r'^https?://', "", str(s.get("to", ""))) for s in sends if s.get("to")}
+    declared_fetch = set(changes("download", "package-source"))
+    # A download / package-source entry naming no host at all ("downloads a prebuilt
+    # binary") is generic and covers any install-time fetch.
+    generic_fetch = any(not _PRIV_HOST_TOKEN_RX.search(w) for w in declared_fetch)
+    # A page served by the plugin's own listener (remoteAccess != none) is not
+    # under FPP's Content-Security-Policy, so every load in it is real.
+    own_server = str(g("remoteAccess", "none")) not in ("none", "None", "")
+    hosts = _priv_host_hits(root, own_owner, _priv_csp_adds(root), own_server)
+    missing_rt = sorted((h, v) for h, v in hosts.items() if v[3] == "runtime" and not _priv_host_declared(h, declared_to))
+    if missing_rt:
+        h, v = missing_rt[0]
+        more = f" (+{len(missing_rt) - 1} more: {', '.join(x for x, _ in missing_rt[1:6])})" if len(missing_rt) > 1 else ""
+        undeclared("recipients", f"the code contacts `{h}` ({loc(v)}){more}",
+                   "Add a `sends` entry with `to` = that host (or its registrable domain), what is sent, why, and alwaysOn")
+    # A CDN, font, badge or API host the plugin's own page makes the operator's
+    # browser load is a recipient like any other (spec §1, decided 14 Sep: no
+    # carve-out) - the browser hands that host its address on every page view.
+    # But only when the load happens: FPP serves plugin pages under its own
+    # Content-Security-Policy (script-src 'self', style-src 'self', font-src 'self'
+    # data:, img-src 'self' data: blob:, connect-src 'self' + FPP's hosts, and
+    # default-src 'self' for the rest), so a host the plugin neither whitelists
+    # with `ManageApacheContentPolicy.sh add` nor serves from its own listener is
+    # a dead tag, not a recipient - `_priv_host_hits` files those as "blocked".
+    missing_br = sorted((h, v) for h, v in hosts.items() if v[3] == "browser" and not _priv_host_declared(h, declared_to))
+    if missing_br:
+        h, v = missing_br[0]
+        more = f" (+{len(missing_br) - 1} more: {', '.join(x for x, _ in missing_br[1:6])})" if len(missing_br) > 1 else ""
+        undeclared("recipients", f"{v[0]}:{v[1]} loads https://{h} (browser-side: `{v[2]}`){more}",
+                   "Declare it in privacy.sends with `to` = that host, what: \"your browser's address\", why = what "
+                   "it loads (\"page styling\", \"chart library\", \"status badge\"), alwaysOn: true if the page "
+                   "loads it unasked - or bundle the file with the plugin so the browser never leaves the player, "
+                   "or, for a README-style badge or logo, just remove it")
+    blocked = sorted((h, v) for h, v in hosts.items() if v[3] == "blocked")
+    if blocked:
+        h, v = blocked[0]
+        # Name where each extra host is loaded from, not just the host: with the
+        # first hit sitting in an unused mockup file (fpp-jukebox locked.html,
+        # 2026-09) a bare host list hid that the others were on a live page.
+        more = (f" (+{len(blocked) - 1} more: {', '.join(f'{x} at {w[0]}:{w[1]}' for x, w in blocked[1:6])})"
+                if len(blocked) > 1 else "")
+        declared_note = (" privacy.sends already names it - that entry describes traffic that does not happen."
+                         if _priv_host_declared(h, declared_to) else "")
+        # ManageApacheContentPolicy.sh knows seven keys; a directive it does not
+        # keep (frame-src, media-src, worker-src...) is governed by default-src
+        # on FPP's policy, so that is the key to tell the author to add.
+        add_key = v[4] if v[4] in _PRIV_CSP_SCRIPT_KEYS else "default-src"
+        out.append(Finding(BEST_PRACTICE, "privacy-csp-blocked-load",
+                   f"{v[0]}:{v[1]} loads https://{h} (`{v[2]}`){more} but FPP's Content-Security-Policy "
+                   f"blocks it, so it never loads - the page is served under `{v[4]} 'self'` and nothing "
+                   f"in the plugin whitelists the host.{declared_note}\n"
+                   f"  - Bundle the file with the plugin or remove the tag; if you do want it, add it with "
+                   f"`${{FPPDIR}}/scripts/ManageApacheContentPolicy.sh add {add_key} https://{h}` in "
+                   f"scripts/fpp_install.sh and declare it in privacy.sends (to: \"{h}\", what: \"your "
+                   f"browser's address\")"))
+    if not generic_fetch:
+        missing_in = sorted((h, v) for h, v in hosts.items() if v[3] == "install" and not _priv_host_declared(h, declared_fetch | declared_to))
+        if missing_in:
+            h, v = missing_in[0]
+            more = f" (+{len(missing_in) - 1} more: {', '.join(x for x, _ in missing_in[1:6])})" if len(missing_in) > 1 else ""
+            undeclared("install", f"an install hook fetches from `{h}` ({loc(v)}){more}",
+                       "Add a `systemChanges` entry of kind \"download\" (a file, model, binary or clone) or "
+                       "\"package-source\" (an apt/pip/npm source) whose `what` names the host")
+    if not sends and not any(v[3] in ("runtime", "browser") for v in hosts.values()):
+        hit = next(iter(_priv_outbound_hits(root)), None)
+        if hit:
+            undeclared("recipients",
+                       f"`sends` is empty (\"sends nothing\") but the code sends over the network ({loc(hit)})",
+                       "Declare the destination, even when the operator types it in (to: \"your MQTT broker\"); "
+                       "traffic through FPP's helpers (CurlManager, urlGet, core MQTT, MultiSync) is the plugin's traffic")
+
+    # --- install: package sources, curl | sh, extra packages --------------------
+    sources, remote = _priv_install_hits(root)
+    declared_sources = changes("package-source")
+    for name, hit in sorted(sources.items()):
+        if not declared_sources:
+            undeclared("install", f"adds a {name} package source ({loc(hit)})",
+                       "Add a `systemChanges` entry of kind \"package-source\" naming the source and the packages taken "
+                       "from it - and pin, sign and remove it as PLUGIN_GUIDELINES.md §14 requires")
+            break
+    declared_downloads = changes("download")
+    if remote and not declared_downloads:
+        undeclared("install", f"pipes a downloaded script into an interpreter ({loc(remote)})",
+                   "Add a `systemChanges` entry of kind \"download\" naming what is fetched and run - and see the "
+                   "remote-exec finding: this is not allowed at all")
+    # Packages from a public package source (apt/pip/npm/CPAN) are not a download
+    # (the Open code light's green wording) - only a non-default
+    # source, a fetched file/binary/clone or a piped installer is.
+    # Self-update: a hook that pulls or resets to origin runs the newest code on the
+    # author's branch, not the commit FPP pinned (haCommands, sled-mailbox, ExternalFPP).
+    if not declared_downloads and not any("update" in t.lower() for t in changes(*_PRIV_V3_KINDS) + [str(g("other", ""))]):
+        hit = next(iter(_priv_self_update_hits(root)), None)
+        if hit:
+            undeclared("selfupdate", f"an install/start hook updates the plugin's own checkout ({loc(hit)})",
+                       "Add a `systemChanges` entry of kind \"download\" (\"updates itself from GitHub at every start\") - "
+                       "better, remove it: FPP's upgrade path installs the pinned `sha`, and a hook that resets to "
+                       "origin makes the listed version meaningless")
+
+    # --- sensors ----------------------------------------------------------
+    declared_sensors = {str(s.get("type")) for s in items("sensors")}
+    for name, hit in sorted(_priv_sensor_hits(root).items()):
+        if not any(t in declared_sensors for t in _PRIV_SENSOR_ALT.get(name, (name,))):
+            undeclared("sensors", f"the code reads a {name.replace('-', ' ')} source ({loc(hit)})",
+                       f"Add a `sensors` entry with type \"{name}\" and whether what it captures is stored; a stream that "
+                       "leaves the device is also a `sends` entry")
+            break
+
+    # --- listeners → remoteAccess ------------------------------------------------
+    # Routes on FPP's own web server are not listeners (and the hit finder skips a
+    # bind to localhost), so any hit means the plugin opens its own port. A
+    # `network` or `tunnel` system change also declares it (spec §1: remoteAccess
+    # is the listener's reach, systemChanges what was installed to get there).
+    if g("remoteAccess") == "none" and not changes("network", "tunnel"):
+        hit = next(iter(_priv_listener_hits(root)), None)
+        if hit:
+            port = f" on port {hit[3]}" if hit[3] else ""
+            undeclared("listeners", f"the code opens a listening socket{port} ({loc(hit)}) while `remoteAccess` is \"none\" "
+                       "and no `systemChanges` entry of kind \"network\" or \"tunnel\" names it",
+                       "Set `remoteAccess` to \"lan\", \"internet-authenticated\", \"internet-open\", \"exposes-fpp\" or "
+                       "\"tunnel\" - whichever is the widest reach of the plugin's own listener - and/or add a "
+                       "`systemChanges` entry of kind \"network\" (LAN port) or \"tunnel\" saying what was opened")
+
+    # --- services ----------------------------------------------------------
+    declared_services = [w.lower() for w in changes("service")]
+    for unit, hit in sorted(_priv_service_hits(root).items()):
+        if not any(unit in d or d.removesuffix(".service") in unit for d in declared_services):
+            undeclared("services", f"the code enables or installs the service `{unit}` ({loc(hit)})",
+                       f"Add a `systemChanges` entry of kind \"service\" naming `{unit}` (and revert it in fpp_uninstall.sh)")
+            break
+
+    # --- core config writes ----------------------------------------------------
+    # An /etc file may be declared under a service or network change instead:
+    # "apache2 conf rule added" covers /etc/apache2/conf-enabled/x.conf, "installs
+    # and configures mpd" covers /etc/mpd.conf. A settings key must be named in a
+    # core-settings `what` ("settings:MQTTHost" or just the key).
+    declared_core = [w.lower() for w in changes("core-settings")]
+    declared_host = declared_core + declared_services + [w.lower() for w in changes("network")]
+    for hit in _priv_core_write_hits(root):
+        target = hit[3]
+        tl = target.lower()
+        if tl.startswith("settings:"):
+            tokens, pool = {tl, tl.split(":", 1)[1]}, declared_core
+        elif tl.startswith("/etc/"):
+            base = os.path.basename(tl)
+            tokens, pool = {tl, base, base.rsplit(".", 1)[0], tl.split("/")[2]}, declared_host
+        else:
+            tokens, pool = {tl, os.path.basename(tl)}, declared_core
+        if not any(t in d for t in tokens if len(t) > 2 for d in pool):
+            what = f"FPP setting `{target[9:]}`" if target.startswith("settings:") else f"`{target}`"
+            undeclared("core-config", f"the code writes {what} ({loc(hit)})",
+                       f"Add a `systemChanges` entry of kind \"core-settings\" naming \"{target}\" (and revert it in fpp_uninstall.sh)")
+            break
+
+    # --- credentials ----------------------------------------------------------
+    # The plugin's OWN credentials are covered by its settings.json `type:
+    # password` (the crash bundler reads that); only a read of FPP's credential
+    # settings is a declaration matter.
+    if not changes("reads-core-credentials"):
+        for key, hit in sorted(_priv_core_credential_hits(root).items()):
+            undeclared("credentials", f"the code reads FPP's `{key}` setting ({loc(hit)})",
+                       "Add a `systemChanges` entry of kind \"reads-core-credentials\" saying which of FPP's credentials it "
+                       "reads - and only read it if the stated purpose cannot work without it")
+            break
+
+    # --- privileges ----------------------------------------------------------
+    privilege_pool = [w.lower() for w in changes("privilege")]
+    for kind, hit in sorted(_priv_privilege_hits(root).items()):
+        words = _PRIV_PRIVILEGE_RX[kind][1]
+        if not any(w in d for w in words for d in privilege_pool):
+            undeclared("privileges", f"the code changes host privileges - {kind} ({loc(hit)})",
+                       "Add a `systemChanges` entry of kind \"privilege\" saying what is granted (\"adds fpp to the video "
+                       "group\", \"sudoers rule for systemctl\") and whether fpp_uninstall.sh reverts it")
+            break
+
+    # --- closedCode: false but the listing cannot read what is installed ---------
+    # A package from PyPI/npm/CPAN counts as open code only when its source is
+    # published (a closed wheel or vendor SDK is closed code); a fetched binary or
+    # archive is open only if its source is. Neither is checkable here, so the
+    # reviewer is asked to look once. BEST_PRACTICE: the block may well be right.
+    if g("closedCode") is False:
+        # A compiled file in the repository with no source for it is closed code
+        # outright - nothing to confirm, so it contradicts the block. A packaged
+        # library (.whl/.egg/.jar/...) is often a vendored copy of an open project,
+        # open when its source is published, so it is asked about like a pip install.
+        compiled, packaged = [], []
+        for rel, kind in _committed_binary_hits(root):
+            (packaged if rel.lower().endswith(_BIN_PACKAGE_EXTS) else compiled).append((rel, kind))
+        unverified = list(_priv_unverifiable_code_hits(root))
+        unverified += [(rel, None, "", f"the packaged {kind} library `{rel}`", None) for rel, kind in packaged]
+        if unverified:
+            rel, i, line, what, url = unverified[0]
+            asks = [f"the source of {w} is public" + (f" at {u}" if u else "") for _, _, _, w, u in unverified[:4]]
+            more = f" (+{len(unverified) - 4} more)" if len(unverified) > 4 else ""
+            where = loc((rel, i, line)) if i is not None else f"`{rel}`"
+            out.append(Finding(BEST_PRACTICE, "privacy-closedcode-unverified",
+                       f"`closedCode` is false but the plugin installs code the listing check cannot read as source "
+                       f"({where}){' (+' + str(len(unverified) - 1) + ' more)' if len(unverified) > 1 else ''} - "
+                       f"a package from PyPI/npm/CPAN, a vendored package or a fetched binary is open code only if "
+                       f"its source is published.\n"
+                       f"  - Confirm {'; '.join(asks)}{more}; if any of it has no public source, set `closedCode` to true"))
+        if compiled:
+            more = (f" (+{len(compiled) - 1} more: {', '.join(r for r, _ in compiled[1:6])})"
+                    if len(compiled) > 1 else "")
+            undeclared("closedcode", f"`closedCode` is false but `{compiled[0][0]}` is a compiled "
+                       f"{compiled[0][1]} file with no source in the repository{more}",
+                       "Commit the source it is built from (and the build file), or remove the binary and build "
+                       "or fetch it at install time from a public source; if it has no public source, set "
+                       "`closedCode` to true")
+
+    return out
+
+
+# `set -e` placement (no-set-e). Only comments, blank lines, other `set`/`shopt`
+# calls, plain variable assignments (`FOO=bar`, `export FOO=bar`, `: "${FOO:=x}"`)
+# and `trap` are allowed to precede it - none of those is a step that can fail
+# and leave the install half-done. Everything else counts as an unguarded command.
+# `set -e`, `set -euo pipefail`, `set -o errexit`, `set -o pipefail -e`,
+# `set -o nounset -o errexit` - any mix of short and -o options with errexit
+# somewhere in it.
+_SET_E_RX = re.compile(r'^\s*set\s+(?:-o\s+\w+\s+|-[a-zA-Z]+\s+)*(?:-[a-zA-Z]*e[a-zA-Z]*\b|-o\s+errexit\b)')
+# A value that can follow FOO= and still be "just an assignment" (no command
+# run): a quoted string, a $(...)/`...` substitution, or a bare word - anything
+# that leaves the line with nothing else on it. `DEBIAN_FRONTEND=x apt-get ...`
+# (an env prefix on a real command) is NOT this: it has a command after it.
+_SET_E_ASSIGN_VALUE = (r'(?:"(?:[^"\\]|\\.)*"|\'[^\']*\'|\$\([^\n]*\)|`[^`\n]*`'
+                       r'|\([^)\n]*\)|[^\s"\'`()]|\\\s)*')
+_SET_E_PREAMBLE_RX = re.compile(
+    r'^\s*(?:'
+    r'(?:set|shopt|trap|umask|cd)\b'                          # other shell options / traps / cwd
+    r'|(?:export\s+|declare\s+[-\w ]*|typeset\s+[-\w ]*|readonly\s+|local\s+)?[A-Za-z_]\w*=' + _SET_E_ASSIGN_VALUE + r'\s*(?:#.*)?$'
+    r'|(?:export|readonly)\s+[A-Za-z_]\w*\s*$'                # export FOO (already assigned)
+    r'|:\s'                                                   # : "${FOO:=default}"
+    r'|(?:if|elif|while|until|for|case|select)\b'             # a condition is exempt from errexit by definition
+    r'|[\w|*"\'$\[\]{},.-]+\)\s*(?:;;)?\s*$'                    # a `case` arm label with no command on it
+    r'|(?:source|\.)\s+\S*(?:/opt/fpp/scripts/common|/common\b)' # FPP's own helpers - a fixed, known step
+    r')')
+_SET_E_SYNTAX = frozenset(('then', 'else', 'fi', 'do', 'done', 'esac', '{', '}', ';;', 'in'))
+
+
+def _set_e_position(body: str) -> tuple[int, list[tuple[int, str]]] | None:
+    """None when the script never enables errexit (`set -e`, `set -euo pipefail`,
+    `set -o errexit`, or `-e` on the shebang). Otherwise (lineno, unguarded) where
+    lineno is the line `set -e` sits on (0 for the shebang) and `unguarded` lists
+    the (lineno, text) of every top-level command that runs before it without its
+    own `|| true` / `|| exit` guard. Heredoc bodies and function bodies are not
+    commands that run at that point, so they are skipped. An empty list means
+    `set -e` is positioned correctly."""
+    lines = body.splitlines()
+    if lines and lines[0].startswith("#!") and re.search(r'\s-[a-zA-Z]*e', lines[0]):
+        return (0, [])
+    unguarded: list[tuple[int, str]] = []
+    heredoc = None      # (terminator, strip_tabs) while inside a heredoc body
+    depth = 0           # brace depth: >0 means inside a function body
+    cont_from = None    # first physical line of a `\`-continued logical line
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+        if heredoc is not None:
+            # `<<EOF` needs the terminator flush-left; only `<<-EOF` strips
+            # leading tabs, so an indented `EOF` inside a plain heredoc is body.
+            if (line.lstrip("\t") if heredoc[1] else line).rstrip("\n") == heredoc[0]:
+                heredoc = None
+            continue
+        if not stripped or stripped.startswith("#"):
+            continue
+        # A `\`-continued command is one command: judge it by its first line,
+        # guard it by its last (`apt-get install -y \` / `  foo || true`).
+        if cont_from is None and stripped.endswith("\\"):
+            cont_from = (i, stripped)
+            continue
+        if cont_from is not None:
+            if stripped.endswith("\\"):
+                continue
+            i, stripped = cont_from[0], cont_from[1].rstrip("\\").rstrip() + " ... " + stripped
+            cont_from = None
+        if depth == 0 and _SET_E_RX.match(line):
+            return (i, unguarded)
+        # `<<<` is a here-string and `1 << 3` is a shift - neither opens a
+        # heredoc (treating them as one swallowed the rest of the file and
+        # reported "has no set -e" on a script that plainly had one).
+        m = re.search(r'(?<!<)<<(?!<)(-?)\s*[\'"]?([A-Za-z_]\w*)[\'"]?',
+                      re.sub(r'\$\(\(.*?\)\)', '', line.split('#', 1)[0]))
+        if m:
+            heredoc = (m.group(2), m.group(1) == "-")
+        # A function definition line - `foo() {`, `function foo {`, `foo()` with
+        # the `{` on the next line, or a one-liner `foo() { echo hi; }` whose
+        # braces balance on the line - defines, it doesn't run.
+        is_fn_def = re.match(r'^(?:function\s+[A-Za-z_]\w*\s*(?:\(\s*\))?|[A-Za-z_]\w*\s*\(\s*\))\s*(?:\{.*)?$', stripped)
+        is_cmd = depth == 0 and not _SET_E_PREAMBLE_RX.match(stripped) \
+            and stripped not in _SET_E_SYNTAX \
+            and not is_fn_def \
+            and not re.search(r'\|\|\s*(?:true|:|exit\b[^|]*|\{[^}]*\bexit\b[^}]*\}|return\b[^|]*)\s*$', stripped)
+        depth += stripped.count("{") - stripped.count("}")
+        if is_cmd:
+            unguarded.append((i, stripped if len(stripped) <= 60 else stripped[:57] + "..."))
+    return None
+
+
+def _set_e_is_last(body: str, set_line: int) -> bool:
+    """True when nothing but blanks/comments follows the `set -e` on `set_line`."""
+    rest = body.splitlines()[set_line:]
+    return all(not l.strip() or l.strip().startswith("#") for l in rest)
+
+
+# A hook script that is nothing but a wrapper: it `exec`s into the real script
+# somewhere else in the repo (fpp-performance-capture's monorepo layout, where
+# the root fpp_install.sh is a 6-line stub that execs
+# fpp-plugins/<name>/fpp_install.sh). Because the trigger is specifically
+# `exec`, nothing in the wrapper runs afterwards and process control transfers
+# entirely - so a hook-scoped check that reads only the wrapper is reading the
+# wrong file, and running the SAME per-file check independently on the target is
+# exactly right. Deliberately narrow: only `exec bash|sh <dir>/<path>.sh`, where
+# <dir> is $PLUGIN_DIR/$SCRIPT_DIR (assigned from `dirname "$0"` earlier in the
+# same file) or an inline `$(cd "$(dirname "$0")" && pwd)`. No `source`/`.`, no
+# variable tracing, no recursion (depth 1, hard).
+# `exec [bash|sh] <dir>/<rel>.sh [args]` where <dir> is $PLUGIN_DIR/$SCRIPT_DIR
+# (assigned from dirname "$0" earlier), an inline `$(dirname "$0")`, or the
+# `$(cd "$(dirname "$0")" && pwd)` form. Interpreter optional; trailing "$@"
+# or other args allowed.
+_EXEC_DELEGATE_RX = re.compile(
+    r'^\s*exec\s+(?:(?:/bin/|/usr/bin/)?(?:bash|sh)\s+)?'
+    r'"?(?:\$\{?(?P<var>PLUGIN_DIR|SCRIPT_DIR)\}?'
+    r'|\$\(\s*dirname\s+"?\$0"?\s*\)'
+    r'|\$\(\s*(?:cd\s+"?)?\$\(\s*dirname\s+"?\$0"?[^)]*\)[^)]*\))'
+    r'/(?P<rel>[\w./-]+\.sh)"?(?:\s+[^;&|#\n]*)?\s*(?:;|&&|\|\||#|$)')
+_DIRNAME_ASSIGN_RX = re.compile(
+    r'^\s*(?:export\s+|declare\s+[-\w ]*|readonly\s+)?(?P<var>\w+)=\s*'
+    r'"?\$\(\s*(?:cd\s+"?)?(?:\$\(\s*)?dirname\s+"?\$0"?')
+
+
+def _exec_delegation_target(hook_path: str, root: str) -> str | None:
+    """Relpath (from `root`) of the script `hook_path` hands off to via
+    `exec bash .../x.sh`, or None. Resolved statically only: rejects `..` in the
+    path, a target that doesn't exist on disk, a target outside the plugin root,
+    and the hook resolving to itself."""
+    if not os.path.isfile(hook_path):
+        return None
+    body = _read(hook_path)
+    dirname_vars = set()
+    for line in body.splitlines():
+        if _is_comment_line(line):
+            continue
+        a = _DIRNAME_ASSIGN_RX.match(line)
+        if a:
+            dirname_vars.add(a.group("var"))
+        m = _EXEC_DELEGATE_RX.match(line)
+        if not m:
+            continue
+        var = m.group("var")
+        if var and var not in dirname_vars:
+            continue        # not provably the script's own directory
+        rel = m.group("rel")
+        if ".." in rel.split("/"):
+            return None
+        base = os.path.dirname(os.path.abspath(hook_path))
+        target = os.path.realpath(os.path.join(base, rel))
+        real_root = os.path.realpath(root)
+        if not os.path.isfile(target):
+            return None
+        if os.path.commonpath([target, real_root]) != real_root:
+            return None
+        if target == os.path.realpath(hook_path):
+            return None     # recursion guard
+        return os.path.relpath(target, real_root)
+    return None
+
+
+def _subshell_exit_swallow_hits(root: str, exts=SCRIPT_EXT):
+    """Yield (relpath, lineno, line) where a shell function that can `exit` is
+    invoked inside a command substitution on an assignment (VAR=$(fn ...) or
+    VAR=`fn ...`). `exit` inside `$( )`/backticks only ends the subshell, not
+    the calling script - a validator written "exit 1 on bad input" silently
+    becomes "assign an empty/partial string on bad input" instead when called
+    this way, and the caller has no way to tell the difference from a
+    legitimately-empty result."""
+    for path in _iter_files(root, exts):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        src = _read(path)
+        if not re.match(r'#!.*\b(?:ba|z|da|k)?sh\b', src[:200]) and not rel.endswith(".sh"):
+            continue  # shell semantics only
+        fn_names = []
+        for name, b0, b1, _s, _e in _shell_functions(src):
+            body = "\n".join(l.split('#', 1)[0] for l in src[b0:b1].splitlines())
+            # `exit` as a statement, or as the `|| exit 1` / `then exit 1` tail
+            # of a validator - all end the subshell, not the script.
+            if re.search(r'(?m)(?:^|;|\|\||&&|\bthen\b|\belse\b|\bdo\b)\s*exit\b', body):
+                fn_names.append(name)
+        if not fn_names:
+            continue
+        alt = "|".join(re.escape(n) for n in fn_names)
+        # VAR=$(fn ...), quoted or not, with or without local/export/declare/
+        # readonly. A line that then checks the status (`|| exit 1`, `|| return`,
+        # `&& ...`) is the CORRECT shape - the assignment's status is the
+        # substitution's - so it is skipped.
+        rx = re.compile(r'^\s*(?:local\s+|export\s+|declare\s+(?:-\w+\s+)*|readonly\s+)?\w+=["\']?'
+                        r'(?:\$\(\s*|`\s*)(?:' + alt + r')\b')
+        for i, line in enumerate(src.splitlines(), 1):
+            code = line.split('#', 1)[0]
+            if rx.search(code) and not re.search(r'\)["\']?\s*(?:\|\||&&)', code):
+                yield rel, i, line.strip()
+                break
+
+
+_CALLBACKS_SHLIB_OVERRIDE_RX = re.compile(r'c\+\+:((?:\.{0,2}/)?[\w][\w.+/-]*\.so(?:\.[\w.]+)?)')
+
+
+def _expected_shlib_names(root: str, repo: str) -> set[str]:
+    """The .so filename(s) fppd will actually try to dlopen() for this plugin:
+    `lib<repo>.so` by default, or the file named by a `c++:<file>` line in the
+    root callbacks script (any of the four extensions or extensionless), which
+    Plugins.cpp loadUserPlugin() honours in place of the derived name. Both are
+    accepted when an override exists (the override wins at runtime, but a
+    Makefile that builds the derived name too isn't wrong)."""
+    names = {f"lib{repo}.so"}
+    for fn in os.listdir(root) if os.path.isdir(root) else []:
+        if fn == "callbacks" or (fn.startswith("callbacks.") and fn.count(".") == 1):
+            for line in _read(os.path.join(root, fn)).splitlines():
+                if _is_comment_line(line):
+                    continue
+                for m in _CALLBACKS_SHLIB_OVERRIDE_RX.finditer(line.split('#', 1)[0]):
+                    names.add(os.path.basename(m.group(1)))
+    return names
+
+
+_MAKEFILE_SO = r'(lib[\w.+-]*?)(?:\.so|\.\$[({]SHLIB_EXT[)}])'
+_MAKEFILE_SHLIB_TARGET_RXS = (
+    re.compile(r'(?m)^\s*' + _MAKEFILE_SO + r'\s*:'),                        # libx.so: deps
+    re.compile(r'(?m)^\s*(?:all|default|plugin)\s*:\s*(?:[^\n]*?\s)?' + _MAKEFILE_SO + r'(?=\s|$)'),
+    re.compile(r'(?m)^\s*(?:TARGET|LIB|LIBRARY|SHLIB|PLUGIN|OUTPUT)\s*[:?+]?=\s*' + _MAKEFILE_SO + r'\s*$'),
+    re.compile(r'\s-o\s+' + _MAKEFILE_SO + r'(?=\s|$)'),
+)
+
+
+def _makefile_shlib_targets(makefile_text: str) -> set[str]:
+    """lib*.so filenames a Makefile BUILDS (rule targets, `all:` prerequisites,
+    a TARGET-style variable, or a `-o` output) - not ones it merely depends on
+    or deletes. `$(SHLIB_EXT)` is normalised to `.so`. Makefile variables in
+    the stem (`lib$(NAME).so`) can't be resolved, so such targets are ignored
+    rather than guessed at."""
+    code = "\n".join(l.split('#', 1)[0] for l in makefile_text.splitlines())
+    found: set[str] = set()
+    for rx in _MAKEFILE_SHLIB_TARGET_RXS:
+        for m in rx.finditer(code):
+            stem = m.group(1)
+            if '$' in stem:
+                continue
+            found.add(stem + ".so")
+    return found
+
+
 def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None = None,
                      schema: dict | None = None) -> list[Finding]:
     """Run all static checks against a plugin working tree; return findings.
@@ -1027,6 +3507,21 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"update that sha deliberately when you've reviewed the new code, instead of tracking "
                    f"a floating branch"))
 
+    # `set -u` + ${FPPDIR} / sourcing scripts/common: the script aborts (usually
+    # silently) instead of running - see _nounset_fppdir_hits for the two paths.
+    hit = next(iter(_nounset_fppdir_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "nounset-fppdir",
+                   f"enables `set -u` and then expands FPPDIR or sources scripts/common under it "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`) - this aborts the script instead of running "
+                   f"it: FPPDIR is unset on the uninstall path (uninstall_plugin passes it only as "
+                   f"an argument and sudo strips the exported one), and even when it is set, "
+                   f"scripts/common expands a bare $LD_LIBRARY_PATH which trips nounset inside the "
+                   f"sourced file. A `2>/dev/null` or `|| true` on that line does not help - the "
+                   f"expansion error exits the shell before either applies.\n"
+                   f"  - Use `${{FPPDIR:-/opt/fpp}}` for the path and source common with nounset "
+                   f"relaxed in a subshell, e.g. `{RESTART_FLAG_SNIPPET}`"))
+
     # Reboots/shutdowns are an error. A bare reboot/shutdown only counts as a
     # command (start of line / after ;&| / sudo / then|do, in a shell script, or
     # wrapped in system()/exec()) - not the word "Reboot" in UI text.
@@ -1041,18 +3536,18 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"mid-show"))
 
     # Restarting fppd DIRECTLY (RestartFPPD(), systemctl/service/kill, `fpp -r`) is
-    # the anti-pattern. The sanctioned way is SetRestartFlag()/`setSetting restartFlag`
+    # the anti-pattern (`-r` is case-sensitive: `fpp -R` only reloads the schedule). The sanctioned way is SetRestartFlag()/`setSetting restartFlag`
     # (deferred, sequenced around a running show) - those are NOT flagged.
     hit = first(r'\bRestartFPPD\s*\(|\bfppd_restart\b|systemctl\s+(restart|stop|start)\s+fppd'
-                r'|service\s+fppd\s+(restart|stop)|(pkill|killall)\s+[^\n]*fppd|\bfpp\s+-r\b|\bfpp\s+--restart\b'
+                r'|service\s+fppd\s+(restart|stop)|(pkill|killall)\s+[^\n]*fppd|\bfpp\s+(?-i:-r)\b|\bfpp\s+--restart\b'
                 r'|/api/system/fppd/(restart|reboot)|api/system/restart')
     if hit:
         out.append(Finding(BLOCKER, "fppd-restart",
                    f"restarts fppd directly ({hit[0]}:{hit[1]}: `{hit[2]}`) - replace it with the "
                    f"restart flag instead, so FPP restarts safely between sequences instead of "
                    f"killing a running show.\n"
-                   f"  - Shell: source `${{FPPDIR}}/scripts/common` first (it defines the function), "
-                   f"then call `setSetting restartFlag 1`.\n"
+                   f"  - Shell: `{RESTART_FLAG_SNIPPET}` (common defines the function; the "
+                   f"subshell/default keep it from aborting a `set -u` script).\n"
                    f"  - C++: call `setSetting(\"restartFlag\", \"1\")` (declared in `settings.h`, "
                    f"already pulled in via `fpp-pch.h`) - not `SetRestartFlag()`, which is the "
                    f"browser-JS helper used from PHP pages, not a C++ API"))
@@ -1167,6 +3662,77 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"image doesn't ship), say so explicitly via `/submit` instead of adding a manager "
                    f"silently"))
 
+    # apt-get/apt install|remove|purge called directly from a plugin's own
+    # scripts, instead of through pluginInfo.json's declarative
+    # dependencies.packages (PLUGININFO_FORMAT.md "dependencies" - reference-
+    # counted per requesting plugin, which is what lets fpp_uninstall safely
+    # decide whether a package is still needed by someone else). A manual call
+    # is invisible to that refcount: two plugins apt-get installing the same
+    # package, then one `apt-get remove`-ing it on uninstall, silently takes it
+    # out from under the other. BLOCKER when the package is one with an
+    # update-initramfs hook (e2fsprogs, dosfstools, initramfs-tools, busybox) -
+    # removing/reinstalling those can regenerate the system's initramfs, a much
+    # bigger blast radius on a device that's expected to keep booting than an
+    # ordinary package; BEST_PRACTICE otherwise.
+    # .sh only: install/uninstall logic lives in shell hooks, not PHP/JS/Python
+    # UI code - restricting to it avoids matching e.g. a PHP page's help text
+    # that merely SUGGESTS an apt-get command to the user in an echoed string
+    # (confirmed false positive on Si4713_FM_RDS's plugin_setup.php otherwise).
+    #
+    # pluginInfo.schema.json is explicit that dependencies.packages is "FPP
+    # 10+" - it isn't read/installed at all on an older FPP major, so a plugin
+    # whose versions[] still covers one has no alternative to a manual apt-get
+    # call for that install: the declarative mechanism this finding is nudging
+    # toward literally doesn't exist there. Confirmed against the first real
+    # pass of this check: 17 of 18 hits were plugins that still declare pre-10
+    # support - false positives, not sloppiness - leaving exactly one genuine
+    # case (fpp-plugin-SDCardRecover, FPP10-only). So this only fires for a
+    # plugin whose EVERY versions[] entry is FPP 10+.
+    versions = (info or {}).get("versions") or []
+    covers_pre_10 = any(
+        (_major(v.get("minFPPVersion")) or 99) < 10
+        for v in versions if isinstance(v, dict) and v.get("minFPPVersion"))
+    # Options can come before the verb (`apt-get -y install`, the dominant idiom
+    # in the corpus) or after. An `echo "run: apt-get install ..."` is help text
+    # (skipped by the (?<!...) on the leading quote/echo), and fpp_uninstall.sh
+    # removing what fpp_install.sh installed is the right thing, not a finding.
+    # BEST_PRACTICE only (2026-09 review): the initramfs escalation this had
+    # didn't hold up - dosfstools has no initramfs hook, e2fsprogs is already on
+    # every image so its install runs no postinst, and `update-initramfs -u` is
+    # what every kernel update does anyway.
+    apt_rx = re.compile(r'\bapt(?:-get)?\s+(?:-\S+(?:\s+\S+)?\s+)*(?:install|remove|purge)\b')
+
+    def _apt_call(line: str) -> bool:
+        """True when the line RUNS apt (possibly after `;`/`&&`, under sudo, or
+        inside `bash -c "..."`) rather than merely printing text that mentions it."""
+        for seg in re.split(r'(?:;|&&|\|\|)', line):
+            seg = seg.strip()
+            m = apt_rx.search(seg)
+            if not m:
+                continue
+            before = seg[:m.start()]
+            if re.match(r'^\s*(?:echo|printf|print|cat)\b', seg) and 'bash -c' not in before:
+                continue
+            if re.search(r'["\']', before) and not re.search(r'\b(?:bash|sh)\s+-c\s+["\']', before):
+                continue  # `echo "run apt-get ..."` / a quoted string
+            return True
+        return False
+
+    hit = None if covers_pre_10 else next(
+        (h for h in _grep(root, apt_rx.pattern, exts=(".sh",))
+         if os.path.basename(h[0]) != "fpp_uninstall.sh" and _apt_call(h[2])),
+        None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "apt-manual-install",
+                   f"calls apt/apt-get install|remove|purge directly ({hit[0]}:{hit[1]}: `{hit[2]}`) "
+                   f"instead of declaring the package in pluginInfo.json's `dependencies.packages` - "
+                   f"that mechanism reference-counts installs per requesting plugin, so "
+                   f"fpp_uninstall.sh only removes a package once nobody else still needs it; a "
+                   f"manual apt-get call has no such tracking. This plugin declares FPP 10+ only, "
+                   f"where that mechanism exists.\n"
+                   f"  - Move it into pluginInfo.json's `dependencies.packages` array instead of "
+                   f"calling apt-get from a script"))
+
     # Reading/parsing FPP's raw core config directly (the settings file, channel
     # outputs) is fragile - use getSetting()/$settings/the API. Writing your OWN
     # config via WriteSettingToFile(key, val, pluginName) is fine and NOT flagged.
@@ -1215,7 +3781,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # install script also sets up an Apache ProxyPass - a strong signal the
     # service was designed to be internal-only, so the 0.0.0.0 bind exposes
     # its (often unauthenticated) routes directly on the LAN instead.
-    hit = first(r'\.(run|listen|bind)\s*\([^)]*0\.0\.0\.0', exts=(".py", ".js"))
+    hit = first(r'\.(run|run_app|listen|bind)\s*\([^)]*0\.0\.0\.0', exts=(".py", ".js"))
     if hit and first(r'ProxyPass', exts=(".sh", ".conf")):
         out.append(Finding(BLOCKER, "server-bind-all-interfaces",
                    f"daemon binds 0.0.0.0 despite an Apache ProxyPass for the same service "
@@ -1223,6 +3789,76 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"reached through Apache only.\n"
                    f"  - Bind to `127.0.0.1` instead so the routes aren't directly reachable on the "
                    f"LAN, bypassing whatever auth Apache would add"))
+    elif hit and not re.search(r'SOCK_DGRAM|createSocket\s*\(\s*["\']udp|\bdgram\.', "\n".join(
+            _read(os.path.join(root, hit[0])).splitlines()[max(0, hit[1] - 40):hit[1] + 2])):
+        # Same 0.0.0.0 bind, but with no paired ProxyPass to infer "designed to be
+        # internal-only" from. The only corpus hit for this branch was a service
+        # meant to be reached from other devices on the LAN (showpilot-plugin's
+        # audio/WebSocket server), and a UDP receiver (E1.31/ArtNet/OSC/
+        # multicast - skipped above) MUST bind every interface. FPP's UI
+        # password is off by default, so "the auth Apache would add" is usually
+        # nothing anyway. OPTIONAL: a prompt to confirm it's intended, not a
+        # finding the author has to argue with.
+        out.append(Finding(OPTIONAL, "server-bind-all-interfaces",
+                   f"daemon binds 0.0.0.0 ({hit[0]}:{hit[1]}: `{hit[2]}`) - reachable from every "
+                   f"device on the LAN, not just FPP's own UI.\n"
+                   f"  - Fine if other devices are meant to talk to it directly; if only FPP's own "
+                   f"pages use it, bind `127.0.0.1` instead"))
+
+    # A destructive block-device write (mkfs/dd/wipefs/parted/sfdisk onto
+    # /dev/sdX, /dev/mmcblkN, /dev/nvmeN) in a file that never references FPP's
+    # own storage device or media mount - a script that picks "the inserted SD
+    # card" generically has nothing stopping it from formatting the disk FPP
+    # boots from or stores shows on. BLOCKER: the failure mode is destroying
+    # the media the system runs on. Read-only tools (lsblk, fsck -n, blkid) and
+    # `dd of=/dev/null` aren't in the class, and the exclusion is checked in
+    # the SAME file as the hit - a `/home/fpp/media` in the log path of some
+    # other script says nothing about what this one targets.
+    _BLK_DEV = r'/dev/(?:sd[a-z]|mmcblk\d|nvme\d|disk/by-)'
+    blk_write_rx = re.compile(
+        r'\bmkfs(?:\.\w+)?\s[^\n]*' + _BLK_DEV
+        + r'|\bdd\s[^\n]*\bof=' + _BLK_DEV
+        + r'|\b(?:wipefs|sfdisk|sgdisk|parted|fdisk)\s[^\n]*' + _BLK_DEV
+        + r'|\b(?:mkfs(?:\.\w+)?|wipefs)\s[^\n]*(?:/dev/)?\$\{?(?:dev|device|disk|drive|sdcard|card|blockdev|blkdev|target_dev|dev_name)\}?\b'
+        + r'|\bdd\s[^\n]*\bof=(?:/dev/)?\$\{?(?:dev|device|disk|drive|sdcard|card|blockdev|blkdev|target_dev|dev_name)\}?\b'
+        + r'|\b(?:mkfs(?:\.\w+)?|wipefs)\s[^\n]*/dev/\$\{?\w+\}?'
+        + r'|\bdd\s[^\n]*\bof=/dev/\$\{?\w+\}?', re.I)
+    blk_excl_rx = re.compile(r'storageDevice|/home/fpp/media\b|findmnt\s|\bmountpoint\s|/proc/mounts|/etc/fstab', re.I)
+    blk_hit = None
+    for path in _iter_files(root, SCRIPT_EXT):
+        rel = os.path.relpath(path, root)
+        if _skippable(rel):
+            continue
+        text = _read(path)
+        if blk_excl_rx.search(text):
+            continue
+        # Python docstrings and shell heredocs are prose (a usage block
+        # saying "sudo dd if=fpp.img of=/dev/sdb" isn't a dd).
+        if rel.endswith(".py"):
+            text = re.sub(r'(?s)"""(?:[^"\\]|\\.|"(?!""))*"""|\'\'\'(?:[^\'\\]|\\.|\'(?!\'\'))*\'\'\'',
+                          lambda m: "\n" * m.group(0).count("\n"), text)
+        elif rel.endswith(".sh"):
+            text = re.sub(r'(?ms)<<-?\s*[\'"]?(\w+)[\'"]?[^\n]*\n.*?^\s*\1\s*$',
+                          lambda m: "\n" * m.group(0).count("\n"), text)
+        for i, line in enumerate(text.splitlines(), 1):
+            if _is_comment_line(line):
+                continue
+            m = blk_write_rx.search(line)
+            if m and not _priv_in_prose(rel, line, m.start()) \
+                    and not re.search(r'^\s*(?:echo|print|printf)\b|["\'][^"\']*\b(?:dd|mkfs)\b', line[:m.start() + 3]):
+                blk_hit = (rel, i, line.strip())
+                break
+        if blk_hit:
+            break
+    if blk_hit:
+        out.append(Finding(BLOCKER, "block-device-no-exclusion",
+                   f"writes to a raw block device with no reference to FPP's own storage device/media "
+                   f"mount anywhere in the same file ({blk_hit[0]}:{blk_hit[1]}: `{blk_hit[2]}`) - if "
+                   f"this picks its target generically (\"the inserted SD card\"), nothing here stops "
+                   f"it from formatting or overwriting the disk FPP itself is running from.\n"
+                   f"  - Read FPP's own storage device first (`findmnt -n -o SOURCE /home/fpp/media`, "
+                   f"or the `storageDevice` setting) and explicitly skip it before touching "
+                   f"anything under `/dev/`"))
 
     # Request-controlled value concatenated into a device path with no
     # allow-list check IN THAT SAME FILE (an allow-list living in some other
@@ -1234,6 +3870,8 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # evidence, fpp-LoRa) apart from a value that's actually an admin-configured
     # setting read from a CLI script (FPP-Plugin-Projector-Control's proj.php,
     # invoked via getopt - not web-reachable at all despite the same shape).
+    # An anchored regex / in_array guard on the same variable before the build
+    # line also clears it (_same_var_guard_before, fpp-data#205).
     hit = next(iter(_device_path_no_allowlist_hits(root)), None)
     if hit:
         out.append(Finding(BEST_PRACTICE, "device-path-no-allowlist",
@@ -1394,18 +4032,38 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # runtime request-handler scripts) runs as the `fpp` user, where sudo can
     # be legitimate. Scope by filename, not extension, so those runtime
     # scripts aren't flagged.
+    # A root test just above the sudo: the script also runs by hand as a normal
+    # user and escalates only then (`if [ "$(id -u)" -eq 0 ]; then rm; else sudo rm`),
+    # which is the right way to write a hook that has a manual mode.
+    root_guard_rx = re.compile(r'\$\(\s*id\s+-u\s*\)|`id\s+-u`|\$\{?EUID\}?|\$\{?UID\}?\b|\bwhoami\b|\bid\s+-un?\b')
+
+    def _first_sudo_line(path):
+        """(lineno, line) of the first `sudo` on a code line - not one in a comment
+        explaining a sudo choice, and not one guarded by a root test on the line or within
+        the six lines above (fpp-data#266: both were reported, the first with the advice to
+        run the comment directly)."""
+        lines = _read(path).splitlines()
+        for i, line in enumerate(lines):
+            if _is_comment_line(line):
+                continue
+            code = re.split(r'\s#', line, maxsplit=1)[0]   # `cmd  # a trailing note`
+            if not re.search(r'\bsudo\b', code):
+                continue
+            guarded = [l for l in lines[max(0, i - 6):i] if not _is_comment_line(l)] + [code[:code.index("sudo")]]
+            if any(root_guard_rx.search(l) for l in guarded):
+                continue
+            return i + 1, line.strip()
+        return None
+
     hit = None
     for dirpath, dirnames, filenames in os.walk(root):
         if ".git" in dirnames:
             dirnames.remove(".git")
         for fn in filenames:
             if fn in SUDO_SCOPE:
-                body = _read(os.path.join(dirpath, fn))
-                m = re.search(r'\bsudo\b', body)
+                m = _first_sudo_line(os.path.join(dirpath, fn))
                 if m:
-                    lineno = body[:m.start()].count("\n") + 1
-                    hit = (os.path.relpath(os.path.join(dirpath, fn), root), lineno,
-                           body.splitlines()[lineno - 1].strip())
+                    hit = (os.path.relpath(os.path.join(dirpath, fn), root), m[0], m[1])
                     break
         if hit:
             break
@@ -1413,11 +4071,9 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         for cand in ("Makefile", "makefile"):
             p = os.path.join(root, cand)
             if os.path.isfile(p):
-                body = _read(p)
-                m = re.search(r'\bsudo\b', body)
+                m = _first_sudo_line(p)
                 if m:
-                    lineno = body[:m.start()].count("\n") + 1
-                    hit = (cand, lineno, body.splitlines()[lineno - 1].strip())
+                    hit = (cand, m[0], m[1])
                 break
     if hit:
         # `sudo -u <user> <cmd>` is a privilege DROP (root -> unprivileged runtime
@@ -1441,7 +4097,9 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"uses sudo in a script ({hit[0]}:{hit[1]}: `{hit[2]}`) - install/hooks already "
                        f"run as root.\n"
                        f"  - Remove the sudo call and run the command directly, e.g. "
-                       f"`{hit[2].replace('sudo ', '', 1)}`"))
+                       f"`{hit[2].replace('sudo ', '', 1)}`; if the script is also run by hand as a "
+                       f"normal user, escalate only then: `if [ \"$(id -u)\" -eq 0 ]; then <cmd>; else "
+                       f"sudo <cmd>; fi`"))
 
     # --- untrusted request data reaching a dangerous sink --------------------
 
@@ -1586,10 +4244,18 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
 
     # TLS certificate verification explicitly disabled - always a deliberate
     # opt-out, so this is low false-positive (contrast: `break-system-packages`).
+    # curl's short flags are case-sensitive and _grep() defaults to re.I, so the
+    # `-k` arm is scoped (?-i:): `-K` is --config (read a config file) and must
+    # not match. It counts as its own option token (whitespace before it) or
+    # inside a short-option bundle (`-sk`, `-fsSLk`) whose letters before the k
+    # are all boolean flags - in `-ofile-k` / `-Hkey` the k is an argument. An
+    # arg-taking flag may follow it (`-ko out`). Stops at `|` so `| sort -k2`
+    # after the curl isn't read as curl's own option.
     hit = first(r'CURLOPT_SSL_VERIFYPEER\s*,\s*(false|0)\b') \
         or first(r'CURLOPT_SSL_VERIFYHOST\s*,\s*(0|false)\b') \
         or first(r'verify\s*=\s*False\b') \
-        or first(r'curl\s+[^\n]*(-k\b|--insecure\b)', exts=(".sh",)) \
+        or first(r'curl\s+[^\n|]*(?<!\S)(?-i:-[#aBfgGiIjJlLMnNOpqRsSvVZ]*k[#aBfgGiIjJlLMnNOpqRsSvVZ]*'
+                 r'(?:[AbcCdDeEFhHKmoPQrtTuUwxXyYz]\S*)?(?![^\s\'"\\);`])|--(?:proxy-)?insecure\b)', exts=(".sh",)) \
         or first(r'''NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*['"]?0''')
     if hit:
         out.append(Finding(BLOCKER, "tls-verify-disabled",
@@ -1652,21 +4318,78 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                                f"{os.path.relpath(p, root)} is not executable - commit it +x "
                                f"(git update-index --chmod=+x)"))
 
-    # install error handling
+    # install error handling. `set -e` only protects the commands that run AFTER
+    # it, so its position matters as much as its presence: a `set -e` on the last
+    # line (fpp-jukebox, 2026-09, added to satisfy the old presence-only grep)
+    # guards nothing. _set_e_position() reports where it sits and how many real
+    # commands precede it; the message names the first unguarded one so the
+    # author can see what the rule is actually about.
+    # A wrapper fpp_install.sh that just `exec`s into the real installer elsewhere
+    # in the repo hands over the whole process, so `set -e` on the wrapper guards
+    # nothing that happens after it: the target is checked as its own file, in
+    # addition to (not instead of) the wrapper.
     for cand in ("scripts/fpp_install.sh", "fpp_install.sh"):
         p = os.path.join(root, cand)
-        if os.path.isfile(p):
-            body = _read(p)
-            if not re.search(r'set\s+-e|set\s+-euo|\|\|\s*exit', body):
+        if not os.path.isfile(p):
+            continue
+        checked = [(cand, "")]
+        delegated = _exec_delegation_target(p, root)
+        if delegated:
+            checked.append((delegated, f" (the real installer {cand} `exec`s into)"))
+        for script, note in checked:
+            body = _read(os.path.join(root, script))
+            # A wrapper that only `exec`s into the real installer: a failed
+            # exec already ends a non-interactive bash, so `set -e` here
+            # guards nothing - the target is what's checked.
+            if delegated and script != delegated and all(
+                    not l.strip() or l.startswith("#") or _EXEC_DELEGATE_RX.match(l)
+                    or _DIRNAME_ASSIGN_RX.match(l) for l in body.splitlines()):
+                continue
+            pos = _set_e_position(body)
+            if pos is None and not re.search(r'\|\|\s*exit\b', body):
                 out.append(Finding(BEST_PRACTICE, "no-set-e",
-                           f"{cand} has no 'set -e' (or `|| exit`) - without it, bash keeps running "
-                           f"the rest of the script even after a command fails, so if an earlier "
-                           f"step errors out (e.g. a dependency install fails), later steps still "
-                           f"run against that broken state and the plugin ends up half-installed "
-                           f"with no visible error.\n"
-                           f"  - Add `set -e` (or `set -euo pipefail`) as the first line after the "
-                           f"shebang so the script stops immediately on the first failure instead"))
-            break
+                           f"{script}{note} has no `set -e` - without it, bash keeps running the rest of the "
+                           f"script even after a command fails, so if an earlier step errors out "
+                           f"(e.g. a dependency install fails), later steps still run against that "
+                           f"broken state and the plugin ends up half-installed with no visible error. "
+                           f"(This is not `exit`: `exit` ends the script where you put it; `set -e` "
+                           f"makes every command after it end the script if that command fails.)\n"
+                           f"  - Add the line `set -e` directly under the `#!/bin/bash` shebang - "
+                           f"before any other command - so the script stops on the first failure. "
+                           f"(Plain `set -e`: `-u` breaks scripts that reference `$SUDO` and the like "
+                           f"before sourcing /opt/fpp/scripts/common, and `pipefail` breaks common "
+                           f"`grep | ...` idioms.) Per-command `... || exit 1` guards are an "
+                           f"acceptable alternative"))
+            elif pos is not None and pos[1]:
+                set_line, unguarded = pos
+                first_line, first_cmd = unguarded[0]
+                n = len(unguarded)
+                out.append(Finding(BEST_PRACTICE, "no-set-e",
+                           f"{script}:{set_line}{note} has `set -e`, but it comes too late to do anything - "
+                           f"`set -e` only affects the commands that run AFTER it, and {n} command"
+                           f"{'s' if n != 1 else ''} already run{'s' if n == 1 else ''} before it "
+                           f"unguarded (first: line {first_line} `{first_cmd}`)"
+                           f"{' - as the last line of the script it protects nothing at all' if _set_e_is_last(body, set_line) else ''}.\n"
+                           f"  - Move `set -e` up to directly under the `#!/bin/bash` shebang, before "
+                           f"any other command. If a particular command is allowed to fail, append "
+                           f"`|| true` to that one line rather than delaying `set -e`"))
+        break
+
+    # A shell function that can `exit` gets called inside a command
+    # substitution on an assignment - `exit` there only ends the subshell, not
+    # the script, so a validator meant to stop the script on bad input instead
+    # silently becomes "the assigned variable is empty/partial".
+    hit = next(iter(_subshell_exit_swallow_hits(root)), None)
+    if hit:
+        out.append(Finding(BEST_PRACTICE, "subshell-exit-swallowed",
+                   f"a shell function that can `exit` is called inside a command substitution on an "
+                   f"assignment ({hit[0]}:{hit[1]}: `{hit[2]}`) - `exit` inside `$( )`/backticks only "
+                   f"ends the subshell, not the calling script, so a validator written to stop on bad "
+                   f"input silently becomes \"assign an empty/partial value\" instead when called "
+                   f"this way.\n"
+                   f"  - Call the function directly (not inside `$()`), and check its exit status "
+                   f"with `$?`/`||` instead of relying on its output; or have it `return` non-zero "
+                   f"without ever calling `exit`"))
 
     # A plugin that ships commands/descriptions.json (command types) or a native
     # lib<repoName>.so (a Makefile at the plugin root - FPP's own core-upgrade
@@ -1786,22 +4509,16 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         any(m < HOTLOAD_INTRODUCED_MAJOR for m in majors) and any(m >= HOTLOAD_INTRODUCED_MAJOR for m in majors)
         for majors in _head_tracking_by_branch.values())
     effective_hotload_safe = hotload_safe and not spans_pre_hotload_major
+    # ONE rule about the flag: no-restart-flag, below, and only when the flag is
+    # missing where FPP needs it. Keeping a restart flag is never a defect, so
+    # nothing here ever asks for its removal ("restart-likely-not-required") or
+    # explains why it must stay when it is already set
+    # ("hotload-safe-but-spans-pre-hotload-fpp") - both fired on plugins that were
+    # already correct, could not be cleared without either dropping a harmless
+    # flag or restructuring versions[], and kept tracking issues from ever going
+    # clean (fpp-data#136, #236, #241). A plugin with the flag set everywhere it
+    # is needed gets no restart-flag finding under any versions[] shape.
 
-    if effective_hotload_safe and ships_native:
-        out.append(Finding(OPTIONAL, "restart-likely-not-required",
-                   "doesn't register HTTP routes directly on drogon::app() (outside registerPluginApi()) "
-                   "and defines no createChannelOutput(), so on an FPP build with the plugin load/unload "
-                   "feature (plugin API 6+), install/uninstall should be picked up by fppd without a "
-                   "restart - this plugin likely doesn't need to force one via restartFlag/rebootFlag at "
-                   "those two lifecycle points.\n"
-                   "  - Verify with an actual install/uninstall before relying on it"))
-    elif effective_hotload_safe:
-        out.append(Finding(OPTIONAL, "restart-likely-not-required",
-                   "ships a root callbacks script, so on an FPP build with the plugin load/unload feature "
-                   "(plugin API 6+), PluginManager::loadPlugin() actually calls loadUserPlugin() (which "
-                   "reads commands/descriptions.json) - install/uninstall should register/withdraw this "
-                   "plugin's commands without a restart.\n"
-                   "  - Verify with an actual install/uninstall before relying on it"))
     if ships_commands or ships_native:
         # A reboot flag also satisfies this: a reboot restarts fppd along with
         # everything else, so a plugin that already asks for one (e.g. it also
@@ -1810,7 +4527,14 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         restart_flag_rx = re.compile(
             r'setSetting\s+(restartFlag|rebootFlag)\s+1'
             r'|setSetting\s*\(\s*["\'](restartFlag|rebootFlag)["\']'
-            r'|SetRestartFlag\s*\(|SetRebootFlag\s*\(')
+            r'|SetRestartFlag\s*\(|SetRebootFlag\s*\('
+            # PHP (e.g. a #!/usr/bin/php fpp_uninstall.sh): FPP core's own idiom
+            # (www/backup.php) - writes the same `restartFlag = "1"` line to
+            # media/settings that bash setSetting does, which /api/system/status
+            # reports and the UI banner reads. Two args only: a third (plugin) arg
+            # writes config/plugin.<name> instead. PHP function names are
+            # case-insensitive.
+            r'|(?i:\bWriteSettingToFile)\s*\(\s*["\'](restartFlag|rebootFlag)["\']\s*,\s*["\']?1["\']?\s*\)')
 
         def _restart_flag_gap(cands, required_if_absent):
             """Check one lifecycle slot (a tuple of candidate relative paths, most
@@ -1825,6 +4549,13 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
             is already covered by its own slot - PLUGIN_GUIDELINES.md's "native
             (C++) plugins" section)."""
             existing = [c for c in cands if os.path.isfile(os.path.join(root, c))]
+            # A wrapper that `exec`s into the real script elsewhere in the repo:
+            # the flag can legitimately live in the target, so check it too (in
+            # addition to the wrapper, not instead of it).
+            for c in list(existing):
+                t = _exec_delegation_target(os.path.join(root, c), root)
+                if t and t not in existing:
+                    existing.append(t)
             if any(restart_flag_rx.search(_read(os.path.join(root, c))) for c in existing):
                 return None
             if existing:
@@ -1894,7 +4625,7 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                            f"branch/build to FPP majors before {HOTLOAD_INTRODUCED_MAJOR} too, which "
                            f"have no plugin load/unload feature at all - those installs still need a "
                            f"full fppd restart to pick up install/uninstall.\n"
-                           f"  - Add `source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to "
+                           f"  - Add `{RESTART_FLAG_SNIPPET}` to "
                            f"each script listed above (creating fpp_install.sh/fpp_uninstall.sh if "
                            f"missing - only fpp_upgrade.sh is optional, and only needs it if you "
                            f"already have one); only drop it once you split off a separate FPP "
@@ -1913,30 +4644,12 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                            f"script is the only code that ever runs before removal), so the flag has to "
                            f"be set independently in each one this plugin actually has/needs - fixing it "
                            f"in one script does not cover the others.\n"
-                           f"  - Add `source ${{FPPDIR}}/scripts/common; setSetting restartFlag 1` to each "
+                           f"  - Add `{RESTART_FLAG_SNIPPET}` to each "
                            f"script listed above (creating fpp_install.sh/fpp_uninstall.sh if missing - "
                            f"only fpp_upgrade.sh is optional, and only needs it if you already have one) "
                            f"so the Plugin Manager's restart banner appears right after that step instead "
                            f"of leaving the command silently unavailable/lingering as a ghost until fppd "
                            f"happens to restart for an unrelated reason"))
-        elif hotload_safe and spans_pre_hotload_major:
-            # Only surface this standalone when the flag genuinely IS set everywhere it's
-            # needed (no gaps above) - otherwise it just restates "you need the flag" a
-            # second time alongside no-restart-flag's own concrete gap, reading as two
-            # different problems instead of one (fpp-data#136: this used to fire even
-            # when no-restart-flag ALSO fired for the same plugin, which read as
-            # contradictory - "looks safe" immediately followed by an unrelated-sounding
-            # restart-flag complaint).
-            out.append(Finding(BEST_PRACTICE, "hotload-safe-but-spans-pre-hotload-fpp",
-                       "looks structurally safe to hot-load/unload on its own, but pluginInfo.json's "
-                       f"versions[] declares a single branch/build whose range starts before FPP "
-                       f"{HOTLOAD_INTRODUCED_MAJOR} (where the plugin load/unload feature doesn't "
-                       f"exist at all) and extends into or past it - so this same code also has to "
-                       f"support install/uninstall via a full fppd restart for those older FPP "
-                       f"installs.\n"
-                       f"  - Keep restartFlag/rebootFlag set here regardless; only drop it if you "
-                       f"split off a separate FPP {HOTLOAD_INTRODUCED_MAJOR}+-only branch/sha in "
-                       f"versions[]"))
 
     # --- logging conventions -------------------------------------------------
     log_hit = first(r'''(['"][^'"]*\.log['"])|>>?\s*\S*\.log''')
@@ -2003,9 +4716,233 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"file path outside the plugin's own directory/log/config/playlists territory "
                    f"({hit[0]}:{hit[1]}: `{hit[2]}`).\n"
                    f"  - Store plugin-owned files inside the plugin's own directory "
-                   f"(`${{PLUGINDIR}}/{repo}/...`), FPP's config storage (`/media/config/`), or the "
-                   f"log directory (a real `.log` file only), rather than loose under "
-                   f"`/home/fpp/media/` itself"))
+                   f"(`${{PLUGINDIR}}/{repo}/...`), its runtime-data directory "
+                   f"(`/home/fpp/media/plugindata/{repo}/`), FPP's config storage (`/media/config/`, "
+                   f"for the `plugin.{repo}` settings file only), or the log directory (a real "
+                   f"`.log` file only), rather than loose under `/home/fpp/media/` itself"))
+
+    # Writes into FPP core's own install tree (${FPPDIR} / /opt/fpp) - §5 "never
+    # write into ... FPP core". Unlike the media/ checks this applies to the
+    # install/uninstall hooks too: there is no sanctioned plugin footprint inside
+    # core. The file is untracked and un-ignored in core's git checkout, so FPP's
+    # own `git clean -df` on a branch switch (scripts/git_branch) silently deletes
+    # it, and an FPP upgrade can overwrite it. Real case: fpp-jukebox (2026-10-01,
+    # commit d7da8ab) wrote ${FPPDIR}/www/jukebox.php as a short-URL redirect.
+    hit = next(iter(_core_tree_write_hits(root)), None)
+    if hit:
+        out.append(Finding(BLOCKER, "core-tree-write",
+                   f"writes into FPP core's own install tree - `{hit[3]}` "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`). Plugins may not write into FPP core "
+                   f"(PLUGIN_GUIDELINES §5): the file isn't part of FPP's git checkout, so FPP's "
+                   f"own branch switch (`git clean -df`) deletes it and an FPP update can "
+                   f"overwrite it.\n"
+                   f"  - Keep the file inside the plugin's own directory "
+                   f"(`/home/fpp/media/plugins/{repo}/`) and reach it through FPP's plugin routes "
+                   f"(`plugin.php?plugin={repo}&page=<file>`, add `&nopage=1` for a standalone "
+                   f"page) instead; if you need a short URL for users, show the full plugin URL "
+                   f"on your plugin's own page"))
+
+    # Files a plugin creates under FPP's config directory that don't belong
+    # there: crash reports bundle every file under config/ and can't redact a
+    # binary, so a SQLite DB (AdvancedStats' stats DB, TwilioControl/
+    # MessageQueue's visitor-message DBs) ships whole - BLOCKER. A log/lock/
+    # cache or a non-`plugin.*` text file written there is the wrong place but
+    # redactable - BEST_PRACTICE. See _config_dir_hits for what each tier
+    # triggers on. Sorted by (path, line) and deduped by (kind, filename), so
+    # the first occurrence of each distinct offending file is what's reported.
+    seen_cfg_fnames = set()
+    for rel, lineno, line, fname, kind in sorted(_config_dir_hits(root), key=lambda h: (h[0], h[1])):
+        key = (kind, fname.lower())
+        if key in seen_cfg_fnames:
+            continue
+        seen_cfg_fnames.add(key)
+        if kind == "binary":
+            out.append(Finding(BLOCKER, "config-dir-binary-write",
+                       f"database/binary file `{fname}` under FPP's config directory ({rel}:{lineno}: "
+                       f"`{line}`) - crash reports bundle config/ and cannot redact binaries.\n"
+                       f"  - Write it to `/home/fpp/media/plugindata/{repo}/` instead (`mkdir -p` it in "
+                       f"scripts/fpp_install.sh, then `chown ${{FPPUSER}}:${{FPPGROUP}}` - install scripts "
+                       f"run as root but the web server writes as `fpp`; an existing file can be moved "
+                       f"across there with `mv`/`rename()`, which this check doesn't flag); config/ is "
+                       f"only for the `plugin.{repo}` settings file"))
+        elif kind == "state":
+            out.append(Finding(BEST_PRACTICE, "config-dir-misuse",
+                       f"log/cache/lock/pid file `{fname}` under FPP's config directory ({rel}:{lineno}: "
+                       f"`{line}`) - crash reports bundle config/, and runtime state isn't settings.\n"
+                       f"  - Write logs to `/home/fpp/media/logs/plugin-{repo}.log` and other state to "
+                       f"`/home/fpp/media/plugindata/{repo}/` (`mkdir -p` it in scripts/fpp_install.sh)"))
+        else:
+            out.append(Finding(BEST_PRACTICE, "config-dir-misuse",
+                       f"file `{fname}` written under FPP's config directory with a non-settings name "
+                       f"({rel}:{lineno}: `{line}`) - crash reports bundle config/, where only "
+                       f"`plugin.<repoName>` settings files are expected.\n"
+                       f"  - Settings: name it `plugin.{repo}` / `plugin.{repo}.json` "
+                       f"(WriteSettingToFile/setPluginJSON); anything else: write it to "
+                       f"`/home/fpp/media/plugindata/{repo}/` (`mkdir -p` it in scripts/fpp_install.sh)"))
+
+    # PHP's stock INI parser on a file FPP's WriteSettingToFile() wrote (the
+    # settings file, or a `plugin.<name>` config file). Those files aren't valid
+    # INI once a value holds JSON (written unquoted) or a `"`, and parse_ini_*
+    # silently mangles them: strips every embedded `"`, maps unquoted
+    # yes/on/true -> "1" and no/off/false/none -> "", expands `${...}`, and
+    # returns false for the whole file on one syntax error. FPP core shipped
+    # exactly this bug in 10.1.2 - DeleteSettingFromFile() parsed the settings
+    # file with parse_ini_file() and wrote back a corrupted privacyConsent JSON,
+    # bouncing every page to initialSetup.php (fixed in FPP ca1181176). Reading
+    # alone gives the plugin wrong values; a plugin that writes the parsed array
+    # back corrupts the file the same way core did. BEST_PRACTICE like the other
+    # wrong-API correctness checks - nothing breaks until a value needs quoting.
+    # See _stock_ini_parse_hits for what counts as an FPP-written file.
+    ini_hits = sorted(_stock_ini_parse_hits(root), key=lambda h: (h[0], h[1]))
+    if ini_hits:
+        hit = ini_hits[0]
+        also = ("; also " + ", ".join(f"{h[0]}:{h[1]}" for h in ini_hits[1:4])
+                + (f" (+{len(ini_hits) - 4} more)" if len(ini_hits) > 4 else "")
+                if len(ini_hits) > 1 else "")
+        out.append(Finding(BEST_PRACTICE, "stock-ini-parse-settings",
+                   f"reads an FPP settings/plugin config file with PHP's stock `{hit[3]}()` "
+                   f"({hit[0]}:{hit[1]}: `{hit[2]}`{also}) - FPP leaves JSON values unquoted in these "
+                   f"files, and PHP's INI parser strips the embedded `\"` (JSON comes back as `{{a:1}}`), "
+                   f"turns yes/no into \"1\"/\"\", and fails the whole file on one bad line. FPP 10.1.2 "
+                   f"corrupted its own settings this way (fixed for the next release).\n"
+                   f"  - Use FPP's `ReadSettingFromFile($key, \"{repo}\")` for one value or "
+                   f"`custom_parse_ini_file($file)` (www/common.php) for the whole file; keep "
+                   f"structured data in its own JSON file (`plugin.{repo}.json` via setPluginJSON, "
+                   f"or `/home/fpp/media/plugindata/{repo}/`)"))
+
+    # A file named api.php in the plugin root is not just another page: FPP core's
+    # collectPluginEndpoints() (www/api/controllers/plugin.php:3754) require_once's
+    # it on EVERY /api/* request, expecting it to only declare a
+    # getEndpoints<repoName>() registrar whose routes mount under
+    # /api/plugin/<repoName>/... A plugin that uses that filename for something
+    # else - a page-style AJAX dispatcher reached via plugin.php?page=api.php -
+    # gets loaded on every API call anyway. Confirmed on a live FPP 10 box
+    # (fpp-plugin-SDCardRecover, 2026-09): its api.php did a top-level
+    # require_once "config.php" that can't resolve from www/api/'s cwd, which PHP
+    # 8 surfaces as a catchable Error, so core skipped the plugin - but logged two
+    # lines to media/logs/apache2-error.log per API request (that log ships in
+    # support zips; FPP's status page polls ~1/s). Had the require resolved, the
+    # top-level http_response_code(400) + JSON echo would have prefixed every API
+    # response instead. Even a harmless api.php with no registrar costs one
+    # "no callable getEndpoints* function found" error_log line per request
+    # (plugin.php:3817). The author had documented at length why the getEndpoints
+    # convention "doesn't apply" - confused with the C++ /plugin-apis/ route.
+    #
+    # Two signals: no `function getEndpoints...(` declared at all, and/or a
+    # depth-0 side-effect statement (echo/header/exec/switch/superglobal read).
+    # Validated 2026-09 against the local catalog mirror: all 8 api.php files
+    # there declare a registrar and have 0 top-level side effects.
+    api_php = os.path.join(root, "api.php")
+    if os.path.isfile(api_php):
+        api_src = _read(api_php)
+        api_code = _php_strip_opaque(api_src)
+        # PHP function names are case-insensitive and core resolves the
+        # registrar with is_callable()/stripos(), so match the same way.
+        registrars = re.findall(r'(?im)^\s*function\s+(getEndpoints\w*)\s*\(', api_code)
+        has_registrar = bool(registrars)
+        # FPP 9.x (www/api/index.php) calls exactly `getEndpoints<repoName minus
+        # dashes>` with no fallback - a registrar under any other name is a
+        # fatal on every /api/* request there. Master falls back to any
+        # getEndpoints* the file defined, so the exact name only matters while
+        # versions[] still covers a pre-10 major (same test apt-manual-install
+        # uses).
+        exact_registrar = "getendpoints" + repo.replace("-", "").lower()
+        _vers = (info or {}).get("versions") or []
+        _covers_pre_10 = any(
+            (_major(v.get("minFPPVersion")) or 99) < 10
+            for v in _vers if isinstance(v, dict) and v.get("minFPPVersion"))
+        wrong_name = (has_registrar and _covers_pre_10
+                      and exact_registrar not in {n.lower() for n in registrars})
+        top_hit = next(iter(_api_php_top_level_hits(api_php)), None)
+        if not has_registrar or top_hit or wrong_name:
+            why = []
+            if not has_registrar:
+                why.append("declares no `getEndpoints…()` function")
+            if wrong_name:
+                why.append(f"names its registrar `{registrars[0]}()` but pluginInfo.json still "
+                           f"declares FPP 9 support, where core calls exactly "
+                           f"`getEndpoints{repo.replace('-', '')}()` with no fallback")
+            if top_hit:
+                why.append(f"runs code at top level (api.php:{top_hit[0]}: `{top_hit[1][:80]}`)")
+            out.append(Finding(BLOCKER, "api-php-not-a-registrar",
+                       f"`api.php` {' and '.join(why)} - FPP core require_once's every installed "
+                       f"plugin's api.php on EVERY /api/* request (www/api/controllers/plugin.php, "
+                       f"collectPluginEndpoints()) and expects it to only declare a "
+                       f"`getEndpoints{repo.replace('-', '')}()` registrar for routes under "
+                       f"/api/plugin/{repo}/...\n"
+                       f"  - Anything else in that file executes (or fails to load, with an error_log "
+                       f"line) on every API call from every page, for every user of this plugin - "
+                       f"not just when the plugin's own page is open\n"
+                       f"  - Either rename the file (e.g. `ajax.php`, reached the same way via "
+                       f"plugin.php?page=ajax.php&nopage=1) or turn it into a real registrar: "
+                       f"declare only functions, with getEndpoints…() returning "
+                       f"[['method'=>'GET','endpoint'=>'status','callback'=>'myPluginStatus'], ...]"))
+
+        # Every other installed plugin's api.php is require_once'd into the same
+        # request too (the same fact api-php-not-a-registrar above is built on),
+        # so a plain, GENERIC-named top-level `function`/`class` declared here -
+        # anything besides the getEndpoints…() registrar itself - collides the
+        # moment another plugin's api.php declares the same name. Core (master,
+        # PluginApiFunctionConflicts()) now catches a name that already exists
+        # and skips the whole plugin's API with an error_log line rather than
+        # fataling; FPP 9 fatals with "Cannot redeclare". Two tiers:
+        #   BLOCKER - one of limonade's lifecycle hooks (PluginApiReservedFunctions()
+        #     in plugin.php: configure/initialize/before/after/...). Core refuses
+        #     to load an api.php declaring one at all, because the framework
+        #     call_if_exists()es them on EVERY request and a plugin defining
+        #     autoload_controller() decides whether FPP's own controllers load.
+        #   BEST_PRACTICE - a curated list of short generic names (not "doesn't
+        #     contain the repo slug", which false-positived on every plugin
+        #     using its own abbreviation - fah_deleteStream, hacLog). This can't
+        #     prove another plugin uses the name, only that nothing prevents it.
+        # Only depth-0 declarations count: a class METHOD can't collide with a
+        # global, whatever it's called.
+        top_decls = []
+        depth = 0
+        for line in api_code.splitlines():
+            m = re.match(r'^\s*(?:abstract\s+|final\s+)?(?:function|class)\s+(\w+)', line)
+            if depth == 0 and m and not re.match(r'getEndpoints\w*$', m.group(1), re.I):
+                top_decls.append(m.group(1))
+            depth += line.count('{') - line.count('}')
+        reserved = [n for n in top_decls if n.lower() in _LIMONADE_RESERVED_NAMES]
+        core_clash = [n for n in top_decls if n.lower() in _fpp_api_globals() or n.lower() in _PHP_BUILTIN_NAMES]
+        generic = [n for n in top_decls if n.lower() in _GENERIC_API_NAMES]
+        if reserved:
+            out.append(Finding(BLOCKER, "api-php-namespace-collision",
+                       f"`api.php` declares `{reserved[0]}()`, a lifecycle hook of the limonade "
+                       f"framework FPP's API runs on (configure/initialize/before/after/"
+                       f"autoload_controller/...) - the framework calls these on EVERY /api/* "
+                       f"request, so a plugin defining one silently takes over part of request "
+                       f"handling for every API call; FPP core refuses to register an api.php that "
+                       f"declares any of them (PluginApiReservedFunctions() in "
+                       f"www/api/controllers/plugin.php).\n"
+                       f"  - Rename it (e.g. `{repo.replace('-', '')}_{reserved[0]}`)"))
+        elif core_clash:
+            # Not a "might collide" - it DOES: this name is defined by FPP's own
+            # common.php/config.php/api controllers on every /api/* request,
+            # before any plugin api.php is loaded. FPP 9: fatal "Cannot
+            # redeclare" for every API call; 10+: PluginApiFunctionConflicts()
+            # skips this plugin's whole API with an error_log line.
+            is_builtin = core_clash[0].lower() in _PHP_BUILTIN_NAMES and core_clash[0].lower() not in _fpp_api_globals()
+            out.append(Finding(BLOCKER, "api-php-namespace-collision",
+                       f"`api.php` declares `{core_clash[0]}()`, which "
+                       + ("is a PHP built-in function" if is_builtin else
+                          "FPP core already defines on every /api/* request (www/common.php, "
+                          "config.php or an api controller)") + " - "
+                       f"FPP 9 fatals with \"Cannot redeclare {core_clash[0]}()\" on every API call "
+                       f"for every user of this plugin; FPP 10+ refuses to register this plugin's "
+                       f"API at all (PluginApiFunctionConflicts()).\n"
+                       f"  - Rename it (e.g. `{repo.replace('-', '')}_{core_clash[0]}`)"))
+        elif generic:
+            out.append(Finding(BEST_PRACTICE, "api-php-namespace-collision",
+                       f"`api.php` declares a generic, unprefixed `{generic[0]}` at top level - "
+                       f"api.php is require_once'd for EVERY installed plugin on every /api/* "
+                       f"request, so a same-named function/class in another plugin's api.php is a "
+                       f"collision the moment both are installed together: FPP 9 fatals with "
+                       f"\"Cannot redeclare\", FPP 10+ skips one plugin's whole API with only an "
+                       f"error_log line.\n"
+                       f"  - Prefix it (e.g. `{repo.replace('-', '')}_{generic[0]}`) or move it into "
+                       f"a required file that isn't loaded globally"))
 
     # Log filename doesn't start with the mandated "plugin-" prefix - it still
     # lands in the right directory, just under a name FPP's log viewer/Support
@@ -2109,6 +5046,39 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"vendors, things for sale, or other plugins (yours or anyone else's).\n"
                    f"  - If this is genuinely ad/promotional content, remove it"))
 
+    # Decoding and executing an encoded/compressed payload at runtime is worth
+    # flagging on its own - it's also the most direct way the donation/phone-
+    # home/advertising checks just above get evaded (a base64'd PayPal link, a
+    # gzinflate'd tracking call this tool can't grep for as plain text).
+    # BEST_PRACTICE: this doesn't know whether the payload is malicious or just
+    # unusually packaged, only that a human should read it by hand instead of
+    # trusting the greps above to have seen everything.
+    # Two shapes: decode-and-EXECUTE (eval/assert/exec/`| bash` over a decoder),
+    # and a long base64 LITERAL in the source being decoded - the payload is
+    # shipped inside the code, whatever is then done with it. A base64_decode
+    # of a runtime value (an uploaded data-URL image, a setting) is neither.
+    exec_hit = (first(r'\b(?:eval|assert)\s*\(\s*(?:["\']\?>["\']\s*\.\s*)?'
+                      r'(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev)\s*\(', exts=(".php",))
+                or first(r'\b(?:exec|eval)\s*\(\s*(?:base64\.b64decode|zlib\.decompress|codecs\.decode)\s*\(',
+                         exts=(".py",))
+                or first(r'\bbase64\s+(?:-d|--decode)\b[^|\n]*\|\s*(?:sudo\s+)?(?:bash|sh|python3?|perl)\b',
+                         exts=(".sh",))
+                or first(r'\beval\s*\(\s*atob\s*\(|new\s+Function\s*\(\s*atob\s*\(', exts=(".js",)))
+    literal_hit = None if exec_hit else first(
+        r'\b(?:base64_decode|base64\.b64decode|atob)\s*\(\s*["\']'
+        r'(?!iVBORw0K|/9j/|R0lGOD|PHN2Zy|UklGR|Qk[0-9A-Za-z]|AAABAA)[A-Za-z0-9+/=\s]{60,}["\']',   # not PNG/JPEG/GIF/SVG/WEBP/BMP/ICO
+        exts=(".php", ".py", ".js"))
+    hit = exec_hit or literal_hit
+    if hit:
+        what = ("decodes and executes an encoded/compressed payload at runtime" if exec_hit
+                else "ships an encoded payload inside the source and decodes it at runtime")
+        out.append(Finding(BEST_PRACTICE, "obfuscated-code",
+                   f"{what} ({hit[0]}:"
+                   f"{hit[1]}: `{hit[2][:100]}`) - this is also how a donation link, phone-home call, or ad "
+                   f"could evade the checks above (base64/gzinflate'd instead of plain text).\n"
+                   f"  - Ship the code plainly instead of encoding/compiling it at runtime, so it's "
+                   f"actually reviewable; if there's a genuine reason for it, explain via `/submit`"))
+
     # A plugin that sets up/depends on a third-party tunneling or remote-access
     # service (Dataplicity, ngrok, Cloudflare Tunnel, Tailscale, ZeroTier, ...) has
     # to say so in pluginInfo.json's description, not just a README/setup page -
@@ -2140,6 +5110,12 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        f"expose their FPP box's control surface to the internet through a third "
                        f"party - say what the service is and why it's needed directly in the "
                        f"description field, not just a README or setup page"))
+
+    # Privacy disclosure vs the code (PLUGIN_GUIDELINES.md §14): a missing
+    # `privacy` block, a block the code contradicts (privacy-undeclared-*), and
+    # any touch of FPP's own privacy settings. Same family as phone-home /
+    # tunnel-service-undisclosed above - disclosure rules, not code-quality ones.
+    out.extend(_privacy_findings(root, info, own_owner))
 
     # --- repo hygiene --------------------------------------------------------
 
@@ -2237,15 +5213,133 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    "  - Add a local icon.png (128x128 or 256x256, repo root) so it renders offline "
                    "once installed; keep iconURL as the pre-install fallback"))
 
-    # installs a systemd unit but ships no uninstall script
-    if first(r'/etc/systemd/system/|systemctl\s+enable') and \
-       not (os.path.isfile(os.path.join(root, "scripts/fpp_uninstall.sh")) or
+    # Release notes (FPP 10+): the Plugin Manager only offers a Release Notes
+    # icon/link when pluginInfo.json says how to get them (releaseNotesStyle).
+    # Omitted or "none" means users see nothing before/after an update - not a
+    # defect, so OPTIONAL, but worth a nudge since most plugins can just say
+    # "gitHistory" (the commits an update would bring in) with no other work.
+    # Only checked when info is present at all - the schema/plugininfo blockers
+    # already cover a missing or unreadable pluginInfo.json.
+    if info is not None:
+        rns = info.get("releaseNotesStyle")
+        if not rns or rns == "none":
+            has_script = os.path.isfile(os.path.join(root, "scripts", "fpp_releasenotes.sh"))
+            out.append(Finding(OPTIONAL, "no-release-notes-style",
+                       f"pluginInfo.json has no `releaseNotesStyle`"
+                       f"{' (it is \"none\")' if rns == 'none' else ''} - FPP 10+'s Plugin Manager "
+                       f"shows a Release Notes link only when this says where to get them, so users "
+                       f"currently see nothing about what an update changes.\n"
+                       f"  - Add `\"releaseNotesStyle\": \"gitHistory\"` (the commits between the "
+                       f"installed clone and the branch tip - no extra work), or `\"gitRelease\"` if "
+                       f"you publish GitHub Releases with notes"
+                       + (f", or `\"script\"` since scripts/fpp_releasenotes.sh already exists"
+                          if has_script else "")
+                       + "; see the `releaseNotesStyle` entry in pluginInfo.schema.json"))
+
+    # fpp_install.sh creates state OUTSIDE the plugin's own directory - a
+    # systemd unit, a cron entry, a sudoers/udev/kernel-module rule, or a
+    # write to /etc or one of FPP's own config files/settings - but the
+    # plugin ships no fpp_uninstall.sh at all to revert any of it. FPP's
+    # uninstall (scripts/uninstall_plugin, core) deletes only the plugin's
+    # own directory - anything reaching outside it needs fpp_uninstall.sh to
+    # actually go away, and a plugin with none has no chance of reverting
+    # anything, whatever shape that state takes.
+    #
+    # Generalizes what used to be a systemd-only version of this check to
+    # every "reaches outside the plugin directory" signal the privacy checks
+    # already detect (_priv_service_hits/_priv_privilege_hits/
+    # _priv_core_write_hits, reused rather than reimplemented - each already
+    # skips rm/disable/uninstall-shaped lines and is tuned for a low false-
+    # positive rate there), plus a fourth, install-hook-specific source:
+    # _PRIV_MEDIA_WRITE_RX catches a file dropped into one of FPP's OTHER
+    # shared media subdirectories (media/scripts, media/images, ...) - an
+    # orphaned script that stays schedulable in FPP's own Scripts UI, or a
+    # stray asset, after the plugin is gone (real, not hypothetical:
+    # fpp-PictureFrame, fpp-jukebox). Deliberately existence-only (no
+    # fpp_uninstall.sh at all, not "exists but its cleanup isn't literally
+    # matchable") - cron-no-uninstall below already owns that narrower,
+    # regex-blind-spot-prone case for cron specifically; a plugin missing
+    # uninstall entirely can trip both, which is fine.
+    if not (os.path.isfile(os.path.join(root, "scripts/fpp_uninstall.sh")) or
             os.path.isfile(os.path.join(root, "fpp_uninstall.sh"))):
-        out.append(Finding(BLOCKER, "no-uninstall",
-                   "creates a systemd service but ships no fpp_uninstall.sh to remove it.\n"
-                   "  - Add one that mirrors the install, e.g. `systemctl disable --now <unit> && "
-                   "rm -f /etc/systemd/system/<unit>`, so removing the plugin doesn't leave an "
-                   "orphaned service behind"))
+        # The _priv_* helpers walk the WHOLE tree, so a nested file that happens
+        # to be named fpp_install.sh is already seen by the basename filter. A
+        # root fpp_install.sh that just `exec`s into the real installer
+        # elsewhere in the repo is the same thing logically but need not share
+        # the filename, so the target is accepted by path as well (in addition
+        # to the wrapper, not instead of it).
+        deleg_rels = set()
+        for _c in ("scripts/fpp_install.sh", "fpp_install.sh"):
+            _t = _exec_delegation_target(os.path.join(root, _c), root)
+            if _t:
+                deleg_rels.add(_t)
+
+        def _from_install_hook(rel: str) -> bool:
+            return os.path.basename(rel) == "fpp_install.sh" or rel in deleg_rels
+
+        # Two tiers. An ARTIFACT the plugin itself created outside its dir - a
+        # unit/cron file, an /etc file, a sudoers/udev/modules entry, a file
+        # dropped into media/scripts etc. - is orphaned for good when the dir is
+        # deleted: BLOCKER. A STATE CHANGE to something that already existed -
+        # `systemctl enable smbd` (Debian's own unit; fpp-PictureFrame does this
+        # and it's FPP's own Service_smbd_nmbd toggle), an FPP setting, a group
+        # membership, setcap - is a real "reaches outside" fact worth an
+        # uninstall step, but reverting it can be wrong (switching off a file
+        # share the user relies on), so BEST_PRACTICE.
+        created, changed = [], []
+        repo_units = {os.path.basename(f).lower()
+                      for f in _iter_files(root, (".service", ".timer", ".socket"))}
+        for unit, hits in _priv_service_hits_all(root).items():
+            hook_hits = [h for h in hits if _from_install_hook(h[0])]
+            if not hook_hits:
+                continue
+            ships_unit = (any(_PRIV_UNIT_FILE_RX.search(h[2]) for h in hook_hits)
+                          or any(f"{unit}{ext}" in repo_units for ext in (".service", ".timer", ".socket")))
+            hit = next((h for h in hook_hits if _PRIV_UNIT_FILE_RX.search(h[2])), hook_hits[0])
+            (created if ships_unit else changed).append(
+                (f"{'service/cron entry' if ships_unit else 'enables system service'} `{unit}`", hit))
+        for kind, hit in _priv_privilege_hits(root).items():
+            if _from_install_hook(hit[0]):
+                # A FILE under /etc (sudoers.d, udev rules.d, modules-load.d)
+                # is an artifact; a bare `modprobe x` / `udevadm control
+                # --reload` / `dtoverlay` is gone at reboot - nothing to revert.
+                artifact = (kind in ("sudoers", "udev rule", "kernel module")
+                            and re.search(r'/etc/(?:sudoers|udev|modules)', hit[2]) is not None)
+                (created if artifact else changed).append((f"privilege change ({kind})", hit))
+        seen_targets = set()
+        for hit in _priv_core_write_hits(root):
+            if _from_install_hook(hit[0]) and hit[3] not in seen_targets:
+                seen_targets.add(hit[3])
+                (created if hit[3].startswith("/etc/") else changed).append(
+                    (f"write to `{hit[3]}`", hit[:3]))
+        for rel, i, line, target in _priv_media_write_hits(root):
+            if _from_install_hook(rel):
+                created.append((f"file dropped in `{target}`", (rel, i, line)))
+        # One line per kind - PictureFrame copies two scripts into media/scripts
+        # and writes the same setting twice; listing each is noise.
+        _seen_kinds: set[str] = set()
+        external = [(k, h) for k, h in created + changed
+                    if not (k in _seen_kinds or _seen_kinds.add(k))]
+        if external:
+            kinds = ", ".join(k for k, _ in external[:4])
+            more = f" (+{len(external) - 4} more)" if len(external) > 4 else ""
+            first_hit = external[0][1]
+            where = (f" (in {first_hit[0]}, the real installer it `exec`s into)"
+                     if first_hit[0] in deleg_rels else "")
+            out.append(Finding(BLOCKER if created else BEST_PRACTICE, "no-uninstall",
+                       f"fpp_install.sh{where} {'creates state' if created else 'changes system state'} "
+                       f"outside the plugin's own directory - {kinds}{more} "
+                       f"({first_hit[0]}:{first_hit[1]}: `{first_hit[2]}`) - but ships no "
+                       f"fpp_uninstall.sh to revert any of it.\n"
+                       f"  - Add fpp_uninstall.sh that reverts each install step above (e.g. "
+                       f"`systemctl disable --now <unit> && rm -f /etc/systemd/system/<unit>` for a "
+                       f"service the plugin installed, `crontab -l | grep -v <marker> | crontab -` "
+                       f"for cron, `rm -f` for a file dropped elsewhere), so removing the plugin "
+                       f"doesn't leave it behind - FPP's uninstall only deletes the plugin's own "
+                       f"directory"
+                       + ("" if created else
+                          "\n  - For a pre-existing service or an FPP setting the user may rely on, "
+                          "reverting only what the plugin itself turned on is enough")))
 
     # Generalizes the systemd check above to cron: registers a cron entry
     # (directly, or via python-crontab/similar) but fpp_uninstall.sh never
@@ -2255,16 +5349,30 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     if cron_hit:
         uninstall_p = next((p for p in (os.path.join(root, "scripts/fpp_uninstall.sh"),
                                          os.path.join(root, "fpp_uninstall.sh")) if os.path.isfile(p)), None)
+        # A wrapper fpp_uninstall.sh that just `exec`s into the real uninstaller
+        # elsewhere in the repo hands the whole process over, so the cron
+        # cleanup can legitimately live in the target: check that body too (in
+        # addition to the wrapper's, not instead of it - either one having the
+        # cleanup satisfies this).
+        uninstall_deleg = _exec_delegation_target(uninstall_p, root) if uninstall_p else None
         uninstall_body = _read(uninstall_p) if uninstall_p else ""
+        if uninstall_deleg:
+            uninstall_body += "\n" + _read(os.path.join(root, uninstall_deleg))
         # Recognize the idiomatic (and correct) removal pattern too: `crontab -l
         # | grep -v <marker> | crontab -` replaces the crontab with everything
         # EXCEPT the matched entry - this is more common, and safer, than a
         # blanket `crontab -r` (which wipes the user's entire crontab).
-        has_cleanup = re.search(r'remove_all|crontab\s+-r|cron\.d/.*rm\b', uninstall_body) \
+        # For /etc/cron.d entries the normal spelling is `rm -f /etc/cron.d/<name>`
+        # (rm BEFORE the path); the earlier `cron\.d/.*rm\b` only matched rm AFTER
+        # the path, which false-positived every plugin using the normal form.
+        has_cleanup = re.search(r'remove_all|crontab\s+-r|\brm\b.*cron\.d/|cron\.d/.*\brm\b', uninstall_body) \
             or re.search(r'crontab\s+-l.*\|.*grep\s+-v.*\|.*crontab\s+-', uninstall_body)
         if not has_cleanup:
+            never = (f"neither fpp_uninstall.sh nor {uninstall_deleg} (the real uninstaller it "
+                     f"`exec`s into) removes it" if uninstall_deleg
+                     else "fpp_uninstall.sh never removes it")
             out.append(Finding(BLOCKER, "cron-no-uninstall",
-                       f"registers a cron entry but fpp_uninstall.sh never removes it ({cron_hit[0]}:"
+                       f"registers a cron entry but {never} ({cron_hit[0]}:"
                        f"{cron_hit[1]}: `{cron_hit[2]}`).\n"
                        f"  - Add cleanup to fpp_uninstall.sh (e.g. `crontab -l | grep -v <marker> | "
                        f"crontab -`, or the removal call for whatever cron library you used to "
@@ -2300,26 +5408,23 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # by that long, every time - guideline 2.6 again, same class as
     # blocking-build-in-hook. fpp_install.sh/fpp_uninstall.sh are excluded: they
     # run once at install/uninstall time, not on every fppd start/stop.
-    hit = None
-    for dirpath, dirnames, filenames in os.walk(root):
-        if ".git" in dirnames:
-            dirnames.remove(".git")
-        for fn in filenames:
-            if fn.startswith(("preStart", "postStart", "preStop", "postStop")):
-                p = os.path.join(dirpath, fn)
-                for i, line in enumerate(_read(p).splitlines(), 1):
-                    if _is_comment_line(line):
-                        continue
-                    if re.search(r'\bsleep\s+[0-9.]+', line):
-                        hit = (os.path.relpath(p, root), i, line.strip())
-                        break
-                if hit:
-                    break
-        if hit:
-            break
-    if hit:
+    #
+    # Originally any sleep anywhere in the file, no check for whether it was
+    # actually reachable synchronously - a false-positive audit found it
+    # firing exclusively on the two patterns its own remediation text
+    # recommends (a backgrounded wait-for-ready helper, a bounded liveness-
+    # polling retry loop), never on a genuinely flat blocking delay. See
+    # _blocking_sleep_in_hook_hits() for what now suppresses a hit.
+    sleep_hits = list(_blocking_sleep_in_hook_hits(root))
+    if sleep_hits:
+        hit = sleep_hits[0]
+        # Name every flat sleep, not just the first - an author who fixes one
+        # and gets the same finding back on the next line has been told nothing.
+        also = ("; also " + ", ".join(f"{h[0]}:{h[1]}" for h in sleep_hits[1:4])
+                + (f" (+{len(sleep_hits) - 4} more)" if len(sleep_hits) > 4 else "")
+                if len(sleep_hits) > 1 else "")
         out.append(Finding(BEST_PRACTICE, "blocking-sleep-in-hook",
-                   f"unconditional sleep in a lifecycle hook ({hit[0]}:{hit[1]}: `{hit[2]}`) - this "
+                   f"unconditional sleep in a lifecycle hook ({hit[0]}:{hit[1]}{hit[3]}: `{hit[2]}`{also}) - this "
                    f"blocks fppd startup/shutdown for that long on every run.\n"
                    f"  - If you're waiting on a background process, poll for the actual condition "
                    f"(e.g. the PID file existing, or the port accepting connections) with a short "
@@ -2404,32 +5509,23 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"  - Remove it, or narrow it to a specific error_reporting level you actually "
                    f"intend to suppress"))
 
-    # Synchronous busy-wait poll loop (a sleep() inside a while/do loop) in a
-    # PHP file - if that file is directly reachable as a page (not just a CLI
-    # script), it ties up an Apache/PHP-FPM worker for the whole poll duration.
-    # BEST_PRACTICE, not OPTIONAL: genuinely needs real parsing to tell a page
-    # from a CLI-only script reliably, so this can't prove reachability - same
-    # "flag for a human to check reachability rather than treat as proven"
-    # reasoning as destructive-no-csrf/device-path-no-allowlist above (both
-    # BEST_PRACTICE), not a cosmetic/polish item like the true OPTIONAL findings
-    # (no-icon, no-readme, no-resource-hints) - the underlying concern here is a
-    # real reliability issue (worker exhaustion), same class as
+    # Synchronous busy-wait poll loop (an unbounded while(true)/for(;;) with a
+    # sleep() call) in a PHP file that shows no sign of being CLI-only - if
+    # this file is directly reachable as a page (not just a background
+    # daemon), it ties up an Apache/PHP-FPM worker for the whole poll
+    # duration. BEST_PRACTICE, not OPTIONAL: the underlying concern is a real
+    # reliability issue (worker exhaustion), same class as
     # blocking-sleep-in-hook, if the precondition holds.
-    hit = None
-    for path in _iter_files(root, (".php",)):
-        rel = os.path.relpath(path, root)
-        if _skippable(rel):
-            continue
-        lines = _read(path).splitlines()
-        for i, line in enumerate(lines):
-            if _is_comment_line(line) or not re.search(r'\b(while|do)\s*[({]', line):
-                continue
-            window = "\n".join(lines[i:i + 10])
-            if re.search(r'\bsleep\s*\(', window):
-                hit = (rel, i + 1, line.strip())
-                break
-        if hit:
-            break
+    #
+    # Originally any `while`/`do` loop with a sleep() nearby, no CLI-guard
+    # check at all - a false-positive audit found it landing on every one of
+    # its real-world hits, ALL of them background *_listener.php/*-bg.php
+    # daemons (remote-falcon, showpilot-plugin, fpp-sms-control-too,
+    # fpp-SETIQ), several with their own explicit `php_sapi_name() !== 'cli'`
+    # guard the old check never looked for, plus one bounded retry-wait loop
+    # (FPP-Plugin-Matrix-Message) that was never an unbounded poll in the
+    # first place. See _busy_wait_poll_hits() for what now suppresses a hit.
+    hit = next(iter(_busy_wait_poll_hits(root)), None)
     if hit:
         out.append(Finding(BEST_PRACTICE, "busy-wait-poll",
                    f"busy-wait poll loop with sleep() ({hit[0]}:{hit[1]}: `{hit[2]}`) - if this file "
@@ -2445,10 +5541,30 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # a proven defect - a documentation-adherence nudge, not a bug report.
     # minMemoryMB/minCpuCores are top-level pluginInfo.json fields (describe the
     # plugin as a whole, no per-version override) - NOT nested in versions[].
+    #
+    # A Makefile/CMakeLists.txt's mere existence used to be enough on its own to
+    # trigger this - dropped (2026-09-19) because every native FPP plugin ships
+    # one just to build its .so, so that half of the check was really detecting
+    # "written in C++", not "compute/memory heavy" (~22% false-positive rate
+    # across the plugin corpus, firing on trivially light native plugins like
+    # fpp-midi/fpp-osc/fpp-brightness that just happen to be C++). A build file
+    # is still a signal, but only when it links a genuinely heavy library -
+    # ffmpeg/opencv/libcamera - not merely for existing. The source/script scan
+    # for the same libraries is widened past .cpp/.c/.h/.hpp/.py to .sh/.php/.js
+    # too, since the common real case here is a plugin shelling out to the
+    # ffmpeg binary rather than linking against it, which the old exts list
+    # couldn't see at all.
     has_hint = bool((info or {}).get("minMemoryMB") or (info or {}).get("minCpuCores"))
+    heavy_lib_rx = r'\b(ffmpeg|opencv|libcamera|videocapture|tensorflow|tflite|torch|mediapipe|gstreamer)\b'
+    build_files = [p for p in _iter_files(root)
+                   if os.path.basename(p).lower() in ("makefile", "cmakelists.txt")]
+    links_heavy_lib = any(
+        re.search(r'-lav(?:codec|format|util)\b|-lswscale\b|-lopencv|pkg-config[^\n]*'
+                  r'(?:opencv|libav|libcamera)', _read(p), re.I)
+        for p in build_files)
     looks_heavy = (not has_hint) and (
-        any(n.lower() in ("makefile", "cmakelists.txt") for n in lower)
-        or first(r'\b(ffmpeg|opencv|libcamera|videocapture)\b', exts=(".cpp", ".c", ".h", ".hpp", ".py")))
+        links_heavy_lib
+        or first(heavy_lib_rx, exts=(".cpp", ".c", ".h", ".hpp", ".py", ".sh", ".php", ".js")))
     if looks_heavy:
         out.append(Finding(OPTIONAL, "no-resource-hints",
                    "looks potentially compute/memory heavy (native build / video-capture-shaped code) "
@@ -2464,9 +5580,16 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # (not just deprecated) - a plugin still on this overload no longer compiles
     # against current FPP headers at all, it's not a soft "borrowed time" nudge
     # anymore.
+    # Skipped when the repo ALSO defines the no-arg registerApis(): that's the
+    # shape of a plugin serving one branch to FPP 8/9 and 10+ (versions[] with
+    # both ranges) and keeping the legacy overload under an
+    # `#if FPP_PLUGIN_API_VERSION >= 6 ... #else` guard - _grep is line-by-line
+    # and can't see the guard, so without this gate the ported plugin stays
+    # flagged forever (fpp-gameday, fpp-data#281). has_own_register_apis is
+    # computed above (hotload_safe/unsafe_direct_routes).
     hit = first(r'(register|unregister)Apis\s*\(\s*httpserver::webserver',
                exts=(".cpp", ".c", ".h", ".hpp"))
-    if hit:
+    if hit and not has_own_register_apis:
         out.append(Finding(BLOCKER, "deprecated-httpserver-api",
                    f"implements the removed registerApis(httpserver::webserver*) overload "
                    f"({hit[0]}:{hit[1]}: `{hit[2]}`) instead of the modern no-arg registerApis() - "
@@ -2582,6 +5705,43 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                        "reports success, only the memory is never returned.\n"
                        "  - Verify with `nm -D lib<repoName>.so | awk '$2==\"u\"'` after a build; a "
                        "non-empty result means this plugin needs the flag"))
+
+        # FPP's plugin loader (src/Plugins.cpp loadUserPlugin) dlopen()s a
+        # native plugin's .so from the plugin dir by one of exactly two names:
+        # `lib<dirName>.so` by default, or whatever file the callbacks script
+        # names with `c++:<file>` (an override honoured since 2019). A Makefile
+        # whose BUILD TARGET is some other lib*.so means the artifact never
+        # matches either, so the plugin never loads - fppd does log "Failed to
+        # find shlib" and raises a "Could not load plugin" warning banner, but
+        # the plugin itself is inert. BLOCKER: not degraded, non-functional.
+        # Only build targets count (`all: libx.so`, `libx.so:` rule, `TARGET =`,
+        # `-o libx.so`) - a `$(SRCDIR)/libfpp.so` dependency or a `rm -f` in
+        # clean isn't what the plugin builds. `$(SHLIB_EXT)` is how every
+        # first-party Makefile spells the extension, so it's normalised to .so.
+        # The comparison is case-sensitive: dlopen() on ext4 is.
+        expected = _expected_shlib_names(root, repo)
+        built = _makefile_shlib_targets(makefile_text)
+        # Only when the callbacks script actually tells fppd to dlopen()
+        # something - a script plugin whose Makefile builds a ctypes helper
+        # .so is never loaded by fppd at all.
+        prints_cpp = bool(first(r'''(echo|print|printf)\s*\(?\s*["']c\+\+''', exts=(".sh", ".pl", ".php", ".py")))
+        if prints_cpp and built and not (built & expected):
+            wrong = sorted(built)[0]
+            exp = sorted(expected)[0]
+            case_only = wrong.lower() == exp.lower()
+            out.append(Finding(BLOCKER, "so-name-mismatch",
+                       f"Makefile builds `{wrong}`, which doesn't match `{exp}` - FPP's plugin "
+                       f"loader (Plugins.cpp loadUserPlugin) dlopen()s a native plugin from its "
+                       f"directory as `lib<repoName>.so` (repoName `{repo}`) unless the callbacks "
+                       f"script prints `c++:<file>` to name a different one, so a build that "
+                       f"produces any other filename never loads - fppd logs \"Failed to find "
+                       f"shlib\" and shows a \"Could not load plugin\" warning, and the plugin is "
+                       f"inert.\n"
+                       + (f"  - The names differ only in case - dlopen() is case-sensitive on the "
+                          f"Pi's filesystem, so this still fails\n" if case_only else "")
+                       + f"  - Rename the Makefile's build target to `{exp}`, or have the callbacks "
+                       f"script print `c++:{wrong}` so fppd loads the file the build actually "
+                       f"produces"))
 
     # A plugin registering HTTP routes but shipping no apiDocs.json (FPP commit
     # 006f389dc) - not wrong, but every route it serves shows up under "Undocumented

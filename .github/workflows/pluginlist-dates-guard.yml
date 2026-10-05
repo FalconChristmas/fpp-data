@@ -1,0 +1,53 @@
+# Re-checks pluginList.json's dateAdded values on every push to master.
+#
+# validate-pluginlist.yml enforces "dateAdded never changes" on pull requests, but
+# a PR runs its own copy of the validator, and admin merges, direct pushes and the
+# removal bot (remove-plugin-verify.yml) never run it at all. This compares the
+# pushed pluginList.json with the one before it and fails - a red X on the master
+# commit - when a date changed or disappeared, or is malformed. It runs the PARENT
+# commit's copy of check_listing_dates.py, so a push can't weaken the check that
+# judges it. A deliberate correction shows up here too; that's the audit trail.
+
+name: ZZ - Automation - Guard pluginList dates
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "pluginList.json"
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Compare dateAdded with the previous commit
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          # The commit the push replaced; for a new branch or a forced push that
+          # lost it, fall back to the first parent.
+          if [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null \
+             || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE="$(git rev-parse HEAD~1)"
+          fi
+          git show "$BEFORE:pluginList.json" > "$RUNNER_TEMP/old_pluginList.json"
+          # The checker as it was before this push; the current one only if it is new.
+          if git show "$BEFORE:.github/scripts/check_listing_dates.py" > "$RUNNER_TEMP/check_listing_dates.py" 2>/dev/null; then
+            CHECK="$RUNNER_TEMP/check_listing_dates.py"
+          else
+            CHECK=".github/scripts/check_listing_dates.py"
+          fi
+          python "$CHECK" --old "$RUNNER_TEMP/old_pluginList.json" --new pluginList.json
