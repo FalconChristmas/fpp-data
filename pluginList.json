@@ -59,6 +59,7 @@
             [ "FPP-Plugin-DailyShowCountdown", "https://raw.githubusercontent.com/colinedwards308/FPP-Plugin-DailyShowCountdown/refs/heads/main/pluginInfo.json", "Messaging", "2026-09-21" ],
             [ "fpp-plugin-textmylights", "https://raw.githubusercontent.com/thespica93/fpp-plugin-textmylights/refs/heads/stable/pluginInfo.json", "Messaging", "2026-10-03" ],
             [ "fpp-EncoreRadio", "https://raw.githubusercontent.com/focusedonsound/fpp-EncoreRadio/refs/heads/master/pluginInfo.json", "Audio", "2026-10-05" ],
-            [ "fpp-santa-tracker", "https://raw.githubusercontent.com/AtlJim965/fpp-santa-tracker/refs/heads/main/pluginInfo.json", "Messaging", "2026-10-15" ]
+            [ "fpp-santa-tracker", "https://raw.githubusercontent.com/AtlJim965/fpp-santa-tracker/refs/heads/main/pluginInfo.json", "Messaging", "2026-10-15" ],
+            [ "fpp-plugin-naughtynice", "https://raw.githubusercontent.com/jjarboe01/fpp-plugin-naughtynice/refs/heads/main/pluginInfo.json", "Interaction", "2026-10-19" ]
         ]
 }
