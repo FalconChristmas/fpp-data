@@ -337,6 +337,33 @@ class Contradictions(unittest.TestCase):
             self.assertEqual(codes(privacy_findings({"srv.py": "s.bind(('', 5005))\n"}, pv)), [], level)
         self.assertEqual(codes(privacy_findings({"srv.py": "s.bind(('127.0.0.1', 5005))\n"}, EMPTY_PRIVACY)), [])
 
+    def test_unix_socket_is_not_a_listener(self):
+        # fpp-plugin-FalconBeat (PR #299): listen(backlog) on an AF_UNIX socket,
+        # with a loopback TCP fallback, was reported as an open port.
+        local = {
+            "d.py": "SOCK = '/home/fpp/media/plugindata/x/x.sock'\n"
+                    "if HAS_UNIX:\n    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n    srv.bind(SOCK)\n"
+                    "else:\n    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    srv.bind(('127.0.0.1', 0))\n"
+                    "srv.listen(8)\n",
+            "u.php": "<?php\n$s = stream_socket_server('unix:///run/x.sock', $errno, $errstr);\n",
+            "x.socket": "[Socket]\nListenStream=/run/x.sock\n",
+            "c.cpp": "struct sockaddr_un a;\nint fd = socket(AF_UNIX, SOCK_STREAM, 0);\n"
+                     "if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {}\nlisten(fd, 5);\n",
+        }
+        self.assertEqual(codes(privacy_findings(local, EMPTY_PRIVACY)), [])
+        for files in (
+            # same listen(8), but the socket is TCP on all interfaces
+            {"d.py": "srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\nsrv.bind(('', 5005))\nsrv.listen(8)\n"},
+            # one of two binds is off-box
+            {"d.py": "srv = socket.socket(socket.AF_UNIX)\nsrv.bind(PATH)\nsrv = socket.socket(socket.AF_INET)\n"
+                     "srv.bind(('0.0.0.0', 5005))\nsrv.listen(8)\n"},
+            # a tuple-variable bind on a TCP socket stays a listener
+            {"d.py": "srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\nsrv.bind(addr)\nsrv.listen(8)\n"},
+            {"x.socket": "[Socket]\nListenStream=5005\n"},
+            {"c.cpp": "struct sockaddr_in a;\nstruct sockaddr_un b;\nif (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {}\n"},
+        ):
+            self.assertEqual(codes(privacy_findings(files, EMPTY_PRIVACY)), ["privacy-undeclared-listeners"], files)
+
     def test_network_or_tunnel_change_declares_listener(self):
         # A-16: the port may be declared as what was opened (systemChanges) rather
         # than by its reach (remoteAccess); either covers the listener.
