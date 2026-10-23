@@ -963,6 +963,15 @@ class Schema(unittest.TestCase):
         info["privacy"]["summary"] = "x" * 500
         self.assertIsNone(self.check(info))
 
+    def test_submission_token_allowed(self):
+        # scan_submission.py's owner-unconfirmed blocker tells the submitter to add
+        # it - the schema check must not then reject the file for carrying it.
+        info = copy.deepcopy(BASE_INFO)
+        info["submissionToken"] = "fpp-7"
+        self.assertIsNone(self.check(info))
+        info["submissionToken"] = 7
+        self.assertIsNotNone(self.check(info))
+
 
 
 
