@@ -1499,9 +1499,33 @@ def _device_path_no_allowlist_hits(root: str, exts=(".cpp", ".c", ".h", ".hpp", 
             if not build_rx.search(line):
                 continue
             lo, hi = max(0, i - window), min(len(lines), i + window)
-            if not allowlist_rx.search("\n".join(lines[lo:hi])):
-                yield rel, i + 1, line.strip()
-                break
+            if allowlist_rx.search("\n".join(lines[lo:hi])):
+                continue
+            if _same_var_guard_before(build_rx.search(line).group(0), lines[lo:i + 1]):
+                continue
+            yield rel, i + 1, line.strip()
+            break
+
+
+def _same_var_guard_before(build: str, before: list) -> bool:
+    """True if the variable concatenated in `build` is validated in `before` (the
+    window up to and including the build line) by an anchored ^...$ regex match
+    (preg_match / re.match / re.fullmatch / std::regex_match) or a membership test
+    (in_array / Python `in`). Catches allow-lists that don't spell out USB/ACM/AMA -
+    FPP-Plugin-Projector-Control's `preg_match('/^tty[ASU][A-Z0-9]+$/', $DEVICE)`
+    (fpp-data#205), flagged both as an if-guard and as an inline ternary. An
+    unanchored pattern, a guard on a different variable, or one after the build
+    line doesn't count."""
+    vm = re.search(r'["\']\s*[+.]\s*(\$?\w+)|\{(\w+)', build)
+    if not vm:
+        return False
+    var = re.escape(vm.group(1) or vm.group(2)) + r'(?!\w)'
+    guard_rx = re.compile(
+        r'(?:preg_match|re\.(?:full)?match|regex_match)\s*\(\s*r?([\'"])[^\'"\n]*\^[^\'"\n]*\$[^\'"\n]*\1\s*,\s*' + var
+        + r'|regex_match\s*\(\s*' + var
+        + r'|in_array\s*\(\s*' + var
+        + r'|(?<![\w$])' + var + r'\s+in\s+[\w({\[]')
+    return bool(guard_rx.search("\n".join(before)))
 
 
 def _socket_port_hits(root: str, port: int, exts=SCRIPT_EXT, window: int = 3):
@@ -2390,11 +2414,13 @@ def _priv_privilege_hits(root: str) -> dict[str, tuple[str, int, str]]:
 
 # Only sensor types with an unmistakable code signature. `presence`/`gpio-input`
 # are disclosed by the author but not grepped for: a GPIO read is far too generic.
+# A CLI flag whose meaning changes with case is scoped (?-i:) inside these re.I
+# patterns - `sox -d` records from the default device, `sox -D` is --no-dither.
 _PRIV_SENSOR_RX = {
     "camera": re.compile(r'/dev/video\d*|\bv4l2\b|v4l2src|\bpicamera2?\b|\blibcamera\b|\brpicam-(?:still|vid|hello|jpeg)\b'
                          r'|\braspi(?:still|vid)\b|cv2\.VideoCapture|\bVideoCapture\s*\(|\bnvarguscamerasrc\b|ffmpeg\s+[^#\n]*-f\s+v4l2', re.I),
     "microphone": re.compile(r'\barecord\b|\bpyaudio\b|\bsounddevice\b|\balsasrc\b|\bpulsesrc\b|SND_PCM_STREAM_CAPTURE'
-                             r'|ffmpeg\s+[^#\n]*-f\s+(?:alsa|pulse)\b|\bsox\s+-d\b|\brec\s+(?:-\S+\s+)*\S+\.(?:wav|flac|mp3)\b|speech_recognition|\bvosk\.|import\s+(?:vosk|whisper|faster_whisper)\b|whisper\.load_model', re.I),
+                             r'|ffmpeg\s+[^#\n]*-f\s+(?:alsa|pulse)\b|\bsox\s+(?-i:-d)\b|\brec\s+(?:-\S+\s+)*\S+\.(?:wav|flac|mp3)\b|speech_recognition|\bvosk\.|import\s+(?:vosk|whisper|faster_whisper)\b|whisper\.load_model', re.I),
     "face-tracking": re.compile(r'\bface_recognition\b|\bmediapipe\b|\bdlib\b|haarcascade|\bFaceMesh\b|\bFaceDetection\b|\bdeepface\b|\binsightface\b', re.I),
     "body-tracking": re.compile(r'\bopenpose\b|\bposenet\b|\bmovenet\b|mp\.solutions\.pose|\bmediapipe\b|\bBlazePose\b|\bultralytics\b|\byolo\w*\b', re.I),
     "rfid": re.compile(r'\bMFRC522\b|\brfid\b|\bpn532\b|\bnfcpy\b|\blibnfc\b', re.I),
@@ -3510,10 +3536,10 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"mid-show"))
 
     # Restarting fppd DIRECTLY (RestartFPPD(), systemctl/service/kill, `fpp -r`) is
-    # the anti-pattern. The sanctioned way is SetRestartFlag()/`setSetting restartFlag`
+    # the anti-pattern (`-r` is case-sensitive: `fpp -R` only reloads the schedule). The sanctioned way is SetRestartFlag()/`setSetting restartFlag`
     # (deferred, sequenced around a running show) - those are NOT flagged.
     hit = first(r'\bRestartFPPD\s*\(|\bfppd_restart\b|systemctl\s+(restart|stop|start)\s+fppd'
-                r'|service\s+fppd\s+(restart|stop)|(pkill|killall)\s+[^\n]*fppd|\bfpp\s+-r\b|\bfpp\s+--restart\b'
+                r'|service\s+fppd\s+(restart|stop)|(pkill|killall)\s+[^\n]*fppd|\bfpp\s+(?-i:-r)\b|\bfpp\s+--restart\b'
                 r'|/api/system/fppd/(restart|reboot)|api/system/restart')
     if hit:
         out.append(Finding(BLOCKER, "fppd-restart",
@@ -3844,6 +3870,8 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
     # evidence, fpp-LoRa) apart from a value that's actually an admin-configured
     # setting read from a CLI script (FPP-Plugin-Projector-Control's proj.php,
     # invoked via getopt - not web-reachable at all despite the same shape).
+    # An anchored regex / in_array guard on the same variable before the build
+    # line also clears it (_same_var_guard_before, fpp-data#205).
     hit = next(iter(_device_path_no_allowlist_hits(root)), None)
     if hit:
         out.append(Finding(BEST_PRACTICE, "device-path-no-allowlist",
@@ -4216,10 +4244,18 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
 
     # TLS certificate verification explicitly disabled - always a deliberate
     # opt-out, so this is low false-positive (contrast: `break-system-packages`).
+    # curl's short flags are case-sensitive and _grep() defaults to re.I, so the
+    # `-k` arm is scoped (?-i:): `-K` is --config (read a config file) and must
+    # not match. It counts as its own option token (whitespace before it) or
+    # inside a short-option bundle (`-sk`, `-fsSLk`) whose letters before the k
+    # are all boolean flags - in `-ofile-k` / `-Hkey` the k is an argument. An
+    # arg-taking flag may follow it (`-ko out`). Stops at `|` so `| sort -k2`
+    # after the curl isn't read as curl's own option.
     hit = first(r'CURLOPT_SSL_VERIFYPEER\s*,\s*(false|0)\b') \
         or first(r'CURLOPT_SSL_VERIFYHOST\s*,\s*(0|false)\b') \
         or first(r'verify\s*=\s*False\b') \
-        or first(r'curl\s+[^\n]*(-k\b|--insecure\b)', exts=(".sh",)) \
+        or first(r'curl\s+[^\n|]*(?<!\S)(?-i:-[#aBfgGiIjJlLMnNOpqRsSvVZ]*k[#aBfgGiIjJlLMnNOpqRsSvVZ]*'
+                 r'(?:[AbcCdDeEFhHKmoPQrtTuUwxXyYz]\S*)?(?![^\s\'"\\);`])|--(?:proxy-)?insecure\b)', exts=(".sh",)) \
         or first(r'''NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*['"]?0''')
     if hit:
         out.append(Finding(BLOCKER, "tls-verify-disabled",
@@ -4491,7 +4527,14 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         restart_flag_rx = re.compile(
             r'setSetting\s+(restartFlag|rebootFlag)\s+1'
             r'|setSetting\s*\(\s*["\'](restartFlag|rebootFlag)["\']'
-            r'|SetRestartFlag\s*\(|SetRebootFlag\s*\(')
+            r'|SetRestartFlag\s*\(|SetRebootFlag\s*\('
+            # PHP (e.g. a #!/usr/bin/php fpp_uninstall.sh): FPP core's own idiom
+            # (www/backup.php) - writes the same `restartFlag = "1"` line to
+            # media/settings that bash setSetting does, which /api/system/status
+            # reports and the UI banner reads. Two args only: a third (plugin) arg
+            # writes config/plugin.<name> instead. PHP function names are
+            # case-insensitive.
+            r'|(?i:\bWriteSettingToFile)\s*\(\s*["\'](restartFlag|rebootFlag)["\']\s*,\s*["\']?1["\']?\s*\)')
 
         def _restart_flag_gap(cands, required_if_absent):
             """Check one lifecycle slot (a tuple of candidate relative paths, most

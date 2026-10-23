@@ -49,7 +49,6 @@
             [ "fpp-haCommands", "https://raw.githubusercontent.com/jessica12ryan/fpp-haCommands/refs/heads/main/pluginInfo.json", "Automation", "2026-07-23" ],
             [ "fpp-hdmi-cec", "https://raw.githubusercontent.com/focusedonsound/fpp-hdmi-cec/refs/heads/main/pluginInfo.json", "Hardware", "2026-07-23" ],
             [ "fpp-sled-mailbox", "https://raw.githubusercontent.com/focusedonsound/fpp-sled-mailbox/refs/heads/main/pluginInfo.json", "Interaction", "2026-07-24" ],
-            [ "fpp-plugin-shelly", "https://raw.githubusercontent.com/stevefromNewcastle/fpp-plugin-shelly/refs/heads/master/pluginInfo.json", "Automation", "2026-08-07" ],
             [ "fpp-matrixscroller", "https://raw.githubusercontent.com/mikeneiderhauser/fpp-matrixscroller/refs/heads/master/pluginInfo.json", "Messaging", "2026-08-22" ],
             [ "fpp-plugin-buttonqueue", "https://raw.githubusercontent.com/computergeek1507/fpp-plugin-buttonqueue/refs/heads/main/pluginInfo.json", "Interaction", "2026-08-22" ],
             [ "fpp-ChannelEKG", "https://raw.githubusercontent.com/kylegrymonprez/fpp-ChannelEKG/refs/heads/main/pluginInfo.json", "Monitoring", "2026-08-23" ],
@@ -58,6 +57,8 @@
             [ "fpp-gameday", "https://raw.githubusercontent.com/derwin12/fpp-gameday/refs/heads/main/pluginInfo.json", "Automation", "2026-09-18" ],
             [ "fpp-plugin-SDCardRecover", "https://raw.githubusercontent.com/bobreese/fpp-plugin-SDCardRecover/refs/heads/main/pluginInfo.json", "Monitoring", "2026-09-21" ],
             [ "FPP-Plugin-DailyShowCountdown", "https://raw.githubusercontent.com/colinedwards308/FPP-Plugin-DailyShowCountdown/refs/heads/main/pluginInfo.json", "Messaging", "2026-09-21" ],
-            [ "fpp-plugin-textmylights", "https://raw.githubusercontent.com/thespica93/fpp-plugin-textmylights/refs/heads/stable/pluginInfo.json", "Messaging", "2026-10-03" ]
+            [ "fpp-plugin-textmylights", "https://raw.githubusercontent.com/thespica93/fpp-plugin-textmylights/refs/heads/stable/pluginInfo.json", "Messaging", "2026-10-03" ],
+            [ "fpp-EncoreRadio", "https://raw.githubusercontent.com/focusedonsound/fpp-EncoreRadio/refs/heads/master/pluginInfo.json", "Audio", "2026-10-05" ],
+            [ "fpp-santa-tracker", "https://raw.githubusercontent.com/AtlJim965/fpp-santa-tracker/refs/heads/main/pluginInfo.json", "Messaging", "2026-10-15" ]
         ]
 }
