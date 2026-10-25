@@ -100,6 +100,10 @@
             "type": "boolean",
             "description": "Set true to request removal from FPP's Plugin Manager list (retire the plugin). Because setting it requires write access to your repo, it also serves as proof of ownership for a de-list request. Existing installs are unaffected."
         },
+        "submissionToken": {
+            "type": "string",
+            "description": "Proof of ownership for a Plugin Manager listing request filed by someone other than the repo's GitHub owner: the CI asks for a value tied to that request (e.g. \"fpp-123\"), and since only someone with write access can add it, it proves control of the repo. fpp-data CI convention only; FPP itself never reads it. Safe to remove once the listing is approved."
+        },
         "versions": {
             "type": "array",
             "minItems": 1,

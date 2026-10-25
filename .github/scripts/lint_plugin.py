@@ -2444,21 +2444,63 @@ _PRIV_LISTEN_RX = re.compile(
     r'|\bListenStream\s*=|\bListenDatagram\s*=|^\s*Listen\s+\d+|<VirtualHost\s+[^>]*:\d+|\bnc\s+-l\b|\bsocat\b[^#\n]*-LISTEN|python3?\s+-m\s+http\.server\b'
     r'|\bwebsockets\.serve\s*\(|\bWebSocketServer\s*\(|\bcreateServer\s*\(|\bhttp\.listen\s*\(', re.I)
 _PRIV_PORT_RX = re.compile(r'(?<![\d.])(\d{2,5})(?![\d.])')
+# A unix-domain socket on the line itself: PHP's `stream_socket_server("unix://…")`,
+# a systemd `ListenStream=/run/x.sock` (or abstract `@name`).
+_PRIV_UNIX_LISTEN_RX = re.compile(r'unix://|\bListen(?:Stream|Datagram|SequentialPacket)\s*=\s*[/@]', re.I)
+_PRIV_LOOPBACK_RX = re.compile(r'127\.0\.0\.1|localhost|::1\b')
+
+
+def _priv_socket_var_is_local(line: str, text: str, consts: set[str]) -> bool:
+    """True when the line is `<var>.listen(N)` and every way the file binds or creates
+    `<var>` keeps it on the box: a `<var>.bind(...)` to loopback (literal or a
+    localhost constant) or to a non-tuple address of a socket the file creates as
+    AF_UNIX, or - with no bind in the file - only AF_UNIX creations. Python's
+    `listen(backlog)` says nothing about the address; the bind does.
+    (fpp-plugin-FalconBeat, PR #299: `srv.listen(8)` on a unix socket, with a
+    127.0.0.1 TCP fallback for non-Linux dev hosts.)"""
+    m = re.search(r'\b(\w+)\.listen\s*\(', line)
+    if not m:
+        return False
+    var = re.escape(m.group(1))
+    creates = re.findall(r'\b' + var + r'\s*=\s*socket\.socket\s*\(([^\n]*)', text)
+    is_unix = any("AF_UNIX" in c for c in creates)
+    binds = re.findall(r'\b' + var + r'\.bind\s*\(([^\n]*)', text)
+    if not binds:
+        return bool(creates) and all("AF_UNIX" in c for c in creates)
+    for arg in binds:
+        if _PRIV_LOOPBACK_RX.search(arg) or _priv_names_local_const(arg, consts):
+            continue
+        if is_unix and not arg.lstrip().startswith("("):
+            continue  # srv.bind(SOCK_PATH) on an AF_UNIX socket
+        return False
+    return True
 
 
 def _priv_listener_hits(root: str):
     """(relpath, lineno, line, port|None) for a server socket/listener in the plugin's
     own code, an Apache Listen/VirtualHost or a systemd .socket unit. A bind to
-    127.0.0.1/localhost is skipped: not reachable off-box, so not a privacy fact."""
+    127.0.0.1/localhost is skipped: not reachable off-box, so not a privacy fact.
+    So is a unix-domain socket (a path, not a port), for the same reason."""
     exts = _CFG_SCAN_EXTS + (".conf", ".socket", ".service", ".inc")
     consts: dict[str, set[str]] = {}
+    texts: dict[str, str] = {}
     for rel, i, line in _priv_lines(root, exts):
         if not _PRIV_LISTEN_RX.search(line) or re.search(r'127\.0\.0\.1|localhost|::1\b|std::bind|\.bind\s*\(\s*this', line):
             continue
+        if _PRIV_UNIX_LISTEN_RX.search(line):
+            continue
         if rel not in consts:
-            consts[rel] = _priv_local_consts(_read(os.path.join(root, rel)).splitlines())
+            texts[rel] = _read(os.path.join(root, rel))
+            consts[rel] = _priv_local_consts(texts[rel].splitlines())
         if _priv_names_local_const(line, consts[rel]):
             continue  # HOST = '127.0.0.1' ... HTTPServer((HOST, PORT), ...)
+        if _priv_socket_var_is_local(line, texts[rel], consts[rel]):
+            continue
+        # C: bind(fd, (struct sockaddr *)&addr, ...) / listen(fd, N) in a file that
+        # only ever builds a sockaddr_un (fpp-PulseMesh's control socket shape)
+        if re.search(r'(?<![.\w])(?:bind|listen)\s*\(', line) and "sockaddr_un" in texts[rel] \
+                and not re.search(r'sockaddr_in6?\b', texts[rel]):
+            continue
         ports = [int(p) for p in _PRIV_PORT_RX.findall(line) if 1 <= int(p) <= 65535]
         yield rel, i, line.strip(), (ports[0] if ports else None)
 
