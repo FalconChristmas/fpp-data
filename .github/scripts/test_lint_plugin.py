@@ -909,6 +909,28 @@ class LogNamingAlias(unittest.TestCase):
         self.assertEqual(self.hits('LOG_DIR="${LOGDIR:-/home/fpp/media/logs}"\nfind "$LOG_DIR" -name "*.log" -mtime +7 -delete\n'), [])
         self.assertEqual(self.hits("<?php\n$logDir = $settings['logDirectory'];\n$t = file_get_contents($logDir . '/fppd.log');\n", "x.php"), [])
 
+    def test_plugin_inside_repo_name_is_not_the_prefix(self):
+        # fpp-plugin-naughtynice (PR #297): "plugin-" inside the repo name passed.
+        self.assertEqual(self.hits('LOGFILE="${LOGDIR}/fpp-plugin-naughtynice.log"\n'), [1])
+        self.assertEqual(self.hits('LOG_DIR="${LOGDIR:-/home/fpp/media/logs}"\nLOG_FILE="$LOG_DIR/fpp-plugin-x.log"\n'), [2])
+
+    def test_real_prefix_is_silent(self):
+        self.assertEqual(self.hits('LOGFILE="${LOGDIR}/plugin-fpp-plugin-naughtynice.log"\n'), [])
+        self.assertEqual(self.hits('LOG_DIR="${LOGDIR}"\nLOG_FILE="$LOG_DIR/plugin-${REPO}.log"\n'), [])
+        self.assertEqual(self.hits("<?php\n$f = $settings['logDirectory'] . '/' . 'plugin-' . $repo . '.log';\n", "x.php"), [])
+        self.assertEqual(self.hits("<?php\n$f = $settings['logDirectory'] . \"/plugin-\" . $repo . \".log\";\n", "x.php"), [])
+        self.assertEqual(self.hits('log = os.path.join(os.environ["LOGDIR"], f"plugin-{REPO}.log")\n', "x.py"), [])
+
+
+class LogLocationAdvice(unittest.TestCase):
+    def test_suggested_name_has_plugin_prefix(self):
+        # The advice used to say `<repo>.log`, contradicting §1.1 and log-naming.
+        found = _lint({"scripts/fpp_install.sh": '#!/bin/bash\nset -e\necho hi >> /tmp/x.log\n'},
+                      "fpp-foo", codes=("log-location",))
+        msg = found["log-location"][1]
+        self.assertIn("plugin-fpp-foo.log", msg)
+        self.assertNotIn("/fpp-foo.log", msg)
+
 
 class BusyWaitPoll(unittest.TestCase):
     def hits(self, files):

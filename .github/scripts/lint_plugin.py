@@ -1194,6 +1194,11 @@ def _log_naming_hits(root: str, exts=SCRIPT_EXT):
     `LOG_FILE="$LOG_DIR/SDCardRecover.log"` on the next was invisible to the
     same-line-only regex, and the mis-named log never gets rotated by FPP."""
     rx = re.compile(r'(logDirectory|LOGDIR)\b.*\.log\b', re.I)
+    # "plugin-" must START the name (after a path separator, quote, or
+    # whitespace), not merely appear in it: a repo named fpp-plugin-<x> made
+    # `$LOGDIR/fpp-plugin-<x>.log` pass a plain substring test
+    # (fpp-plugin-naughtynice, PR #297, 2026-10-25).
+    prefix_rx = re.compile(r'''(?:^|[/\\"'\s=(])plugin-''', re.I)
     alias_rx = re.compile(r'^\s*(?:local\s+|export\s+|var\s+|let\s+|const\s+)?\$?(\w+)\s*=\s*[^=].*?\b(logDirectory|LOGDIR)\b', re.I)
     for path in _iter_files(root, exts):
         rel = os.path.relpath(path, root)
@@ -1205,14 +1210,14 @@ def _log_naming_hits(root: str, exts=SCRIPT_EXT):
                 continue
             if re.search(r'\b(?:fppd|fpp|fppinit|apache2(?:-\w+)?)\.log\b', line, re.I):
                 continue  # reading/tailing FPP's own log isn't naming one
-            if rx.search(line) and "plugin-" not in line.lower():
+            if rx.search(line) and not prefix_rx.search(line):
                 yield rel, i, line.strip()
                 break
             m = alias_rx.match(line)
             if m and m.group(1).lower() not in ('logdir', 'logdirectory'):
                 aliases.add(m.group(1))
                 continue
-            if aliases and '.log' in line.lower() and 'plugin-' not in line.lower():
+            if aliases and '.log' in line.lower() and not prefix_rx.search(line):
                 # `$ALIAS`/`${ALIAS}` (shell, PHP) or bare word `ALIAS` (Python, JS)
                 # used in an expression that NAMES a log file - an assignment,
                 # a redirect/tee target, or an open-for-write - not one that
@@ -4701,19 +4706,19 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         if bad_hit:
             ext = os.path.splitext(bad_hit[0])[1].lower()
             if ext == ".php":
-                howto = (f'`$settings[\'logDirectory\']."/{repo}.log"` (requires '
+                howto = (f'`$settings[\'logDirectory\']."/plugin-{repo}.log"` (requires '
                           f'`include_once("/opt/fpp/www/common.php")` first - that\'s what '
                           f'populates the global `$settings` array)')
             elif ext == ".sh":
-                howto = (f'`$(getSetting logDirectory)/{repo}.log` (requires '
+                howto = (f'`$(getSetting logDirectory)/plugin-{repo}.log` (requires '
                           f'`. /opt/fpp/scripts/common` first - that\'s where `getSetting` is '
                           f'defined)')
             else:
-                howto = "FPP's log directory setting (`logDirectory`)"
+                howto = f"`plugin-{repo}.log` in FPP's log directory setting (`logDirectory`)"
             out.append(Finding(BEST_PRACTICE, "log-location",
                        f"writes a log outside FPP's logs directory ({bad_hit[0]}:{bad_hit[1]}: "
                        f"`{bad_hit[2]}`).\n"
-                       f"  - Log to {howto} instead, which resolves to /home/fpp/media/logs/{repo}.log "
+                       f"  - Log to {howto} instead, which resolves to /home/fpp/media/logs/plugin-{repo}.log "
                        f"today, so it's rotated and included in the Support Zip"))
 
     # The reverse problem: a non-.log file (PID file, sqlite DB, command queue,
