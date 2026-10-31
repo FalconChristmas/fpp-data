@@ -4501,7 +4501,14 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
         first(r'\bunregisterPluginApi\s*\(', exts=(".cpp", ".cc", ".cxx")))
     has_own_register_apis = first(r'\bregisterApis\s*\(\s*\)', exts=(".cpp", ".cc", ".cxx"))
     direct_drogon_hit = first(r'drogon::app\(\)\s*\.\s*registerHandler\s*\(', exts=(".cpp", ".cc", ".cxx"))
-    unsafe_direct_routes = ships_native and bool(has_own_register_apis and direct_drogon_hit)
+    # The WebSocket form of the same mistake: a plugin's own Drogon
+    # WebSocketController (it registers itself the moment the .so is loaded)
+    # or a direct registerWebSocketController() call. Headers count here - a
+    # controller is a class, often declared in one. A WebSocketClient is a
+    # different thing (an outbound connection) and doesn't match.
+    own_ws_controller_hit = first(r'\bWebSocketController\s*<|\bregisterWebSocketController(Regex)?\s*\(',
+                                  exts=(".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh"))
+    unsafe_direct_routes = ships_native and bool((has_own_register_apis and direct_drogon_hit) or own_ws_controller_hit)
     # A plugin defining createChannelOutput() (the ChannelOutputPlugin factory -
     # NOT merely inheriting the interface, which FPP's convenience base class
     # does unconditionally) is always refused a runtime unload while that
@@ -5697,6 +5704,26 @@ def lint_plugin_dir(root: str, repo_name: str | None = None, info: dict | None =
                    f"  - Route the registration/teardown through registerPluginApi()/"
                    f"unregisterPluginApi() instead so FPP owns the route slot and disarms it (waiting "
                    f"for any in-flight request to finish) before the plugin object is destroyed"))
+
+    # Same hazard for a WebSocket route, and worse: there is no registerApis()
+    # gate to wait for, since a WebSocketController's WS_PATH_LIST registers
+    # itself with Drogon as a static initializer the moment the .so is loaded.
+    # On a Plugin Manager install that is after Drogon is running, when its
+    # route table is frozen, and nothing ever takes the route back, so after an
+    # unload it points at a controller whose code may be unmapped. FPP 10.4 added
+    # registerPluginWebSocket()/unregisterPluginWebSocket() for exactly this.
+    if ships_native and own_ws_controller_hit:
+        out.append(Finding(BLOCKER, "own-websocket-controller",
+                   f"serves a WebSocket from its own Drogon WebSocketController "
+                   f"({own_ws_controller_hit[0]}:{own_ws_controller_hit[1]}: `{own_ws_controller_hit[2]}`) - "
+                   f"that registers the route with Drogon as soon as the plugin's .so is loaded, which on "
+                   f"an install from the Plugin Manager is after Drogon has started (its route table is "
+                   f"frozen by then), and Drogon has no way to remove it again.\n"
+                   f"  - FPP unloads plugins on every install/uninstall/upgrade, so the route outlives the "
+                   f"plugin: the next connection to it runs code from a plugin that is gone.\n"
+                   f"  - Serve it through FPPPlugins::registerPluginWebSocket()/unregisterPluginWebSocket() "
+                   f"(PluginWebSocket.h, FPP 10.4+; clients connect to /fppdws/plugin?name=<name>) so FPP "
+                   f"owns the route and disarms it, closing its connections, before the plugin is destroyed"))
 
     # A plugin registering C++ Command objects (CommandManager::addCommand(),
     # not the commands/descriptions.json script mechanism) is expected to take
