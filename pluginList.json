@@ -62,6 +62,7 @@
             [ "fpp-EncoreRadio", "https://raw.githubusercontent.com/focusedonsound/fpp-EncoreRadio/refs/heads/master/pluginInfo.json", "Audio", "2026-10-05" ],
             [ "fpp-santa-tracker", "https://raw.githubusercontent.com/AtlJim965/fpp-santa-tracker/refs/heads/main/pluginInfo.json", "Messaging", "2026-10-15" ],
             [ "fpp-multisync-volume", "https://raw.githubusercontent.com/Promic2/fpp-multisync-volume/refs/heads/main/pluginInfo.json", "Automation", "2026-10-18" ],
-            [ "fpp-plugin-FalconBeat", "https://raw.githubusercontent.com/GraphicHealer/fpp-plugin-FalconBeat/refs/heads/master/pluginInfo.json", "Audio", "2026-10-23" ]
+            [ "fpp-plugin-FalconBeat", "https://raw.githubusercontent.com/GraphicHealer/fpp-plugin-FalconBeat/refs/heads/master/pluginInfo.json", "Audio", "2026-10-23" ],
+            [ "AirDefender", "https://raw.githubusercontent.com/G-Hancox/AirDefender/refs/heads/master/pluginInfo.json", "Automation", "2026-10-26" ]
         ]
 }
