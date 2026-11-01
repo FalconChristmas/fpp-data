@@ -1340,3 +1340,41 @@ class CaseSensitiveFlags(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnWebSocketController(unittest.TestCase):
+    """own-websocket-controller: a plugin's own Drogon WebSocketController (or a
+    direct registerWebSocketController call) is a BLOCKER; serving a WebSocket
+    through registerPluginWebSocket() or opening an outbound WebSocketClient is
+    not."""
+
+    MK = "include $(SRCDIR)/makefiles/common/setup.mk\nall: libfpp-foo.$(SHLIB_EXT)\n"
+
+    def findings(self, files: dict):
+        return _lint({"Makefile": self.MK, **files}, "fpp-foo",
+                     codes=("own-websocket-controller",))
+
+    def test_controller_in_header_fires_blocker(self):
+        found = self.findings({"src/Feed.h": (
+            "#include <drogon/WebSocketController.h>\n"
+            "class Feed : public drogon::WebSocketController<Feed> {\n"
+            "    WS_PATH_LIST_BEGIN\n    WS_PATH_ADD(\"/feed\");\n    WS_PATH_LIST_END\n};\n")})
+        self.assertEqual(found["own-websocket-controller"][0], L.BLOCKER)
+        self.assertIn("src/Feed.h:2", found["own-websocket-controller"][1])
+        self.assertIn("registerPluginWebSocket()", found["own-websocket-controller"][1])
+
+    def test_direct_registration_fires(self):
+        found = self.findings({"plugin.cpp": (
+            'void arm() { drogon::app().registerWebSocketController("/feed", "Feed"); }\n')})
+        self.assertIn("own-websocket-controller", found)
+
+    def test_plugin_websocket_and_client_are_silent(self):
+        self.assertEqual(self.findings({"plugin.cpp": (
+            "#include \"PluginWebSocket.h\"\n#include <drogon/WebSocketClient.h>\n"
+            "void arm() { FPPPlugins::registerPluginWebSocket(\"fpp-foo/feed\", {}); }\n"
+            "auto c = drogon::WebSocketClient::newWebSocketClient(\"ws://peer\");\n")}), {})
+
+    def test_script_plugin_is_not_checked(self):
+        # Without a native build there is no .so to load the controller from.
+        self.assertEqual(_lint({"notes/Feed.h": "class Feed : public drogon::WebSocketController<Feed> {};\n"},
+                               "fpp-foo", codes=("own-websocket-controller",)), {})
